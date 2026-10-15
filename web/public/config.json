@@ -61,7 +61,7 @@
       }
     ],
     "temperature": 0.3,
-    "maxTokens": 1024,
+    "maxTokens": 16384,
     "contextChars": 5000,
     "maxMessages": 10
   },
