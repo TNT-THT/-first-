@@ -5,8 +5,8 @@
     "https://*.hydro.ac"
   ],
   "access": {
-    "salt": "16d4f93c148ed8e1708966467a7515f5",
-    "passwordSha256": "d5e359881d9391334922bd6beb7e47eeb11f2e0a55b244a95c585621ae9fa8fb"
+    "salt": "aedc28cca055a65558cdd9a4905b69dd",
+    "passwordSha256": "00b79b069a9e26bfed58f6038e86eb7c5e33dfe81ffad7eee863972fd8564090"
   },
   "webllm": {
     "defaultModel": "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
