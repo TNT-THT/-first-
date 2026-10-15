@@ -1,0 +1,9 @@
+services:
+  oj-ai:
+    build: .
+    env_file: .env
+    ports:
+      - "127.0.0.1:3000:3000"   # 只监听本机，由 Nginx/Caddy 对外提供 HTTPS
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # 连接宿主机上的 Ollama/vLLM 时使用
+    restart: unless-stopped

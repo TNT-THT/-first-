@@ -1,0 +1,26 @@
+{
+  "name": "oj-ai-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "可嵌入 iframe 的开源大模型刷题助手（支持 Markdown、LaTeX、代码高亮、多轮会话）",
+  "type": "module",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "dev:web": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build --config web/vite.config.js",
+    "start": "node server/index.js",
+    "test": "node --test test/unit.test.js test/server.test.js"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.17",
+    "express": "^4.22.3",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.16.47",
+    "markdown-it": "^14.3.2"
+  },
+  "devDependencies": {
+    "vite": "^5.4.21"
+  }
+}
