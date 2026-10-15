@@ -15,13 +15,17 @@ The first repository of me,and first of "炸药工厂"
 - **postMessage 填题**：父页面可以把题目文本填入输入框（默认不自动发送）。
 - **Markdown、代码高亮、一键复制、LaTeX 公式**（KaTeX，本地打包）。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
-- **模型可选**：Qwen2.5-Coder 1.5B（较小、入门）或 3B（更准确）。
+- **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）：
+  Qwen2.5-Coder 0.5B / 1.5B / 3B / 7B、Qwen3 1.7B / 4B / 8B、DeepSeek-R1 蒸馏 1.5B / 7B、Llama 3.2 3B、Llama 3.1 8B、Phi-4 mini。
+- **推理模型的思考过程会被隐藏**：Qwen3、DeepSeek-R1 等模型输出的 `<think>` 内容不展示，只显示最终回答，也不计入历史上下文。
+- **系统提示词**可在 `config.json` 的 `systemPrompt` 中自由修改，默认不限制话题与回答格式。
 
 ## 硬件与浏览器要求
 
 - 需要 **WebGPU**：桌面端最新版 Chrome 或 Edge。
-- 显存 / 共享显存建议：1.5B 模型约 1.6 GB，3B 模型约 2.5 GB。
-- 首次使用时需要从 Hugging Face 下载模型权重（1.5B 与 3B 都是较大的文件，耗时取决于网络），下载后由浏览器缓存，之后不再需要下载。
+- 显存 / 共享显存建议（WebLLM 估算值，q4f16 量化）：0.5B 约 0.9 GB，1.5B 约 1.6 GB，1.7B 约 2.0 GB，3B 约 2.5 GB，4B 约 3.4 GB，7B / 8B 约 5–5.7 GB。
+- 首次使用时需要从 Hugging Face 下载模型权重（文件较大，耗时取决于网络），下载后由浏览器缓存，之后不再需要下载。
+- 推理模型（Qwen3、DeepSeek-R1）会先输出较长的思考过程，默认 `maxTokens` 为 1024，可能不足以写完答案；如遇到“只输出了思考过程”的提示，可在 `config.json` 中调大 `maxTokens`，或换用非推理模型。
 - 中国大陆网络访问 Hugging Face 可能需要代理工具，请先确认代理已开启并允许访问 `huggingface.co`。
 - 如果浏览器不支持 WebGPU，页面会在状态栏给出提示，而不是静默失败。
 
