@@ -2,6 +2,8 @@
  * 浏览器内推理（WebLLM / WebGPU）。模型权重从 Hugging Face 下载一次后缓存在浏览器中，
  * 之后的对话完全在本机完成，不需要服务器，也不需要 API Key。
  */
+import { buildModelList } from '../model-source.js';
+
 export const WEBGPU_MISSING =
   '当前浏览器不支持 WebGPU，无法运行本地模型。请使用最新版 Chrome 或 Edge（桌面端），并确认显卡驱动正常。';
 
@@ -32,20 +34,26 @@ export function getLoadedModelId() {
   return loadedId;
 }
 
-export async function loadWebLLMEngine(modelId, onProgress) {
+export async function loadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecords } = {}) {
   if (!(await checkWebGPU())) {
     throw new Error(WEBGPU_MISSING);
   }
   const progress = (r) => onProgress?.({ progress: r.progress ?? 0, text: r.text || '' });
   // 动态导入：避免把较大的推理库打进首屏
-  const { CreateWebWorkerMLCEngine } = await import('@mlc-ai/web-llm');
+  const { CreateWebWorkerMLCEngine, prebuiltAppConfig } = await import('@mlc-ai/web-llm');
+  // 合并自定义记录；配置了 mirrorOwner 时权重从自己的 Hugging Face 仓库下载
+  const appConfig = {
+    ...prebuiltAppConfig,
+    model_list: buildModelList(prebuiltAppConfig.model_list, extraRecords, mirrorOwner),
+  };
 
   loadedId = null;
   if (!engine) {
     const worker = new Worker(new URL('../llm-worker.js', import.meta.url), { type: 'module' });
-    engine = await CreateWebWorkerMLCEngine(worker, modelId, { initProgressCallback: progress });
+    engine = await CreateWebWorkerMLCEngine(worker, modelId, { initProgressCallback: progress, appConfig });
   } else {
     engine.setInitProgressCallback(progress);
+    engine.setAppConfig(appConfig);
     await engine.reload(modelId);
   }
   loadedId = modelId;

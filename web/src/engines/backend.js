@@ -48,7 +48,7 @@ function createWebLLMBackend(cfg) {
     async ensureReady(onProgress) {
       if (getLoadedModelId() === modelId) return;
       if (!(await checkWebGPU())) throw new Error(WEBGPU_MISSING);
-      await loadWebLLMEngine(modelId, onProgress);
+      await loadWebLLMEngine(modelId, onProgress, { mirrorOwner: cfg.mirrorOwner, extraRecords: cfg.extraRecords });
     },
     async *stream({ messages, signal }) {
       yield* streamWebLLM({

@@ -10,22 +10,67 @@
   },
   "webllm": {
     "defaultModel": "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
+    "mirrorOwner": "",
     "models": [
       {
         "id": "Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 0.5B（最小）"
+        "label": "Qwen2.5-Coder 0.5B（非推理，最小）"
       },
       {
         "id": "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 1.5B（默认）"
+        "label": "Qwen2.5-Coder 1.5B（非推理，默认）"
       },
       {
         "id": "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 3B"
+        "label": "Qwen2.5-Coder 3B（非推理）"
       },
       {
         "id": "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 7B"
+        "label": "Qwen2.5-Coder 7B（非推理）"
+      },
+      {
+        "id": "Qwen2.5-Math-1.5B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5-Math 1.5B（非推理，数学）"
+      },
+      {
+        "id": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5 3B（非推理）"
+      },
+      {
+        "id": "Qwen2.5-7B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5 7B（非推理）"
+      },
+      {
+        "id": "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+        "label": "Llama 3.2 1B（非推理）"
+      },
+      {
+        "id": "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+        "label": "Llama 3.2 3B（非推理）"
+      },
+      {
+        "id": "gemma-2-2b-it-q4f16_1-MLC",
+        "label": "Gemma 2 2B（非推理）"
+      },
+      {
+        "id": "Mistral-7B-Instruct-v0.3-q4f16_1-MLC",
+        "label": "Mistral 7B v0.3（非推理）"
+      },
+      {
+        "id": "SmolLM2-1.7B-Instruct-q4f16_1-MLC",
+        "label": "SmolLM2 1.7B（非推理）"
+      },
+      {
+        "id": "Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
+        "label": "Hermes 3 3B（非推理）"
+      },
+      {
+        "id": "Phi-4-mini-instruct-q4f16_1-MLC",
+        "label": "Phi-4 mini（非推理）"
+      },
+      {
+        "id": "Llama-3.1-8B-Instruct-q4f16_1-MLC",
+        "label": "Llama 3.1 8B（非推理）"
       },
       {
         "id": "Qwen3-1.7B-q4f16_1-MLC",
@@ -41,29 +86,29 @@
       },
       {
         "id": "DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
-        "label": "DeepSeek-R1 1.5B（推理）"
+        "label": "DeepSeek-R1 1.5B（推理，实验性）"
       },
       {
         "id": "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC",
         "label": "DeepSeek-R1 7B（推理）"
-      },
-      {
-        "id": "Llama-3.2-3B-Instruct-q4f16_1-MLC",
-        "label": "Llama 3.2 3B"
-      },
-      {
-        "id": "Llama-3.1-8B-Instruct-q4f16_1-MLC",
-        "label": "Llama 3.1 8B"
-      },
-      {
-        "id": "Phi-4-mini-instruct-q4f16_1-MLC",
-        "label": "Phi-4 mini"
       }
     ],
     "temperature": 0.3,
     "maxTokens": 16384,
     "contextChars": 5000,
-    "maxMessages": 10
+    "maxMessages": 10,
+    "extraRecords": [
+      {
+        "model": "https://huggingface.co/mlc-ai/DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
+        "model_id": "DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
+        "model_lib": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen2-1.5B-Instruct-q4f16_1_cs1k-webgpu.wasm",
+        "low_resource_required": true,
+        "vram_required_MB": 1629.75,
+        "overrides": {
+          "context_window_size": 4096
+        }
+      }
+    ]
   },
   "systemPrompt": "你是一个有帮助的 AI 助手，可以回答各类问题。请使用用户提问的语言回答。数学公式使用 LaTeX（行内用 $...$，独立公式用 $$...$$），代码使用带语言标注的 Markdown 代码块。"
 }

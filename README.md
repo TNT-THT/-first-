@@ -16,7 +16,9 @@ The first repository of me,and first of "炸药工厂"
 - **Markdown、代码高亮、一键复制、LaTeX 公式**（KaTeX，本地打包）。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）：
-  Qwen2.5-Coder 0.5B / 1.5B / 3B / 7B、Qwen3 1.7B / 4B / 8B、DeepSeek-R1 蒸馏 1.5B / 7B、Llama 3.2 3B、Llama 3.1 8B、Phi-4 mini。
+  共 20 个：非推理模型 15 个（Qwen2.5-Coder 0.5B–7B、Qwen2.5 3B/7B、Qwen2.5-Math 1.5B、Llama 3.2 1B/3B、Llama 3.1 8B、Gemma 2 2B、Mistral 7B v0.3、SmolLM2 1.7B、Hermes 3 3B、Phi-4 mini），
+  推理模型 5 个（Qwen3 1.7B / 4B / 8B、DeepSeek-R1 蒸馏 1.5B / 7B）。
+- **自定义模型记录**：`webllm.extraRecords` 用于保留 WebLLM 内置列表中被注释掉、但仍可使用的模型（当前是 DeepSeek-R1 蒸馏 1.5B）。这些记录不会被升级覆盖，WebLLM 官方注释提示该模型可能存在正确性问题，请以实际输出为准。
 - **推理模型的思考过程会被隐藏**：Qwen3、DeepSeek-R1 等模型输出的 `<think>` 内容不展示，只显示最终回答，也不计入历史上下文。
 - **系统提示词**可在 `config.json` 的 `systemPrompt` 中自由修改，默认不限制话题与回答格式。
 
