@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>OJ 刷题助手</title>
+    <meta name="description" content="可嵌入 iframe 的算法刷题助手，浏览器内运行开源大模型" />
+    <link rel="icon" href="data:," />
+  </head>
+  <body>
+    <div id="app" class="app">
+      <!-- 登录页：行内表单，不使用弹窗 -->
+      <section id="login" class="login" hidden>
+        <form id="loginForm" class="login-card">
+          <div class="logo">AI</div>
+          <h1 id="loginTitle">OJ 刷题助手</h1>
+          <p class="muted">请输入站点访问口令</p>
+          <input id="password" type="password" autocomplete="current-password" placeholder="访问口令" required />
+          <button id="loginBtn" type="submit" class="btn primary block">登录</button>
+          <p id="loginError" class="error" role="alert"></p>
+        </form>
+      </section>
+
+      <div id="main" class="main" hidden>
+        <aside id="sidebar" class="sidebar">
+          <div class="brand">
+            <span class="logo">AI</span>
+            <span id="brandName" class="brand-name">OJ 刷题助手</span>
+          </div>
+          <button id="newChatBtn" type="button" class="btn primary block">+ 新建会话</button>
+          <nav id="sessionList" class="session-list" data-session-list aria-label="历史会话"></nav>
+          <div class="sidebar-foot">
+            <button id="clearAllBtn" type="button" class="btn ghost small">清空全部</button>
+            <select id="modelSelect" class="model-select" hidden aria-label="选择模型"></select>
+            <span id="modelLabel" class="muted small"></span>
+          </div>
+        </aside>
+
+        <section class="chat">
+          <header class="chat-head">
+            <button id="historyBtn" type="button" class="btn ghost small history-toggle" aria-expanded="false">历史</button>
+            <span id="chatTitle" class="chat-title"></span>
+            <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
+            <div id="historyPanel" class="history-panel" hidden>
+              <div class="history-list" data-session-list></div>
+            </div>
+          </header>
+
+          <div id="messages" class="messages" role="log" aria-live="polite"></div>
+
+          <div id="statusBar" class="status-bar" role="status" hidden>
+            <div class="status-text" id="statusText"></div>
+            <div class="progress" id="statusProgress" hidden><i id="statusBarFill"></i></div>
+          </div>
+
+          <form id="composer" class="composer">
+            <textarea id="input" rows="1" placeholder="描述题目或粘贴代码。Enter 发送，Shift+Enter 换行"></textarea>
+            <button id="sendBtn" type="submit" class="btn primary">发送</button>
+            <button id="stopBtn" type="button" class="btn danger" hidden>停止</button>
+          </form>
+        </section>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
