@@ -1,3 +1,5 @@
+import { sha256TextHex } from './sha256.js';
+
 /**
  * 纯静态站点的访问口令（软门禁）。
  * 口令的 SHA-256 哈希（加盐）保存在 config.json 中，明文不会出现在仓库里。
@@ -10,10 +12,23 @@ export function hasAccessGate(access) {
   return !!access?.passwordSha256;
 }
 
+/**
+ * 计算 UTF-8 文本的 SHA-256（十六进制）。
+ * 安全上下文中优先用 crypto.subtle；在第三方页面的 sandbox iframe 等非安全上下文中
+ * crypto.subtle 不存在，此时回退到纯 JavaScript 实现，结果完全相同。
+ */
 export async function sha256Hex(text) {
-  const data = new TextEncoder().encode(text);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle && typeof subtle.digest === 'function') {
+    try {
+      const data = new TextEncoder().encode(text);
+      const digest = await subtle.digest('SHA-256', data);
+      return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+    } catch {
+      /* 落到下面的纯 JavaScript 实现 */
+    }
+  }
+  return sha256TextHex(text);
 }
 
 export async function verifyAccessPassword(access, password) {
