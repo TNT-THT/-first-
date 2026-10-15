@@ -8,6 +8,7 @@ import { createToken, verifyToken, checkPassword } from '../server/auth.js';
 import { createHash } from 'node:crypto';
 import { sha256TextHex } from '../web/src/sha256.js';
 import { stripThinking, hasThinking } from '../web/src/think.js';
+import { buildModelList } from '../web/src/model-source.js';
 import { sha256Hex, verifyAccessPassword } from '../web/src/access.js';
 
 test('Markdown：代码块带语言标签与复制按钮，并做语法高亮', () => {
@@ -155,4 +156,22 @@ test('推理模型：无思考标签的普通回答保持原样', () => {
   assert.equal(stripThinking(plain), plain);
   assert.equal(hasThinking(plain), false);
   assert.equal(hasThinking('<think>x'), true);
+});
+
+test('模型列表：自定义记录加入，同 model_id 的内置记录被替换', () => {
+  const builtin = [{ model_id: 'A', model: 'x' }, { model_id: 'B', model: 'y' }];
+  const extra = [{ model_id: 'B', model: 'custom-B' }, { model_id: 'C', model: 'custom-C' }];
+  const list = buildModelList(builtin, extra, '');
+  assert.deepEqual(list.map((r) => r.model_id), ['A', 'B', 'C']);
+  assert.equal(list.find((r) => r.model_id === 'B').model, 'custom-B');
+});
+
+test('模型列表：设置 mirrorOwner 后所有模型地址指向自己的 Hugging Face 仓库', () => {
+  const list = buildModelList([{ model_id: 'A', model: 'x' }], [], 'my-name');
+  assert.equal(list[0].model, 'https://huggingface.co/my-name/A');
+});
+
+test('模型列表：mirrorOwner 含斜杠或非法字符时拒绝', () => {
+  assert.throws(() => buildModelList([{ model_id: 'A', model: 'x' }], [], 'a/b'));
+  assert.throws(() => buildModelList([{ model_id: 'A', model: 'x' }], [], '../evil'));
 });
