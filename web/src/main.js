@@ -2,6 +2,7 @@ import 'katex/dist/katex.min.css';
 import './style.css';
 import DOMPurify from 'dompurify';
 import { renderMarkdown } from './markdown.js';
+import { hasThinking, stripThinking } from './think.js';
 import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
@@ -141,11 +142,13 @@ function typingHtml(label) {
 function paintAssistant(bubble, msg, { streaming = false, label = '正在思考…' } = {}) {
   bubble.classList.toggle('error', !!msg.error);
   bubble.classList.toggle('streaming', streaming);
-  if (!msg.content && streaming) {
+  // 推理模型的思考过程不展示，只显示最终回答
+  const visible = stripThinking(msg.content);
+  if (!visible && streaming) {
     bubble.innerHTML = typingHtml(label);
     return;
   }
-  let html = sanitize(renderMarkdown(msg.content || ''));
+  let html = sanitize(renderMarkdown(visible));
   if (msg.stopped) html += '<p class="note">（已停止生成）</p>';
   bubble.innerHTML = html;
 }
@@ -285,8 +288,12 @@ async function send(rawText) {
     }
     if (frame) cancelAnimationFrame(frame);
     if (controller.signal.aborted) assistantMsg.stopped = true;
+    const raw = assistantMsg.content;
+    assistantMsg.content = stripThinking(raw);
     if (!assistantMsg.content && !assistantMsg.stopped) {
-      assistantMsg.content = '（模型没有返回内容，请重试）';
+      assistantMsg.content = hasThinking(raw)
+        ? '（模型只输出了思考过程，没有给出答案。可以重试，或换一个模型。）'
+        : '（模型没有返回内容，请重试）';
       assistantMsg.error = true;
     }
     paintAssistant(bubble, assistantMsg);
@@ -312,6 +319,8 @@ async function send(rawText) {
       if (state.backend.mode === 'webllm') refreshIdleStatus();
     }
   } finally {
+    // 历史记录只保存最终回答，不保存思考过程
+    assistantMsg.content = stripThinking(assistantMsg.content);
     state.streaming = null;
     setBusy(false);
     session.updatedAt = Date.now();

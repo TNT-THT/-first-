@@ -7,6 +7,7 @@ import { validateMessages } from '../server/chat.js';
 import { createToken, verifyToken, checkPassword } from '../server/auth.js';
 import { createHash } from 'node:crypto';
 import { sha256TextHex } from '../web/src/sha256.js';
+import { stripThinking, hasThinking } from '../web/src/think.js';
 import { sha256Hex, verifyAccessPassword } from '../web/src/access.js';
 
 test('Markdown：代码块带语言标签与复制按钮，并做语法高亮', () => {
@@ -133,4 +134,25 @@ test('访问口令：sha256Hex 结果与标准一致；无 crypto.subtle 时仍�
     Object.defineProperty(globalThis, 'crypto', { value: cryptoObj, configurable: true, writable: true });
   }
   assert.ok(desc === undefined || typeof desc === 'object');
+});
+
+test('推理模型：隐藏完整的 <think> 思考段落，只保留最终回答', () => {
+  assert.equal(stripThinking('<think>\n先想想\n</think>\n\n答案是 42'), '答案是 42');
+  assert.equal(stripThinking('<think>a</think>X<think>b</think>Y'), 'XY');
+});
+
+test('推理模型：只有结束标签（开始标签在模板中）时，丢弃结束标签之前的内容', () => {
+  assert.equal(stripThinking('思考内容……\n</think>\n最终答案'), '最终答案');
+});
+
+test('推理模型：流式输出中未闭合的思考内容先隐藏，不展示半截思考', () => {
+  assert.equal(stripThinking('<think>正在思考……'), '');
+  assert.equal(stripThinking('<think>思考 </think>回答开始，'), '回答开始，');
+});
+
+test('推理模型：无思考标签的普通回答保持原样', () => {
+  const plain = '二分答案，复杂度 $O(n\\log n)$';
+  assert.equal(stripThinking(plain), plain);
+  assert.equal(hasThinking(plain), false);
+  assert.equal(hasThinking('<think>x'), true);
 });

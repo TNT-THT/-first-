@@ -24,9 +24,8 @@ export function loadConfig(env = process.env) {
 
     systemPrompt:
       env.SYSTEM_PROMPT ||
-      '你是一名资深的算法竞赛教练，正在帮助用户解决 OJ（在线评测）题目。' +
-        '请先给出思路与关键观察，再给出复杂度分析，最后给出代码（默认 C++，除非用户指定其他语言）。' +
-        '数学公式请使用 LaTeX，行内用 $...$，独立公式用 $$...$$。回答应简洁、准确。',
+      '你是一个有帮助的 AI 助手，可以回答各类问题。请使用用户提问的语言回答。' +
+        '数学公式使用 LaTeX（行内用 $...$，独立公式用 $$...$$），代码使用带语言标注的 Markdown 代码块。',
 
     // 允许嵌入本站的父页面来源，写入 CSP frame-ancestors。'*' 表示任何站点都可以嵌入。
     frameAncestors: env.FRAME_ANCESTORS || '*',
