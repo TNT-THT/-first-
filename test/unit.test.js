@@ -5,6 +5,9 @@ import { isAllowedOrigin } from '../web/src/origin.js';
 import { buildContext } from '../web/src/store.js';
 import { validateMessages } from '../server/chat.js';
 import { createToken, verifyToken, checkPassword } from '../server/auth.js';
+import { createHash } from 'node:crypto';
+import { sha256TextHex } from '../web/src/sha256.js';
+import { sha256Hex, verifyAccessPassword } from '../web/src/access.js';
 
 test('Markdown：代码块带语言标签与复制按钮，并做语法高亮', () => {
   const html = renderMarkdown('```cpp\nint main(){ return 0; }\n```');
@@ -98,4 +101,36 @@ test('密码比较', () => {
   assert.equal(checkPassword('abcdefgh', 'abcdefg'), false);
   assert.equal(checkPassword('', ''), false);
   assert.equal(checkPassword('abcdefgh', undefined), false);
+});
+
+test('SHA-256 纯 JavaScript 回退实现与标准结果一致（含填充边界与中文）', () => {
+  const samples = ['', 'abc', 'Iamjulao', '中文口令：iamjulao', 'x'.repeat(1000)];
+  for (let n = 0; n <= 130; n++) samples.push('a'.repeat(n));
+  for (const s of samples) {
+    const expected = createHash('sha256').update(s, 'utf8').digest('hex');
+    assert.equal(sha256TextHex(s), expected, `长度 ${s.length} 的输入不一致`);
+  }
+});
+
+test('访问口令：sha256Hex 结果与标准一致；无 crypto.subtle 时仍可校验口令', async () => {
+  const text = 'saltvalue:iamjulao';
+  assert.equal(await sha256Hex(text), createHash('sha256').update(text, 'utf8').digest('hex'));
+
+  const salt = 'aedc28cca055a65558cdd9a4905b69dd';
+  const access = { salt, passwordSha256: createHash('sha256').update(`${salt}:iamjulao`, 'utf8').digest('hex') };
+  assert.equal(await verifyAccessPassword(access, 'iamjulao'), true);
+  assert.equal(await verifyAccessPassword(access, 'Iamjulao'), false);
+
+  // 模拟第三方 sandbox iframe：crypto.subtle 不存在
+  const cryptoObj = globalThis.crypto;
+  const desc = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(cryptoObj), 'subtle');
+  Object.defineProperty(globalThis, 'crypto', { value: { randomUUID: cryptoObj.randomUUID }, configurable: true });
+  try {
+    assert.equal(globalThis.crypto.subtle, undefined);
+    assert.equal(await verifyAccessPassword(access, 'iamjulao'), true);
+    assert.equal(await verifyAccessPassword(access, 'wrong'), false);
+  } finally {
+    Object.defineProperty(globalThis, 'crypto', { value: cryptoObj, configurable: true, writable: true });
+  }
+  assert.ok(desc === undefined || typeof desc === 'object');
 });
