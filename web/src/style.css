@@ -431,3 +431,40 @@ body.embed .login-card { box-shadow: none; }
 .hljs-meta, .hljs-meta-string { color: var(--hl-comment); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 700; }
+
+/* ---------- 模型选择 / 状态栏 ---------- */
+.model-select {
+  font: inherit;
+  font-size: 12px;
+  max-width: 100%;
+  padding: 3px 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+}
+.status-bar {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--sidebar);
+  font-size: 12px;
+  color: var(--muted);
+}
+.status-bar.error { color: var(--danger); }
+.status-text { line-height: 1.4; }
+.progress {
+  margin-top: 5px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+}
+.progress i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+body.embed .model-select { display: none !important; }

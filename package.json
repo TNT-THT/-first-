@@ -2,7 +2,7 @@
   "name": "oj-ai-assistant",
   "version": "1.0.0",
   "private": true,
-  "description": "可嵌入 iframe 的开源大模型刷题助手（支持 Markdown、LaTeX、代码高亮、多轮会话）",
+  "description": "可嵌入 iframe 的刷题助手：默认纯静态（浏览器内运行开源模型 WebLLM），可选自托管服务端模式",
   "type": "module",
   "engines": {
     "node": ">=18.18"
@@ -10,10 +10,13 @@
   "scripts": {
     "dev:web": "vite --host 0.0.0.0 --port 5173",
     "build": "vite build --config web/vite.config.js",
+    "build:remote": "VITE_ENGINE=remote vite build --config web/vite.config.js",
     "start": "node server/index.js",
+    "set-password": "node scripts/set-access-password.mjs",
     "test": "node --test test/unit.test.js test/server.test.js"
   },
   "dependencies": {
+    "@mlc-ai/web-llm": "0.2.86",
     "dompurify": "^3.4.17",
     "express": "^4.22.3",
     "highlight.js": "^11.12.0",

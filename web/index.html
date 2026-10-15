@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>OJ 刷题助手</title>
+    <meta name="description" content="可嵌入 iframe 的算法刷题助手，浏览器内运行开源大模型" />
     <link rel="icon" href="data:," />
   </head>
   <body>
@@ -14,8 +15,8 @@
         <form id="loginForm" class="login-card">
           <div class="logo">AI</div>
           <h1 id="loginTitle">OJ 刷题助手</h1>
-          <p class="muted">请输入访问密码</p>
-          <input id="password" type="password" autocomplete="current-password" placeholder="访问密码" required />
+          <p class="muted">请输入站点访问口令</p>
+          <input id="password" type="password" autocomplete="current-password" placeholder="访问口令" required />
           <button id="loginBtn" type="submit" class="btn primary block">登录</button>
           <p id="loginError" class="error" role="alert"></p>
         </form>
@@ -31,6 +32,7 @@
           <nav id="sessionList" class="session-list" data-session-list aria-label="历史会话"></nav>
           <div class="sidebar-foot">
             <button id="clearAllBtn" type="button" class="btn ghost small">清空全部</button>
+            <select id="modelSelect" class="model-select" hidden aria-label="选择模型"></select>
             <span id="modelLabel" class="muted small"></span>
           </div>
         </aside>
@@ -46,6 +48,11 @@
           </header>
 
           <div id="messages" class="messages" role="log" aria-live="polite"></div>
+
+          <div id="statusBar" class="status-bar" role="status" hidden>
+            <div class="status-text" id="statusText"></div>
+            <div class="progress" id="statusProgress" hidden><i id="statusBarFill"></i></div>
+          </div>
 
           <form id="composer" class="composer">
             <textarea id="input" rows="1" placeholder="描述题目或粘贴代码。Enter 发送，Shift+Enter 换行"></textarea>

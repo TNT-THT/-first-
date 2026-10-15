@@ -4,7 +4,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-RUN npm run build && npm prune --omit=dev
+RUN npm run build:remote && npm prune --omit=dev
 
 FROM node:22-alpine AS runtime
 ENV NODE_ENV=production

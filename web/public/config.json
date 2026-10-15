@@ -1,0 +1,29 @@
+{
+  "appName": "OJ 刷题助手",
+  "allowedParentOrigins": [
+    "https://hydro.ac",
+    "https://*.hydro.ac"
+  ],
+  "access": {
+    "salt": "16d4f93c148ed8e1708966467a7515f5",
+    "passwordSha256": "d5e359881d9391334922bd6beb7e47eeb11f2e0a55b244a95c585621ae9fa8fb"
+  },
+  "webllm": {
+    "defaultModel": "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
+    "models": [
+      {
+        "id": "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5-Coder 1.5B（较小，入门）"
+      },
+      {
+        "id": "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5-Coder 3B（更准确）"
+      }
+    ],
+    "temperature": 0.3,
+    "maxTokens": 1024,
+    "contextChars": 5000,
+    "maxMessages": 10
+  },
+  "systemPrompt": "你是一名资深的算法竞赛教练，正在帮助用户解决 OJ（在线评测）题目。请先给出思路与关键观察，再给出复杂度分析，最后给出代码（默认 C++，除非用户指定其他语言）。数学公式请使用 LaTeX，行内用 $...$，独立公式用 $$...$$。回答应简洁、准确。"
+}

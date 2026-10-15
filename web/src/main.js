@@ -3,7 +3,10 @@ import './style.css';
 import DOMPurify from 'dompurify';
 import { renderMarkdown } from './markdown.js';
 import { isAllowedOrigin } from './origin.js';
-import { ApiError, checkSession, fetchConfig, getToken, login, setToken, streamChat } from './api.js';
+import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
+import { createBackend } from './engines/backend.js';
+import { checkWebGPU, WEBGPU_MISSING } from './engines/webllm.js';
+import { hasAccessGate, isUnlocked, setUnlocked, verifyAccessPassword } from './access.js';
 import {
   buildContext,
   createSession,
@@ -14,6 +17,9 @@ import {
   saveStore,
   titleFrom,
 } from './store.js';
+
+// 构建模式：默认 'webllm'（纯静态，浏览器内推理）；VITE_ENGINE=remote 时使用自托管服务端
+const MODE = import.meta.env.VITE_ENGINE === 'remote' ? 'remote' : 'webllm';
 
 const $ = (sel) => document.querySelector(sel);
 const els = {
@@ -26,6 +32,7 @@ const els = {
   main: $('#main'),
   brandName: $('#brandName'),
   loginTitle: $('#loginTitle'),
+  modelSelect: $('#modelSelect'),
   modelLabel: $('#modelLabel'),
   newChatBtn: $('#newChatBtn'),
   embedNewBtn: $('#embedNewBtn'),
@@ -38,6 +45,10 @@ const els = {
   input: $('#input'),
   sendBtn: $('#sendBtn'),
   stopBtn: $('#stopBtn'),
+  statusBar: $('#statusBar'),
+  statusText: $('#statusText'),
+  statusProgress: $('#statusProgress'),
+  statusBarFill: $('#statusBarFill'),
 };
 
 // ---------- 运行参数 ----------
@@ -50,7 +61,8 @@ const isEmbedded = window.parent !== window;
 
 const state = {
   store: loadStore(),
-  config: { allowedParentOrigins: [] },
+  appConfig: { appName: 'OJ 刷题助手', allowedParentOrigins: [], access: {} },
+  backend: null,
   streaming: null, // { controller, session, assistant }
   clearArmed: false,
 };
@@ -78,16 +90,59 @@ function sanitize(html) {
   return DOMPurify.sanitize(html, { ADD_ATTR: ['target'] });
 }
 
-// ---------- 渲染：消息 ----------
-function typingHtml() {
-  return '<span class="typing" aria-label="正在生成"><i></i><i></i><i></i></span><span class="typing-text">正在思考…</span>';
+function friendlyError(err) {
+  if (err instanceof ApiError) return err.message;
+  const m = err?.message || String(err);
+  if (/context window|exceed/i.test(m)) {
+    return '对话内容超过了模型的上下文长度。请新建会话，或精简问题后再发送。';
+  }
+  if (m.startsWith('当前浏览器')) return m;
+  if (/Failed to fetch|NetworkError|network/i.test(m)) {
+    return '模型文件下载失败：无法访问 Hugging Face / GitHub。请检查网络；如使用代理工具，请确认代理已开启且允许访问 huggingface.co，然后重试。';
+  }
+  return `出错了：${m}`;
 }
 
-function paintAssistant(bubble, msg, { streaming = false } = {}) {
+// ---------- 状态栏（行内提示，不使用弹窗） ----------
+function showStatus(text, { progress = null, error = false } = {}) {
+  els.statusBar.hidden = false;
+  els.statusBar.classList.toggle('error', error);
+  els.statusText.textContent = text;
+  if (progress === null) {
+    els.statusProgress.hidden = true;
+  } else {
+    els.statusProgress.hidden = false;
+    els.statusBarFill.style.width = `${Math.round(progress * 100)}%`;
+  }
+}
+
+function hideStatus() {
+  els.statusBar.hidden = true;
+  els.statusBar.classList.remove('error');
+}
+
+async function refreshIdleStatus() {
+  if (state.backend.mode !== 'webllm') return hideStatus();
+  if (!(await checkWebGPU())) {
+    return showStatus(WEBGPU_MISSING, { error: true });
+  }
+  if (!state.backend.isReady()) {
+    showStatus('首次发送时会下载并加载模型（体积较大，之后由浏览器缓存）。');
+  } else {
+    hideStatus();
+  }
+}
+
+// ---------- 渲染：消息 ----------
+function typingHtml(label) {
+  return `<span class="typing" aria-label="正在生成"><i></i><i></i><i></i></span><span class="typing-text">${label}</span>`;
+}
+
+function paintAssistant(bubble, msg, { streaming = false, label = '正在思考…' } = {}) {
   bubble.classList.toggle('error', !!msg.error);
   bubble.classList.toggle('streaming', streaming);
   if (!msg.content && streaming) {
-    bubble.innerHTML = typingHtml();
+    bubble.innerHTML = typingHtml(label);
     return;
   }
   let html = sanitize(renderMarkdown(msg.content || ''));
@@ -190,7 +245,7 @@ async function send(rawText) {
   persist();
 
   // 上下文：不包含本次刚添加的空占位回复
-  const context = buildContext(session.messages.slice(0, -1));
+  const context = buildContext(session.messages.slice(0, -1), state.backend.limits);
 
   const controller = new AbortController();
   state.streaming = { controller, session, assistant: assistantMsg };
@@ -198,7 +253,6 @@ async function send(rawText) {
 
   // 只追加新节点，只更新最后一条助手消息的气泡，避免整页重绘
   els.messages.querySelector('.empty')?.remove();
-  if (isFirst) renderSessionList();
   els.messages.appendChild(createMessageEl(userMsg).wrap);
   const { wrap: assistantWrap, bubble } = createMessageEl(assistantMsg, { streaming: true });
   els.messages.appendChild(assistantWrap);
@@ -216,38 +270,46 @@ async function send(rawText) {
   };
 
   try {
-    for await (const delta of streamChat({ messages: context, signal: controller.signal })) {
+    if (!state.backend.isReady()) {
+      paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在加载模型…' });
+      await state.backend.ensureReady(({ progress, text: t }) => {
+        const pct = Math.round(progress * 100);
+        showStatus(`正在加载模型 ${pct}%${t ? `：${t}` : ''}`, { progress });
+      });
+      refreshIdleStatus();
+    }
+
+    for await (const delta of state.backend.stream({ messages: context, signal: controller.signal })) {
       assistantMsg.content += delta;
       scheduleRender();
     }
     if (frame) cancelAnimationFrame(frame);
-    paintAssistant(bubble, assistantMsg);
-    if (!assistantMsg.content) {
+    if (controller.signal.aborted) assistantMsg.stopped = true;
+    if (!assistantMsg.content && !assistantMsg.stopped) {
       assistantMsg.content = '（模型没有返回内容，请重试）';
       assistantMsg.error = true;
-      paintAssistant(bubble, assistantMsg);
     }
+    paintAssistant(bubble, assistantMsg);
   } catch (err) {
     if (frame) cancelAnimationFrame(frame);
     if (err.name === 'AbortError' || controller.signal.aborted) {
       assistantMsg.stopped = true;
       paintAssistant(bubble, assistantMsg);
+    } else if (err instanceof ApiError && err.status === 401 && state.backend.mode === 'remote') {
+      // 服务端令牌失效：回到登录页。本次问题退回输入框，登录后可直接重新发送。
+      setToken('');
+      session.messages.splice(-2, 2);
+      if (isFirst) session.title = '新会话';
+      persist();
+      els.input.value = text;
+      autoGrow();
+      showLogin('登录已过期，请重新输入密码');
+      return;
     } else {
-      if (err instanceof ApiError && err.status === 401) {
-        // 令牌失效：回到登录页。本次问题退回输入框，登录后可直接重新发送。
-        setToken('');
-        session.messages.splice(-2, 2);
-        if (isFirst) session.title = '新会话';
-        persist();
-        els.input.value = text;
-        autoGrow();
-        showLogin('登录已过期，请重新输入密码');
-        return;
-      }
-      const message = err instanceof ApiError ? err.message : `网络错误：${err.message}`;
-      assistantMsg.content = message;
+      assistantMsg.content = friendlyError(err);
       assistantMsg.error = true;
       paintAssistant(bubble, assistantMsg);
+      if (state.backend.mode === 'webllm') refreshIdleStatus();
     }
   } finally {
     state.streaming = null;
@@ -269,7 +331,6 @@ function newChat() {
   if (state.streaming) stop();
   const current = activeSession();
   if (current && current.messages.length === 0) {
-    // 已经是空会话，不重复创建
     state.store.activeId = current.id;
   } else {
     createSession(state.store);
@@ -338,6 +399,7 @@ function showMain() {
   els.login.hidden = true;
   els.main.hidden = false;
   refreshAll();
+  refreshIdleStatus();
   els.input.focus({ preventScroll: true });
 }
 
@@ -346,7 +408,13 @@ els.loginForm.addEventListener('submit', async (e) => {
   els.loginError.textContent = '';
   els.loginBtn.disabled = true;
   try {
-    await login(els.password.value);
+    if (MODE === 'remote') {
+      await login(els.password.value);
+    } else {
+      const ok = await verifyAccessPassword(state.appConfig.access, els.password.value);
+      if (!ok) throw new Error('口令错误');
+      setUnlocked();
+    }
     showMain();
   } catch (err) {
     els.loginError.textContent = err.message || '登录失败';
@@ -383,6 +451,12 @@ els.newChatBtn.addEventListener('click', newChat);
 els.embedNewBtn.addEventListener('click', newChat);
 els.clearAllBtn.addEventListener('click', clearAll);
 els.historyBtn.addEventListener('click', () => toggleHistory());
+
+els.modelSelect.addEventListener('change', () => {
+  state.backend.setModel(els.modelSelect.value);
+  const label = els.modelSelect.selectedOptions[0]?.textContent || els.modelSelect.value;
+  showStatus(`已切换到 ${label}，发送消息时将自动加载。`);
+});
 
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]');
@@ -428,7 +502,7 @@ async function copyCode(btn) {
  */
 window.addEventListener('message', (e) => {
   if (e.source !== window.parent) return;
-  if (!isAllowedOrigin(e.origin, state.config.allowedParentOrigins)) return;
+  if (!isAllowedOrigin(e.origin, state.appConfig.allowedParentOrigins || [])) return;
   const data = e.data;
   if (!data || typeof data !== 'object' || data.type !== 'oj-ai:fill') return;
 
@@ -450,7 +524,7 @@ function notifyParentReady() {
   if (!isEmbedded || !document.referrer) return;
   try {
     const parentOrigin = new URL(document.referrer).origin;
-    if (isAllowedOrigin(parentOrigin, state.config.allowedParentOrigins)) {
+    if (isAllowedOrigin(parentOrigin, state.appConfig.allowedParentOrigins || [])) {
       window.parent.postMessage({ type: 'oj-ai:ready' }, parentOrigin);
     }
   } catch {
@@ -459,19 +533,46 @@ function notifyParentReady() {
 }
 
 // ---------- 启动 ----------
+async function loadAppConfig() {
+  if (MODE === 'remote') {
+    const c = await fetchConfig();
+    return { appName: c.appName, allowedParentOrigins: c.allowedParentOrigins, access: {}, webllm: null, model: c.model };
+  }
+  const res = await fetch('config.json', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`无法读取 config.json（HTTP ${res.status}）`);
+  return res.json();
+}
+
 async function init() {
   if (isEmbed) els.body.classList.add('embed');
   if (isEmbedded) els.body.classList.add('in-frame');
 
   try {
-    state.config = await fetchConfig();
-  } catch {
-    /* 配置接口失败不影响基础使用 */
+    state.appConfig = { ...state.appConfig, ...(await loadAppConfig()) };
+  } catch (err) {
+    console.error(err);
   }
-  els.brandName.textContent = state.config.appName || 'OJ 刷题助手';
-  els.loginTitle.textContent = state.config.appName || 'OJ 刷题助手';
-  document.title = state.config.appName || 'OJ 刷题助手';
-  els.modelLabel.textContent = state.config.model ? `模型：${state.config.model}` : '';
+  const appName = state.appConfig.appName || 'OJ 刷题助手';
+  els.brandName.textContent = appName;
+  els.loginTitle.textContent = appName;
+  document.title = appName;
+
+  state.backend = createBackend({ mode: MODE, appConfig: state.appConfig });
+  if (MODE === 'webllm') {
+    els.modelSelect.replaceChildren(
+      ...state.backend.models.map((m) => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label;
+        return opt;
+      })
+    );
+    els.modelSelect.value = state.backend.modelId;
+    els.modelSelect.hidden = false;
+    els.modelLabel.hidden = true;
+  } else {
+    els.modelLabel.textContent = state.appConfig.model ? `模型：${state.appConfig.model}` : '';
+  }
 
   if (state.store.sessions.length === 0) createSession(state.store);
   else if (!getSession(state.store)) state.store.activeId = state.store.sessions[0].id;
@@ -479,10 +580,13 @@ async function init() {
 
   notifyParentReady();
 
-  if (getToken() && (await checkSession())) {
+  if (MODE === 'remote') {
+    if (getToken() && (await checkSession())) showMain();
+    else showLogin();
+  } else if (isUnlocked(state.appConfig.access)) {
     showMain();
   } else {
-    showLogin();
+    showLogin(hasAccessGate(state.appConfig.access) ? '' : '');
   }
 }
 
