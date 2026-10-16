@@ -1,5 +1,6 @@
 {
   "name": "coder15-tuned",
+  "catalog_id": null,
   "base": {
     "hf_repo": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
     "local_dir": null
@@ -16,7 +17,12 @@
     "lora_r": 16,
     "lora_alpha": 32,
     "lora_dropout": 0.05,
-    "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj"],
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
     "max_length": 1024,
     "batch_size": 1,
     "grad_accum": 8,
@@ -29,12 +35,14 @@
     "context_window_size": 4096,
     "model_lib_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen2-1.5B-Instruct-q4f16_1_cs1k-webgpu.wasm",
     "wasm_path": "libs/Qwen2-1.5B-Instruct-q4f16_1_cs1k-webgpu.wasm",
-    "wasm_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen2-1.5B-Instruct-q4f16_1_cs1k-webgpu.wasm"
+    "wasm_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen2-1.5B-Instruct-q4f16_1_cs1k-webgpu.wasm",
+    "compile": false
   },
   "pack": {
     "model_id": "coder15-tuned-v1",
     "label": "我的刷题AI v1",
     "vram_required_MB": 1630,
-    "source_model": null
+    "source_model": null,
+    "overrides": {}
   }
 }

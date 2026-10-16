@@ -106,6 +106,8 @@ def check_project_files(cfg):
         checks.append(Check("训练数据", WARN, f"找不到 {p['data_raw']}。运行 import-data 导入"))
     if os.path.isfile(p["wasm"]):
         checks.append(Check("运行库（wasm）", OK, p["wasm"]))
+    elif cfg["mlc"].get("compile"):
+        checks.append(Check("运行库（wasm）", WARN, "尚未编译，convert 步骤会用 mlc_llm compile 生成（需要 MLC-LLM）"))
     elif cfg["mlc"].get("wasm_url"):
         checks.append(Check("运行库（wasm）", WARN, "尚未下载，打包时会自动从 wasm_url 下载"))
     else:

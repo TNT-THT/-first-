@@ -9,6 +9,8 @@ import os
 import re
 import shutil
 
+import catalog
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE = os.path.join(HERE, "config.example.json")
 DEFAULT_CONFIG = os.path.join(HERE, "config.json")
@@ -36,11 +38,16 @@ def write_config(path, cfg):
         f.write("\n")
 
 
-def init_config(path=DEFAULT_CONFIG, name=None, force=False):
+def init_config(path=DEFAULT_CONFIG, name=None, force=False, model=None, custom=None):
+    """生成配置。model 为清单中的模型 id；custom 为自定义模型的参数字典（见 catalog.apply_custom）。"""
     if os.path.exists(path) and not force:
         raise ConfigError(f"配置文件已存在：{path}（如需覆盖，请加 --force）")
     cfg = load_example()
-    if name:
+    if model:
+        cfg = catalog.apply_catalog(cfg, catalog.find(model), name=name)
+    elif custom:
+        cfg = catalog.apply_custom(cfg, name=name, **custom)
+    elif name:
         cfg["name"] = name
         cfg["pack"]["model_id"] = f"{name}-v1"
     write_config(path, cfg)
@@ -84,6 +91,7 @@ def validate(cfg):
     need(train.get("dtype", "auto") in DTYPES, f"train.dtype 只能是 {', '.join(DTYPES)}")
 
     mlc = cfg.get("mlc") or {}
+    need(isinstance(mlc.get("compile", False), bool), "mlc.compile 必须是 true 或 false")
     need(isinstance(mlc.get("quantization"), str) and mlc.get("quantization"), "mlc.quantization 不能为空")
     need(isinstance(mlc.get("conv_template"), str) and mlc.get("conv_template"), "mlc.conv_template 不能为空")
     need(_pos_int(mlc.get("context_window_size")), "mlc.context_window_size 必须是正整数")
@@ -97,6 +105,8 @@ def validate(cfg):
     need(isinstance(pack.get("label"), str) and 0 < len(pack.get("label", "")) <= 200, "pack.label 不能为空，且不超过 200 字符")
     if pack.get("source_model"):
         need(str(pack["source_model"]).startswith("https://"), "pack.source_model 必须是 https 地址")
+    need(pack.get("overrides", {}) is None or isinstance(pack.get("overrides", {}), dict), "pack.overrides 必须是对象")
+    need(cfg.get("catalog_id") is None or isinstance(cfg.get("catalog_id"), str), "catalog_id 必须是字符串或空")
     return errs
 
 

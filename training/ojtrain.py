@@ -14,11 +14,13 @@
 中断后可以继续：run --from train；重新执行某一步：run --from train --force。
 """
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 
+import catalog
 import config as cfgmod
 import doctor
 import fetch_model
@@ -34,9 +36,37 @@ def _load(args):
 
 
 def cmd_init(args):
-    path = cfgmod.init_config(args.config, name=args.name, force=args.force)
+    if args.model and args.hf_repo:
+        raise ValueError("--model 与 --hf-repo 只能二选一")
+    custom = None
+    if args.hf_repo:
+        custom = {
+            "hf_repo": args.hf_repo,
+            "conv_template": args.conv_template,
+            "context_window_size": args.context_window_size,
+            "quantization": args.quantization,
+        }
+    path = cfgmod.init_config(args.config, name=args.name, force=args.force, model=args.model, custom=custom)
+    cfg = cfgmod.load_config(path)
     print(f"已生成配置文件：{path}")
-    print("请按需修改 base（基础模型）、data（数据）、pack（模型名称和显示名）后再运行 run。")
+    print(f"基础模型：{cfg['base']['hf_repo']}")
+    if cfg["mlc"]["compile"]:
+        print("运行库：自定义架构，convert 步骤会在本机用 mlc_llm compile 编译。")
+    else:
+        print(f"运行库：沿用官方 {cfg['mlc']['wasm_path'].split('/')[-1]}，无需编译。")
+    print("请确认 base 指向的模型可访问（gated 模型需设置 HF_TOKEN），再运行 run。")
+    return 0
+
+
+def cmd_models(args):
+    models = catalog.load()
+    if args.json:
+        print(json.dumps(models, ensure_ascii=False, indent=2))
+        return 0
+    print(f"可训练的模型（共 {len(models)} 个，来自网页下拉框）：")
+    print("\n".join(catalog.summary_lines(models)))
+    print("\n用法：python3 training/ojtrain.py init --model <上面的 id>")
+    print("清单之外的模型：init --hf-repo 组织/模型 --conv-template <模板名> --context-window-size 4096")
     return 0
 
 
@@ -138,10 +168,18 @@ def build_parser():
         sp.set_defaults(func=func)
         return sp
 
-    sp = add("init", cmd_init, "生成默认配置 training/config.json", config=False)
+    sp = add("init", cmd_init, "生成配置 training/config.json（可直接选用网页下拉框中的模型）", config=False)
     sp.add_argument("--config", default=cfgmod.DEFAULT_CONFIG)
     sp.add_argument("--name", default=None, help="训练名称（同时作为默认模型 id）")
     sp.add_argument("--force", action="store_true", help="覆盖已有配置")
+    sp.add_argument("--model", default=None, help="清单中的模型 id（见 ojtrain.py models）")
+    sp.add_argument("--hf-repo", default=None, help="清单之外的模型：Hugging Face 仓库，例如 组织/模型名")
+    sp.add_argument("--conv-template", default=None, help="自定义模型的对话模板名（需与 MLC-LLM 版本一致）")
+    sp.add_argument("--context-window-size", type=int, default=4096, help="自定义模型的上下文长度")
+    sp.add_argument("--quantization", default="q4f16_1", help="自定义模型的量化方式")
+
+    sp = add("models", cmd_models, "列出可训练的模型（来自网页下拉框）", config=False)
+    sp.add_argument("--json", action="store_true", help="以 JSON 输出")
 
     add("setup", cmd_setup, "创建 training/.venv 并安装依赖", config=False).add_argument("--recreate", action="store_true")
     add("doctor", cmd_doctor, "检查环境：GPU、依赖、磁盘、网络、配置").add_argument("--offline", action="store_true", help="跳过网络检查")

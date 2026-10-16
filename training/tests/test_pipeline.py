@@ -147,6 +147,98 @@ class PipelineTest(unittest.TestCase):
             pl.shutil.which = original
         self.assertEqual(self.calls, [])
 
+    def test_compile_mode_adds_compile_command_and_waits_without_mlc(self):
+        self.cfg["mlc"]["compile"] = True
+        self.cfg["mlc"]["wasm_url"] = None
+        p = self.pipe()
+        cmds = p.convert_commands()
+        self.assertEqual(cmds[-1][:4], ["mlc_llm", "compile", p.p["mlc"], "--device"])
+        self.assertEqual(cmds[-1][-1], p.p["wasm"])
+        original = pl.shutil.which
+        pl.shutil.which = lambda name: None
+        try:
+            self.assertEqual(p.run(["convert"])["convert"], "waiting")
+        finally:
+            pl.shutil.which = original
+
+    def test_compile_mode_requires_wasm_output(self):
+        self.cfg["mlc"]["compile"] = True
+        p = self.pipe()
+        os.remove(p.p["wasm"])  # setUp 放入了一个 wasm，这里模拟编译没有产出
+        original = pl.shutil.which
+        pl.shutil.which = lambda name: "/usr/bin/mlc_llm"
+
+        def fake_runner(cmd, check=True):
+            self.calls.append(cmd)
+            if cmd[1] == "convert_weight":
+                make_mlc(p.p["mlc"])
+            if cmd[1] == "gen_config":
+                pass  # 不生成 wasm：应当失败
+        p.runner = fake_runner
+        try:
+            self.assertEqual(p.run(["convert"])["convert"], "failed")
+        finally:
+            pl.shutil.which = original
+        self.assertEqual([c[1] for c in self.calls], ["convert_weight", "gen_config", "compile"])
+
+    def test_compile_mode_pack_refuses_without_wasm(self):
+        self.cfg["mlc"]["compile"] = True
+        self.cfg["mlc"]["model_lib_url"] = "https://local.oj-ai.invalid/libs/t1-v1.wasm"
+        self.cfg["pack"]["source_model"] = "https://local.oj-ai.invalid/models/t1-v1/"
+        p = self.pipe()
+        make_mlc(p.p["mlc"])
+        os.remove(p.p["wasm"])
+        self.assertEqual(p.run(["pack"])["pack"], "failed")
+        self.assertTrue(any("convert" in line for line in self.logs))
+
+    def test_pack_merges_catalog_overrides(self):
+        self.cfg["pack"]["overrides"] = {"max_history_size": 1}
+        p = self.pipe()
+        make_mlc(p.p["mlc"])
+        self.assertEqual(p.run(["pack"])["pack"], "done")
+        with open(p.p["ojmodel"], "rb") as f:
+            data = f.read()
+        (hlen,) = struct.unpack("<I", data[4:8])
+        header = json.loads(data[8 : 8 + hlen])
+        self.assertEqual(header["source"]["overrides"], {"context_window_size": 4096, "max_history_size": 1})
+
+    def test_convert_reruns_when_parameters_change_or_forced(self):
+        p = self.pipe()
+        original = pl.shutil.which
+        pl.shutil.which = lambda name: "/usr/bin/mlc_llm"
+
+        def fake_runner(cmd, check=True):
+            self.calls.append(cmd)
+            if cmd[1] == "convert_weight":
+                make_mlc(p.p["mlc"])
+            if cmd[1] == "compile":
+                with open(cmd[-1], "wb") as f:
+                    f.write(b"\x00asm")
+        p.runner = fake_runner
+        try:
+            self.assertEqual(p.run(["convert"])["convert"], "done")
+            self.assertEqual(len(self.calls), 2)
+            # 同样参数：直接使用，不再调用
+            p.clear("convert")
+            self.assertEqual(p.run(["convert"])["convert"], "done")
+            self.assertEqual(len(self.calls), 2)
+            # 改了量化：重新转换
+            self.cfg["mlc"]["quantization"] = "q4f32_1"
+            p.clear("convert")
+            self.assertEqual(p.run(["convert"])["convert"], "done")
+            self.assertEqual(len(self.calls), 4)
+            # --force：即使参数一致也重新转换
+            self.assertEqual(p.run(["convert"], force=True)["convert"], "done")
+            self.assertEqual(len(self.calls), 6)
+        finally:
+            pl.shutil.which = original
+
+    def test_external_output_without_record_is_used(self):
+        p = self.pipe()
+        make_mlc(p.p["mlc"])
+        self.assertEqual(p.run(["convert"])["convert"], "done")
+        self.assertEqual(self.calls, [])
+
     def test_pack_produces_importable_header(self):
         p = self.pipe()
         make_mlc(p.p["mlc"])

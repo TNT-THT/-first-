@@ -76,6 +76,14 @@ class DoctorTest(unittest.TestCase):
         self.assertEqual(ok[0].status, doctor.OK)
         self.assertEqual(ok[1]["name"], "coder15-tuned")
 
+    def test_compile_mode_wasm_is_warning_not_failure(self):
+        path = os.path.join(self.tmp.name, "config.json")
+        cfgmod.init_config(path, custom={"hf_repo": "acme/x-1b", "conv_template": "chatml",
+                                         "context_window_size": 2048, "quantization": "q4f16_1"})
+        cfg = cfgmod.load_config(path)
+        by_name = {c.name: c.status for c in doctor.check_project_files(cfg)}
+        self.assertEqual(by_name["运行库（wasm）"], doctor.WARN)
+
     def test_report_counts(self):
         checks = [doctor.Check("a", doctor.OK, "x"), doctor.Check("b", doctor.WARN, "y"), doctor.Check("c", doctor.FAIL, "z")]
         report = doctor.format_report(checks)
