@@ -47,6 +47,11 @@ def default_name(model_id):
 
 def apply_catalog(cfg, entry, name=None):
     """把清单中的模型写入配置（原地修改并返回 cfg）。"""
+    if not entry.get("in_dropdown", True):
+        raise CatalogError(
+            f"{entry['id']} 只在训练目录中，网页下拉框没有它，也没有官方运行库，必须在本机编译。"
+            f"请使用：init --hf-repo {entry['hf_repo']} --conv-template {entry['conv_template']} --context-window-size 4096"
+        )
     name = name or default_name(entry["id"])
     model_id = f"{name}-v1"
     cfg["name"] = name
@@ -115,4 +120,11 @@ def summary_lines(models):
         lines.append(f"    {m['label']}  {m['size_class'] or '-'} · {kind}")
         lines.append(f"    原始仓库：{m['hf_repo']}{gated}  参数约 {m['params_b']}B")
         lines.append(f"    训练显存估计：≥ {m['train_vram_gb_min']} GB  对话模板：{m['conv_template']}（待核对）")
+        if m.get("in_dropdown", True):
+            lines.append(f"    推理显存：约 {m['inference_vram_gb']} GB（WebLLM 记录）")
+        else:
+            lines.append(
+                f"    推理显存：约 {m['inference_vram_gb']} GB（估算）· 仅训练目录，不在网页下拉框中，需本机编译："
+                f"init --hf-repo {m['hf_repo']} --conv-template {m['conv_template']} --context-window-size 4096"
+            )
     return lines

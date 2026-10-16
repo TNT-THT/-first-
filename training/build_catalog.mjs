@@ -53,7 +53,31 @@ const UPSTREAM = {
   'Hermes-3-Llama-3.2-3B-q4f16_1-MLC': ['NousResearch/Hermes-3-Llama-3.2-3B', 'chatml', 3.2],
   'DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC': ['deepseek-ai/DeepSeek-R1-Distill-Llama-8B', 'llama-3', 8.0],
   'DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC': ['deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', 'deepseek_r1_qwen', 7.6],
+  'Llama-3.1-70B-Instruct-q3f16_1-MLC': ['meta-llama/Llama-3.1-70B-Instruct', 'llama-3', 70.6],
+  'Llama-3-70B-Instruct-q3f16_1-MLC': ['meta-llama/Meta-Llama-3-70B-Instruct', 'llama-3', 70.6],
 };
+
+// 仅训练目录（不在网页下拉框中）的超大模型：WebLLM 0.2.86 没有预编译的运行库，
+// 必须在本机用 mlc_llm compile 编译后才能使用（即 init --hf-repo 路线）。
+// 显存为估算值（q4f16 权重约 0.5 GB/B 参数 + 约 2.5 GB 缓存与缓冲），没有 WebLLM 记录可核对。
+const CATALOG_ONLY = [
+  {
+    id: 'Qwen2.5-32B-Instruct',
+    label: 'Qwen2.5 32B（非推理·超大·需约 19 GB 显存·估算）',
+    hf_repo: 'Qwen/Qwen2.5-32B-Instruct',
+    conv_template: 'qwen2',
+    params_b: 32.8,
+    vram_gb_estimate: 19,
+  },
+  {
+    id: 'Yi-1.5-34B-Chat',
+    label: 'Yi 1.5 34B（非推理·超大·需约 20 GB 显存·估算）',
+    hf_repo: '01-ai/Yi-1.5-34B-Chat',
+    conv_template: 'chatml',
+    params_b: 34.4,
+    vram_gb_estimate: 20,
+  },
+];
 
 // 需要 Hugging Face 账号并同意许可协议（训练前需设置 HF_TOKEN）。
 const GATED_PREFIXES = ['meta-llama/', 'google/gemma'];
@@ -63,7 +87,7 @@ export function parseLabel(label) {
   const inner = (label.match(/（([^）]*)）/) || [])[1] || '';
   const parts = inner.split('·');
   const reasoning = !parts[0].startsWith('非推理') && parts[0].startsWith('推理');
-  const sizeClass = ['极小', '小', '中', '大'].find((s) => parts.includes(s)) || '';
+  const sizeClass = ['超大', '极小', '小', '中', '大'].find((s) => parts.includes(s)) || '';
   return { reasoning, sizeClass };
 }
 
@@ -86,6 +110,7 @@ export function buildCatalog({ configPath = CONFIG_PATH, webllmPath = WEBLLM_PAT
         label: item.label,
         size_class: sizeClass,
         reasoning,
+        in_dropdown: true,
         hf_repo: hfRepo,
         hf_gated: GATED_PREFIXES.some((p) => hfRepo.startsWith(p)),
         params_b: paramsB,
@@ -95,9 +120,37 @@ export function buildCatalog({ configPath = CONFIG_PATH, webllmPath = WEBLLM_PAT
         context_window_size: overrides.context_window_size ?? null,
         overrides,
         vram_required_MB: rec.vram_required_MB ?? null,
+        inference_vram_gb: rec.vram_required_MB ? Math.round((rec.vram_required_MB / 1024) * 10) / 10 : null,
+        inference_vram_source: 'webllm',
         source_model: rec.model,
         model_lib_url: rec.model_lib,
         wasm_file: rec.model_lib.split('/').pop(),
+        verified: false,
+      });
+    }
+    for (const extra of CATALOG_ONLY) {
+      if (byId.has(extra.id)) throw new Error(`仅训练目录的模型不应出现在 web-llm 中：${extra.id}`);
+      const { reasoning, sizeClass } = parseLabel(extra.label);
+      entries.push({
+        id: extra.id,
+        label: extra.label,
+        size_class: sizeClass,
+        reasoning,
+        in_dropdown: false,
+        hf_repo: extra.hf_repo,
+        hf_gated: GATED_PREFIXES.some((p) => extra.hf_repo.startsWith(p)),
+        params_b: extra.params_b,
+        train_vram_gb_min: Math.round(extra.params_b * 2 + 4),
+        quantization: 'q4f16_1',
+        conv_template: extra.conv_template,
+        context_window_size: 4096,
+        overrides: {},
+        vram_required_MB: null,
+        inference_vram_gb: extra.vram_gb_estimate,
+        inference_vram_source: 'estimate',
+        source_model: null,
+        model_lib_url: null,
+        wasm_file: null,
         verified: false,
       });
     }

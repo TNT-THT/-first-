@@ -13,6 +13,11 @@ import {
   PROMPT_BUDGET_CHARS,
   recordFeedback,
   removeNote,
+  applyParamSuggestion,
+  listParamLog,
+  MAX_PARAM_LOG,
+  resetParam,
+  suggestParams,
 } from '../web/src/adaptation.js';
 
 function memoryStorage() {
@@ -117,4 +122,80 @@ test('记录只写入传入的存储（不涉及网络）', () => {
   const s = memoryStorage();
   recordFeedback('m', '反馈', { storage: s });
   assert.deepEqual([...s.raw.keys()], ['oj-ai.adapt.v1']);
+});
+
+test('参数建议：关键词命中并与当前值比较', () => {
+  assert.deepEqual(suggestParams('太啰嗦了，回答更简洁一点', { maxTokens: 16384 }), [
+    { key: 'maxTokens', value: 400, reason: '希望回答更简洁' },
+  ]);
+  assert.deepEqual(suggestParams('希望更保守些，别瞎编', { temperature: 0.3 }), [
+    { key: 'temperature', value: 0.2, reason: '希望回答更稳定、更准确' },
+  ]);
+  assert.deepEqual(suggestParams('再详细一点', { maxTokens: 800 }), [
+    { key: 'maxTokens', value: 2048, reason: '希望回答更详细' },
+  ]);
+  assert.deepEqual(suggestParams('更有创意一些', { temperature: 0.3 }), [
+    { key: 'temperature', value: 0.9, reason: '希望回答更有创意' },
+  ]);
+});
+
+test('参数建议：已达到建议值或方向相反时不提示', () => {
+  assert.deepEqual(suggestParams('更简洁', { maxTokens: 300 }), []);
+  assert.deepEqual(suggestParams('更详细', { maxTokens: 4096 }), []);
+  assert.deepEqual(suggestParams('更保守', { temperature: 0.1 }), []);
+});
+
+test('参数建议：无关内容、显式参数行、同一参数重复命中时的处理', () => {
+  assert.deepEqual(suggestParams('这道题的复杂度是多少？', { maxTokens: 16384, temperature: 0.3 }), []);
+  assert.deepEqual(suggestParams('参数：maxTokens=300\n更简洁', { maxTokens: 16384 }), []);
+  const two = suggestParams('更简洁，但也更详细', { maxTokens: 16384 });
+  assert.equal(two.length, 1);
+  assert.equal(two[0].value, 400);
+});
+
+test('确认参数建议：写入该模型并受范围限制；未知参数被拒绝', () => {
+  const s = memoryStorage();
+  assert.equal(applyParamSuggestion('m', 'maxTokens', 400, { storage: s }), 400);
+  assert.equal(applyParamSuggestion('m', 'temperature', 9, { storage: s }), 1.5);
+  assert.deepEqual(getModelParams('m', { storage: s }), { maxTokens: 400, temperature: 1.5 });
+  assert.equal(applyParamSuggestion('m', 'topP', 0.5, { storage: s }), null);
+  assert.equal(applyParamSuggestion('', 'maxTokens', 400, { storage: s }), null);
+  assert.equal(getModelParams('other', { storage: s }).maxTokens, undefined);
+});
+
+test('变更记录：显式参数行记录旧值（默认为 null）与新值，相同值不重复记录', () => {
+  const s = memoryStorage();
+  const r1 = recordFeedback('m', '参数：temperature=0.2', { storage: s, now: 1 });
+  assert.deepEqual(r1.changes, [{ key: 'temperature', from: null, to: 0.2 }]);
+  const r2 = recordFeedback('m', '参数：temperature=0.2', { storage: s, now: 2 });
+  assert.deepEqual(r2.changes, []);
+  recordFeedback('m', '参数：temperature=0.5', { storage: s, now: 3 });
+  const log = listParamLog('m', { storage: s });
+  assert.equal(log.length, 2);
+  assert.deepEqual(log[0], { ts: 3, key: 'temperature', from: 0.2, to: 0.5, source: 'explicit', reason: '显式参数行' });
+  assert.deepEqual(log[1], { ts: 1, key: 'temperature', from: null, to: 0.2, source: 'explicit', reason: '显式参数行' });
+});
+
+test('变更记录：建议确认与恢复默认都有来源', () => {
+  const s = memoryStorage();
+  applyParamSuggestion('m', 'maxTokens', 400, { storage: s, now: 5, reason: '希望回答更简洁' });
+  assert.equal(listParamLog('m', { storage: s })[0].source, 'suggestion');
+  assert.equal(listParamLog('m', { storage: s })[0].reason, '确认建议：希望回答更简洁');
+  assert.equal(resetParam('m', 'maxTokens', { storage: s, now: 6 }), true);
+  assert.deepEqual(getModelParams('m', { storage: s }), {});
+  assert.deepEqual(listParamLog('m', { storage: s })[0], {
+    ts: 6, key: 'maxTokens', from: 400, to: null, source: 'reset', reason: '恢复默认',
+  });
+  assert.equal(resetParam('m', 'maxTokens', { storage: s }), false);
+  assert.equal(resetParam('nobody', 'maxTokens', { storage: s }), false);
+});
+
+test('变更记录：只保留最近若干条，清空模型时一并删除', () => {
+  const s = memoryStorage();
+  for (let i = 0; i < MAX_PARAM_LOG + 10; i++) {
+    recordFeedback('m', `参数：maxTokens=${100 + i}`, { storage: s, now: i });
+  }
+  assert.equal(listParamLog('m', { storage: s }).length, MAX_PARAM_LOG);
+  clearModelAdaptation('m', { storage: s });
+  assert.deepEqual(listParamLog('m', { storage: s }), []);
 });

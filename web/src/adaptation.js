@@ -15,6 +15,7 @@ const KEY = 'oj-ai.adapt.v1';
 export const MAX_NOTES_PER_MODEL = 30;
 export const MAX_NOTE_CHARS = 500;
 export const PROMPT_BUDGET_CHARS = 1500;
+export const MAX_PARAM_LOG = 50;
 const PARAM_LIMITS = { temperature: [0, 1.5], maxTokens: [64, 16384] };
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 const GUARD =
@@ -37,8 +38,20 @@ function writeAll(data, storage) {
 }
 
 function entryFor(data, modelId) {
-  if (!data.models[modelId]) data.models[modelId] = { notes: [], params: {} };
+  if (!data.models[modelId]) data.models[modelId] = { notes: [], params: {}, log: [] };
+  if (!Array.isArray(data.models[modelId].log)) data.models[modelId].log = [];
   return data.models[modelId];
+}
+
+/**
+ * 追加参数变更记录。changes 为 [{key, from, to}]，from/to 为 null 表示“默认值”。
+ * 只保留最近 MAX_PARAM_LOG 条。
+ */
+function appendParamLog(entry, changes, { ts, source, reason }) {
+  for (const c of changes) {
+    entry.log.push({ ts, key: c.key, from: c.from, to: c.to, source, reason: reason || '' });
+  }
+  entry.log = entry.log.slice(-MAX_PARAM_LOG);
 }
 
 /**
@@ -79,8 +92,14 @@ export function recordFeedback(modelId, text, { storage = globalThis.localStorag
   const entry = entryFor(data, modelId);
   const result = {};
   if (params) {
+    const changes = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (entry.params[key] !== value) changes.push({ key, from: entry.params[key] ?? null, to: value });
+    }
     entry.params = { ...entry.params, ...params };
+    appendParamLog(entry, changes, { ts: now, source: 'explicit', reason: '显式参数行' });
     result.params = params;
+    result.changes = changes;
   }
   if (body) {
     const note = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now };
@@ -94,6 +113,12 @@ export function recordFeedback(modelId, text, { storage = globalThis.localStorag
 export function listAdaptation(modelId, { storage = globalThis.localStorage } = {}) {
   const entry = readAll(storage).models[modelId];
   return entry ? { notes: entry.notes || [], params: entry.params || {} } : { notes: [], params: {} };
+}
+
+/** 参数变更记录，最新的在前。 */
+export function listParamLog(modelId, { storage = globalThis.localStorage } = {}) {
+  const entry = readAll(storage).models[modelId];
+  return entry && Array.isArray(entry.log) ? [...entry.log].reverse() : [];
 }
 
 /** 本地采样参数覆盖（只包含已设置的项）。 */
@@ -143,4 +168,88 @@ export function buildAdaptationPrompt(modelId, { storage = globalThis.localStora
 /** 组合基础系统提示词与该模型的适应说明。 */
 export function composeSystemPrompt(base, modelId, options) {
   return `${base || ''}${buildAdaptationPrompt(modelId, options)}`;
+}
+
+/**
+ * 参数建议（只提示，不自动生效）。
+ * 用关键词规则从管理员反馈的文字中找出可能想调整的参数，由管理员在界面中确认后才写入。
+ * 规则只是简单的关键词匹配，不调用模型；“dir”表示方向：
+ *   down：当前值高于建议值时才提示；up：当前值低于建议值时才提示。
+ */
+const SUGGEST_RULES = [
+  {
+    key: 'maxTokens', value: 400, dir: 'down', reason: '希望回答更简洁',
+    re: /更简洁|简洁一点|简短一点|更简短|精简|简明|太长|啰嗦|废话|说重点|长话短说/,
+  },
+  {
+    key: 'maxTokens', value: 2048, dir: 'up', reason: '希望回答更详细',
+    re: /更详细|详细一点|展开说|讲细|说得更细|更完整|太笼统|太简略|不够详细/,
+  },
+  {
+    key: 'temperature', value: 0.2, dir: 'down', reason: '希望回答更稳定、更准确',
+    re: /更保守|更准确|更严谨|更稳定|别瞎编|不要编造|别乱猜|别瞎猜|胡说|瞎说/,
+  },
+  {
+    key: 'temperature', value: 0.9, dir: 'up', reason: '希望回答更有创意',
+    re: /更有创意|更发散|更多样|更灵活|更活泼|多一些想法/,
+  },
+];
+
+/**
+ * 根据反馈文字给出参数建议。current 为该模型当前生效的参数（含默认值）。
+ * 同一参数只取第一条命中的规则；若反馈里已有显式参数行，则不再给建议（显式行已直接生效）。
+ * 返回 [{ key, value, reason }]。
+ */
+export function suggestParams(text, current = {}) {
+  const body = String(text || '');
+  if (PARAM_LINE.test(body)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const rule of SUGGEST_RULES) {
+    if (seen.has(rule.key) || !rule.re.test(body)) continue;
+    const cur = current[rule.key];
+    const needed = typeof cur !== 'number' || (rule.dir === 'down' ? cur > rule.value : cur < rule.value);
+    seen.add(rule.key);
+    if (needed) out.push({ key: rule.key, value: rule.value, reason: rule.reason });
+  }
+  return out;
+}
+
+/**
+ * 管理员确认某条参数建议后，写入该模型的参数（同样受数值范围限制）。
+ * 只接受 temperature 与 maxTokens；返回实际写入的值，无效时返回 null。
+ */
+export function applyParamSuggestion(
+  modelId,
+  key,
+  value,
+  { storage = globalThis.localStorage, now = Date.now(), reason = '' } = {},
+) {
+  const limits = PARAM_LIMITS[key];
+  if (!modelId || !limits || !Number.isFinite(Number(value))) return null;
+  const clamped = Math.min(limits[1], Math.max(limits[0], key === 'maxTokens' ? Math.round(Number(value)) : Number(value)));
+  const data = readAll(storage);
+  const entry = entryFor(data, modelId);
+  const from = entry.params[key] ?? null;
+  entry.params = { ...entry.params, [key]: clamped };
+  if (from !== clamped) {
+    appendParamLog(entry, [{ key, from, to: clamped }], { ts: now, source: 'suggestion', reason: `确认建议：${reason}` });
+  }
+  writeAll(data, storage);
+  return clamped;
+}
+
+/**
+ * 恢复某个参数为默认值（删除本机覆盖）。没有该覆盖时返回 false。
+ */
+export function resetParam(modelId, key, { storage = globalThis.localStorage, now = Date.now() } = {}) {
+  const data = readAll(storage);
+  const entry = data.models[modelId];
+  if (!entry || !entry.params || !(key in entry.params)) return false;
+  const from = entry.params[key];
+  const { [key]: _removed, ...rest } = entry.params;
+  entry.params = rest;
+  appendParamLog(entry, [{ key, from, to: null }], { ts: now, source: 'reset', reason: '恢复默认' });
+  writeAll(data, storage);
+  return true;
 }
