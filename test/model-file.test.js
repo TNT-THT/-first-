@@ -251,3 +251,52 @@ test('已缓存检测：只有关键文件齐全的模型才被标记', async ()
   assert.ok(cached.has(RECORD.model_id));
   assert.ok(!cached.has('Empty-0.5B'));
 });
+
+test('导出自定义参数：选择保存时写入文件头部，导入后带回并已清洗', async () => {
+  const source = new MemStorage();
+  await populate(source);
+  const { blob, filename } = await buildModelFile(RECORD, {
+    storage: source,
+    adaptation: { params: { temperature: 0.2, maxTokens: 800, topP: 0.5 } },
+  });
+  const file = new File([blob], filename);
+  const { header } = await readModelFileHeader(file);
+  assert.deepEqual(header.adaptation, { params: { temperature: 0.2, maxTokens: 800 } });
+
+  const target = new MemStorage();
+  const result = await importModelFile(file, { storage: target, localId: 'local-p-1' });
+  assert.deepEqual(result.adaptation, { temperature: 0.2, maxTokens: 800 });
+});
+
+test('导出自定义参数：未选择时不写入参数字段，导入结果为 null', async () => {
+  const source = new MemStorage();
+  await populate(source);
+  const file = await exportToFile(source);
+  const { header } = await readModelFileHeader(file);
+  assert.equal(header.adaptation, undefined);
+  const result = await importModelFile(file, { storage: new MemStorage(), localId: 'local-p-2' });
+  assert.equal(result.adaptation, null);
+});
+
+test('导入：参数字段格式错误时拒绝；超出范围的数值被夹到合法范围', async () => {
+  assert.throws(
+    () => validateHeader({ format: 'oj-ai-model', version: 1, modelId: 'x', entries: [{ scope: 'webllm/wasm', url: 'https://a/b', size: 1, offset: 0 }], adaptation: 'bad' }),
+    /参数字段无效/,
+  );
+  const source = new MemStorage();
+  await populate(source);
+  const { blob, filename } = await buildModelFile(RECORD, { storage: source, adaptation: { params: { temperature: 1 } } });
+  const bytesIn = new Uint8Array(await blob.arrayBuffer());
+  // 手动把文件中的 temperature 改为 99（同长度替换不便，改为重新构造头部）
+  const dv = new DataView(bytesIn.buffer);
+  const hlen = dv.getUint32(4, true);
+  const header = JSON.parse(new TextDecoder().decode(bytesIn.slice(8, 8 + hlen)));
+  header.adaptation.params.temperature = 99;
+  const newHeader = new TextEncoder().encode(JSON.stringify(header));
+  const prefix = new Uint8Array(8);
+  prefix.set(bytesIn.slice(0, 4), 0);
+  new DataView(prefix.buffer).setUint32(4, newHeader.byteLength, true);
+  const rebuilt = new File([prefix, newHeader, bytesIn.slice(8 + hlen)], filename);
+  const result = await importModelFile(rebuilt, { storage: new MemStorage(), localId: 'local-p-3' });
+  assert.deepEqual(result.adaptation, { temperature: 1.5 });
+});

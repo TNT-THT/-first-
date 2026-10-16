@@ -19,6 +19,7 @@
  */
 
 import { LOCAL_MODEL_PREFIX } from './model-source.js';
+import { sanitizeParams } from './adaptation.js';
 
 const MAGIC = 'OJMD';
 const PREFIX_BYTES = 8;
@@ -113,7 +114,11 @@ function encodePrefix(headerLength) {
  * 把缓存中的模型打包成 .ojmodel Blob。
  * @returns {Promise<{blob: Blob, filename: string, size: number, entryCount: number}>}
  */
-export async function buildModelFile(record, { storage = globalThis.caches, onProgress, label } = {}) {
+/**
+ * @param {object} [options.adaptation] 可选：{ params } 本机调整过的采样参数（temperature / maxTokens）。
+ *   只有在传入且有效时才写入文件头部（字段 adaptation），不包含管理员的文字说明。
+ */
+export async function buildModelFile(record, { storage = globalThis.caches, onProgress, label, adaptation } = {}) {
   const entries = await collectModelEntries(record, storage);
   const blobs = [];
   const meta = [];
@@ -142,6 +147,8 @@ export async function buildModelFile(record, { storage = globalThis.caches, onPr
     createdAt: new Date().toISOString(),
     entries: meta,
   };
+  const params = sanitizeParams(adaptation?.params);
+  if (params) header.adaptation = { params };
   const headerBytes = new TextEncoder().encode(JSON.stringify(header));
   const blob = new Blob([encodePrefix(headerBytes.byteLength), headerBytes, ...blobs], {
     type: 'application/octet-stream',
@@ -163,6 +170,12 @@ export function validateHeader(h) {
   }
   if (typeof h.modelId !== 'string' || !h.modelId) throw new Error('模型文件缺少 modelId');
   if (!Array.isArray(h.entries) || h.entries.length === 0) throw new Error('模型文件没有任何数据条目');
+  if (h.adaptation !== undefined) {
+    // 旧版本导出的文件没有此字段；有此字段时必须是 { params: {...} }
+    if (!h.adaptation || typeof h.adaptation !== 'object' || !h.adaptation.params || typeof h.adaptation.params !== 'object') {
+      throw new Error('模型文件中的参数字段无效');
+    }
+  }
   for (const e of h.entries) {
     if (!CACHE_SCOPES.includes(e.scope)) throw new Error(`未知的缓存类别：${e.scope}`);
     if (typeof e.url !== 'string' || !/^https?:\/\//.test(e.url)) throw new Error('模型文件中的地址无效');
@@ -211,7 +224,8 @@ export async function readModelFileHeader(file) {
  * （LOCAL_MODEL_PREFIX + 新 id）下，因此即使导入的是同一个官方模型，
  * 也不会覆盖官方缓存。wasm 运行库地址保持不变（同一架构的运行库可共用）。
  *
- * @returns {Promise<{record: object, entryCount: number}>} 可直接用于推理的模型记录
+ * @returns {Promise<{record: object, entryCount: number, adaptation: object|null}>}
+ *   record 可直接用于推理；adaptation 为文件中带有的已清洗参数（没有则为 null）
  */
 export async function importModelFile(file, { storage = globalThis.caches, localId, onProgress } = {}) {
   const { header, dataStart } = await readModelFileHeader(file);
@@ -261,7 +275,7 @@ export async function importModelFile(file, { storage = globalThis.caches, local
     }
     throw err;
   }
-  return { record, entryCount: plan.length };
+  return { record, entryCount: plan.length, adaptation: sanitizeParams(header.adaptation?.params) };
 }
 
 /**

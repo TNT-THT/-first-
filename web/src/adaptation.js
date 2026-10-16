@@ -240,6 +240,45 @@ export function applyParamSuggestion(
 }
 
 /**
+ * 清洗参数对象：只保留 temperature / maxTokens，并夹到合法范围。
+ * 没有任何有效项时返回 null。导出文件与导入文件都使用它，避免写入或信任非法值。
+ */
+export function sanitizeParams(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const out = {};
+  for (const key of Object.keys(PARAM_LIMITS)) {
+    const value = Number(raw[key]);
+    if (raw[key] === undefined || raw[key] === null || raw[key] === '' || !Number.isFinite(value)) continue;
+    const limits = PARAM_LIMITS[key];
+    out[key] = Math.min(limits[1], Math.max(limits[0], key === 'maxTokens' ? Math.round(value) : value));
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/**
+ * 把一组参数写入某个模型（例如导入模型文件时带入的参数），并记入变更记录。
+ * 只写入有效且与当前值不同的项。返回实际写入的参数（可能为 null）。
+ */
+export function setModelParams(
+  modelId,
+  raw,
+  { storage = globalThis.localStorage, now = Date.now(), source = 'import', reason = '' } = {},
+) {
+  const params = sanitizeParams(raw);
+  if (!modelId || !params) return null;
+  const data = readAll(storage);
+  const entry = entryFor(data, modelId);
+  const changes = [];
+  for (const [key, value] of Object.entries(params)) {
+    if (entry.params[key] !== value) changes.push({ key, from: entry.params[key] ?? null, to: value });
+  }
+  entry.params = { ...entry.params, ...params };
+  if (changes.length) appendParamLog(entry, changes, { ts: now, source, reason });
+  writeAll(data, storage);
+  return params;
+}
+
+/**
  * 恢复某个参数为默认值（删除本机覆盖）。没有该覆盖时返回 false。
  */
 export function resetParam(modelId, key, { storage = globalThis.localStorage, now = Date.now() } = {}) {
@@ -252,4 +291,17 @@ export function resetParam(modelId, key, { storage = globalThis.localStorage, no
   appendParamLog(entry, [{ key, from, to: null }], { ts: now, source: 'reset', reason: '恢复默认' });
   writeAll(data, storage);
   return true;
+}
+
+/** 恢复某个模型的全部参数为默认值。返回被恢复的参数个数（0 表示没有覆盖）。 */
+export function resetAllParams(modelId, { storage = globalThis.localStorage, now = Date.now() } = {}) {
+  const data = readAll(storage);
+  const entry = data.models[modelId];
+  if (!entry || !entry.params) return 0;
+  const changes = Object.keys(entry.params).map((key) => ({ key, from: entry.params[key], to: null }));
+  if (!changes.length) return 0;
+  entry.params = {};
+  appendParamLog(entry, changes, { ts: now, source: 'reset', reason: '恢复全部默认' });
+  writeAll(data, storage);
+  return changes.length;
 }

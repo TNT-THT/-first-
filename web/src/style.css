@@ -379,6 +379,13 @@ body {
 }
 .composer .btn { height: 38px; }
 
+/* ---------- 本机参数覆盖（所有用户可见，可撤回）与导出选项 ---------- */
+.param-overrides { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
+.param-overrides[hidden] { display: none; }
+.param-overrides p { margin: 0; }
+.export-params { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.export-params input:disabled + span { color: var(--muted, #888); }
+
 /* ---------- 参数建议（仅管理员，需确认） ---------- */
 .adapt-suggest { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); background: var(--panel); }
 .adapt-suggest[hidden] { display: none; }

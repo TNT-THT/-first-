@@ -55,6 +55,7 @@
                 <p id="roleError" class="error small" role="alert"></p>
               </form>
               <button id="roleLogoutBtn" type="button" class="btn ghost small" hidden>退出管理员</button>
+              <div id="paramOverrides" class="param-overrides" hidden></div>
               <div class="role-section">
                 <p id="modelAdminHint" class="muted small"></p>
                 <div class="model-tools">
@@ -64,6 +65,10 @@
                   <input id="importModelInput" type="file" accept=".ojmodel" hidden />
                   <input id="importTrainInput" type="file" accept=".ojmodel" hidden />
                 </div>
+                <label class="export-params" id="exportParamsLabel">
+                  <input id="exportWithParams" type="checkbox" checked />
+                  <span id="exportParamsText"></span>
+                </label>
                 <div id="localModelList" class="local-list"></div>
                 <div class="role-section">
                   <p id="adaptHint" class="muted small"></p>

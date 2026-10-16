@@ -16,7 +16,10 @@ import {
   applyParamSuggestion,
   listParamLog,
   MAX_PARAM_LOG,
+  resetAllParams,
   resetParam,
+  sanitizeParams,
+  setModelParams,
   suggestParams,
 } from '../web/src/adaptation.js';
 
@@ -198,4 +201,43 @@ test('变更记录：只保留最近若干条，清空模型时一并删除', ()
   assert.equal(listParamLog('m', { storage: s }).length, MAX_PARAM_LOG);
   clearModelAdaptation('m', { storage: s });
   assert.deepEqual(listParamLog('m', { storage: s }), []);
+});
+
+test('参数清洗：只保留已知键，夹到范围内，无有效项时返回 null', () => {
+  assert.deepEqual(sanitizeParams({ temperature: 9, maxTokens: 10, topP: 0.5 }), { temperature: 1.5, maxTokens: 64 });
+  assert.deepEqual(sanitizeParams({ maxTokens: '800.4' }), { maxTokens: 800 });
+  assert.equal(sanitizeParams({ temperature: 'abc' }), null);
+  assert.equal(sanitizeParams({}), null);
+  assert.equal(sanitizeParams(null), null);
+});
+
+test('导入带入的参数：写入新的模型 id，变更记录来源为导入，相同值不重复记录', () => {
+  const s = memoryStorage();
+  assert.deepEqual(setModelParams('local-1', { temperature: 0.2, maxTokens: 800 }, { storage: s, now: 1, reason: '导入模型文件' }), {
+    temperature: 0.2,
+    maxTokens: 800,
+  });
+  assert.deepEqual(getModelParams('local-1', { storage: s }), { temperature: 0.2, maxTokens: 800 });
+  const log = listParamLog('local-1', { storage: s });
+  assert.equal(log.length, 2);
+  assert.equal(log[0].source, 'import');
+  assert.equal(log[0].reason, '导入模型文件');
+  setModelParams('local-1', { temperature: 0.2 }, { storage: s, now: 2 });
+  assert.equal(listParamLog('local-1', { storage: s }).length, 2);
+  assert.equal(setModelParams('local-1', { foo: 1 }, { storage: s }), null);
+  assert.equal(getModelParams('official-x', { storage: s }).temperature, undefined);
+});
+
+test('全部撤回：删除所有覆盖并记入变更记录；没有覆盖时返回 0', () => {
+  const s = memoryStorage();
+  setModelParams('m', { temperature: 0.2, maxTokens: 800 }, { storage: s });
+  assert.equal(resetAllParams('m', { storage: s, now: 9 }), 2);
+  assert.deepEqual(getModelParams('m', { storage: s }), {});
+  const log = listParamLog('m', { storage: s });
+  assert.deepEqual(log.slice(0, 2).map((c) => [c.key, c.to, c.source]), [
+    ['maxTokens', null, 'reset'],
+    ['temperature', null, 'reset'],
+  ]);
+  assert.equal(resetAllParams('m', { storage: s }), 0);
+  assert.equal(resetAllParams('nobody', { storage: s }), 0);
 });
