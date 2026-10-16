@@ -53,6 +53,10 @@
         "label": "Qwen3 8B（推理·中）"
       },
       {
+        "id": "Qwen3.5-4B-q4f16_1-MLC",
+        "label": "Qwen3.5 4B（推理·小）"
+      },
+      {
         "id": "Llama-3.2-1B-Instruct-q4f16_1-MLC",
         "label": "Llama 3.2 1B（非推理·极小）"
       },
@@ -91,6 +95,10 @@
       {
         "id": "Phi-4-mini-instruct-q4f16_1-MLC",
         "label": "Phi-4 mini 3.8B（非推理·小）"
+      },
+      {
+        "id": "Phi-3.5-mini-instruct-q4f16_1-MLC",
+        "label": "Phi-3.5 mini 3.8B（非推理·小）"
       },
       {
         "id": "SmolLM2-360M-Instruct-q4f16_1-MLC",
