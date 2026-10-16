@@ -14,6 +14,9 @@ import {
   recordFeedback,
   removeNote,
   applyParamSuggestion,
+  listParamLog,
+  MAX_PARAM_LOG,
+  resetParam,
   suggestParams,
 } from '../web/src/adaptation.js';
 
@@ -158,4 +161,41 @@ test('确认参数建议：写入该模型并受范围限制；未知参数被�
   assert.equal(applyParamSuggestion('m', 'topP', 0.5, { storage: s }), null);
   assert.equal(applyParamSuggestion('', 'maxTokens', 400, { storage: s }), null);
   assert.equal(getModelParams('other', { storage: s }).maxTokens, undefined);
+});
+
+test('变更记录：显式参数行记录旧值（默认为 null）与新值，相同值不重复记录', () => {
+  const s = memoryStorage();
+  const r1 = recordFeedback('m', '参数：temperature=0.2', { storage: s, now: 1 });
+  assert.deepEqual(r1.changes, [{ key: 'temperature', from: null, to: 0.2 }]);
+  const r2 = recordFeedback('m', '参数：temperature=0.2', { storage: s, now: 2 });
+  assert.deepEqual(r2.changes, []);
+  recordFeedback('m', '参数：temperature=0.5', { storage: s, now: 3 });
+  const log = listParamLog('m', { storage: s });
+  assert.equal(log.length, 2);
+  assert.deepEqual(log[0], { ts: 3, key: 'temperature', from: 0.2, to: 0.5, source: 'explicit', reason: '显式参数行' });
+  assert.deepEqual(log[1], { ts: 1, key: 'temperature', from: null, to: 0.2, source: 'explicit', reason: '显式参数行' });
+});
+
+test('变更记录：建议确认与恢复默认都有来源', () => {
+  const s = memoryStorage();
+  applyParamSuggestion('m', 'maxTokens', 400, { storage: s, now: 5, reason: '希望回答更简洁' });
+  assert.equal(listParamLog('m', { storage: s })[0].source, 'suggestion');
+  assert.equal(listParamLog('m', { storage: s })[0].reason, '确认建议：希望回答更简洁');
+  assert.equal(resetParam('m', 'maxTokens', { storage: s, now: 6 }), true);
+  assert.deepEqual(getModelParams('m', { storage: s }), {});
+  assert.deepEqual(listParamLog('m', { storage: s })[0], {
+    ts: 6, key: 'maxTokens', from: 400, to: null, source: 'reset', reason: '恢复默认',
+  });
+  assert.equal(resetParam('m', 'maxTokens', { storage: s }), false);
+  assert.equal(resetParam('nobody', 'maxTokens', { storage: s }), false);
+});
+
+test('变更记录：只保留最近若干条，清空模型时一并删除', () => {
+  const s = memoryStorage();
+  for (let i = 0; i < MAX_PARAM_LOG + 10; i++) {
+    recordFeedback('m', `参数：maxTokens=${100 + i}`, { storage: s, now: i });
+  }
+  assert.equal(listParamLog('m', { storage: s }).length, MAX_PARAM_LOG);
+  clearModelAdaptation('m', { storage: s });
+  assert.deepEqual(listParamLog('m', { storage: s }), []);
 });

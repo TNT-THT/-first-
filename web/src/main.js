@@ -22,8 +22,10 @@ import {
   clearModelAdaptation,
   getModelParams,
   listAdaptation,
+  listParamLog,
   recordFeedback,
   removeNote,
+  resetParam,
   suggestParams,
 } from './adaptation.js';
 import {
@@ -310,7 +312,10 @@ function recordAdminFeedback(session, text) {
   if (!rec) return;
   const parts = [];
   if (rec.note) parts.push('已记录反馈');
-  if (rec.params) parts.push('已更新参数 ' + Object.entries(rec.params).map(([k, v]) => `${k}=${v}`).join(', '));
+  if (rec.params) {
+    const changed = (rec.changes || []).map((c) => `${c.key} ${c.from ?? '默认'}→${c.to}`);
+    parts.push('已更新参数 ' + (changed.length ? changed.join(', ') : '（未变化）'));
+  }
   // 没有显式参数行时，按关键词给出“建议参数”，必须由管理员确认后才生效
   let suggested = 0;
   if (!rec.params) {
@@ -382,7 +387,7 @@ function acceptSuggestion(id) {
   if (!requireAdmin('确认参数建议')) return;
   const s = pendingSuggestions.find((x) => x.id === id);
   if (!s) return;
-  const value = applyParamSuggestion(s.modelId, s.key, s.value);
+  const value = applyParamSuggestion(s.modelId, s.key, s.value, { reason: s.reason });
   pendingSuggestions = pendingSuggestions.filter((x) => x.id !== id);
   renderSuggestions();
   renderAdaptList();
@@ -815,7 +820,7 @@ function deleteAdaptNote(modelId, noteId) {
 
 function clearAdaptation(modelId) {
   if (!requireAdmin('清空 AI 适应记录')) return;
-  if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录？`)) return;
+  if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录（包括说明、参数与参数变更记录）？`)) return;
   clearModelAdaptation(modelId);
   dropPendingSuggestions(modelId);
   renderAdaptList();
@@ -990,13 +995,68 @@ function renderAdaptList() {
       row.append(t, del);
       list.append(row);
     }
-    if (Object.keys(params).length) {
-      const p = document.createElement('div');
-      p.className = 'muted small local-meta';
-      p.textContent = '参数：' + Object.entries(params).map(([k, v]) => `${k}=${v}`).join(', ');
-      list.append(p);
+    renderParamDetails(list, id, params);
+  }
+}
+
+const PARAM_SOURCE_LABEL = { explicit: '参数行', suggestion: '建议确认', reset: '恢复默认' };
+
+function formatLogTime(ts) {
+  return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+}
+
+/** 当前生效值（区分默认与本机覆盖）、恢复默认按钮，以及最近的参数变更记录。 */
+function renderParamDetails(list, modelId, overrides) {
+  const eff = effectiveParams(modelId);
+  const line = document.createElement('div');
+  line.className = 'muted small local-meta';
+  line.textContent =
+    '当前生效：' +
+    ['temperature', 'maxTokens']
+      .map((k) => `${k} = ${eff[k]}（${k in overrides ? '本机覆盖' : '默认'}）`)
+      .join('｜');
+  list.append(line);
+
+  for (const key of Object.keys(overrides)) {
+    const row = document.createElement('div');
+    row.className = 'local-row';
+    const t = document.createElement('div');
+    t.className = 'muted small local-meta';
+    t.textContent = `${key} 已被覆盖为 ${overrides[key]}`;
+    const reset = document.createElement('button');
+    reset.type = 'button';
+    reset.className = 'btn ghost small';
+    reset.dataset.action = 'adapt-reset';
+    reset.dataset.id = modelId;
+    reset.dataset.key = key;
+    reset.textContent = '恢复默认';
+    row.append(t, reset);
+    list.append(row);
+  }
+
+  const log = listParamLog(modelId).slice(0, 10);
+  if (log.length) {
+    const title = document.createElement('div');
+    title.className = 'muted small local-meta';
+    title.textContent = `参数变更记录（最近 ${log.length} 条，最新在前）：`;
+    list.append(title);
+    for (const c of log) {
+      const row = document.createElement('div');
+      row.className = 'muted small local-meta';
+      const src = PARAM_SOURCE_LABEL[c.source] || c.source;
+      const why = c.source === 'suggestion' ? `（${c.reason.replace(/^确认建议：/, '')}）` : '';
+      row.textContent =
+        `${formatLogTime(c.ts)}  ${c.key}：${c.from ?? '默认'} → ${c.to ?? '默认'}  来源：${src}${why}`;
+      list.append(row);
     }
   }
+}
+
+function resetAdaptParam(modelId, key) {
+  if (!requireAdmin('恢复默认参数')) return;
+  if (!resetParam(modelId, key)) return;
+  renderAdaptList();
+  showStatus(`已恢复「${modelDisplayName(modelId)}」的 ${key} 为默认值（仅本机，从下一次回答起生效）。`);
 }
 
 /** 新建AI 列表：显示导入地址（本地缓存标识），管理员可删除。 */
@@ -1110,6 +1170,7 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
   if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
   if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
+  if (btn && btn.dataset.action === 'adapt-reset') return resetAdaptParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'suggest-accept') return acceptSuggestion(btn.dataset.id);
   if (btn && btn.dataset.action === 'suggest-dismiss') return dismissSuggestion(btn.dataset.id);
   if (!e.target.closest('.chat-head')) {
