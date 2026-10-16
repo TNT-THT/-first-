@@ -27,6 +27,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="LoRA 微调（仅对 assistant 回复计算损失）")
     p.add_argument("--base", required=True, help="基础模型：HF 仓库 id 或本地目录")
     p.add_argument("--data", required=True, help="训练数据 JSONL（messages 格式）")
+    p.add_argument("--val-data", default=None, help="可选：验证集 JSONL，每个 epoch 结束计算验证 loss")
     p.add_argument("--output-dir", required=True, help="保存 LoRA 适配器的目录")
     p.add_argument("--merged-dir", default=None, help="可选：保存合并后的完整模型")
     p.add_argument("--epochs", type=float, default=2.0)
@@ -64,6 +65,53 @@ def load_examples(path):
     return examples
 
 
+# 候选的注意力投影名称（按优先级）。不同架构的命名不同：Llama/Qwen/Mistral/Gemma 为 q/k/v/o_proj，
+# Phi-3 把 q/k/v 合并为 qkv_proj。只使用模型中真实存在的名称。
+ATTENTION_PROJ_CANDIDATES = ("q_proj", "k_proj", "v_proj", "o_proj", "qkv_proj", "dense")
+
+
+def resolve_target_modules(model, requested):
+    """返回要挂载 LoRA 的模块名列表。
+
+    requested 中的名称若在模型中存在则直接使用；若一个都不存在，则从常见的注意力投影名称中自动选择。
+    """
+    import torch.nn as nn
+
+    names = set()
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Linear):
+            names.add(name.split(".")[-1])
+    wanted = [m.strip() for m in requested if m and m.strip()]
+    missing = [m for m in wanted if m not in names]
+    if not missing:
+        chosen = wanted
+    else:
+        # 有请求的模块不存在（例如 Phi-3 没有 q_proj/k_proj/v_proj）：改用模型中实际存在的注意力投影
+        chosen = [m for m in ATTENTION_PROJ_CANDIDATES if m in names]
+        if chosen:
+            print(f"注意：模型中没有 {', '.join(missing)}，LoRA 改用 {', '.join(chosen)}", flush=True)
+        else:
+            chosen = [m for m in wanted if m in names]
+    if not chosen:
+        raise SystemExit("无法为该模型确定 LoRA 目标模块：找不到常见的注意力投影层（q_proj/qkv_proj 等）。"
+                         "请用 --target-modules 指定。可用的线性层名称：" + ", ".join(sorted(names)[:40]))
+    return chosen
+
+
+def _fold_system(messages):
+    """把 system 消息并入第一条 user 消息（用于不支持 system 角色的模板，例如 Gemma）。"""
+    system = [m["content"] for m in messages if m["role"] == "system"]
+    rest = [m for m in messages if m["role"] != "system"]
+    if not system:
+        return messages
+    prefix = "\n\n".join(s for s in system if s)
+    if rest and rest[0]["role"] == "user":
+        rest = [{"role": "user", "content": f"{prefix}\n\n{rest[0]['content']}"}] + rest[1:]
+    else:
+        rest = [{"role": "user", "content": prefix}] + rest
+    return rest
+
+
 def _chat_ids(tokenizer, messages, add_generation_prompt):
     out = tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=add_generation_prompt
@@ -80,6 +128,12 @@ def build_features(examples, tokenizer, max_length):
     skipped = 0
     for ex in examples:
         msgs = ex["messages"]
+        if any(m["role"] == "system" for m in msgs):
+            try:
+                _chat_ids(tokenizer, msgs, add_generation_prompt=False)
+            except Exception:
+                # 模板不接受 system 角色（例如 Gemma）：并入第一条用户消息后重试
+                msgs = _fold_system(msgs)
         ids = _chat_ids(tokenizer, msgs, add_generation_prompt=False)
         labels = [-100] * len(ids)
         for i, m in enumerate(msgs):
@@ -153,6 +207,14 @@ def train(args):
         raise SystemExit("没有可训练的样本（全部超长或没有 assistant 回复）。")
     print(f"训练样本：{len(features)} 条，跳过 {skipped} 条", flush=True)
 
+    val_features = None
+    if args.val_data:
+        val_examples = load_examples(args.val_data)
+        val_features, val_skipped = build_features(val_examples, tokenizer, args.max_length)
+        if not val_features:
+            val_features = None
+        print(f"验证样本：{len(val_features or [])} 条，跳过 {val_skipped} 条", flush=True)
+
     dtype = pick_dtype(args.dtype, args.cpu)
     model = AutoModelForCausalLM.from_pretrained(args.base, dtype=dtype)
     if args.grad_checkpointing:
@@ -162,10 +224,11 @@ def train(args):
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
-        target_modules=[m.strip() for m in args.target_modules.split(",") if m.strip()],
+        target_modules=resolve_target_modules(model, args.target_modules.split(",")),
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, lora)
+    print("LoRA 目标模块：" + ", ".join(sorted(lora.target_modules)), flush=True)
     model.print_trainable_parameters()
 
     use_cuda = torch.cuda.is_available() and not args.cpu
@@ -178,6 +241,7 @@ def train(args):
         max_steps=args.max_steps,
         logging_steps=10,
         save_strategy="no",
+        eval_strategy="epoch" if val_features else "no",
         bf16=use_cuda and dtype == torch.bfloat16,
         fp16=use_cuda and dtype == torch.float16,
         report_to=[],
@@ -189,10 +253,14 @@ def train(args):
         model=model,
         args=training_args,
         train_dataset=features,
+        eval_dataset=val_features,
         data_collator=make_collator(tokenizer.pad_token_id),
     )
     started = time.time()
     result = trainer.train()
+    eval_loss = None
+    if val_features:
+        eval_loss = trainer.evaluate().get("eval_loss")
 
     os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir)
@@ -211,8 +279,10 @@ def train(args):
         "skipped": skipped,
         "steps": result.global_step,
         "train_loss": result.training_loss,
+        "val_examples": len(val_features) if val_features else 0,
+        "eval_loss": eval_loss,
         "seconds": round(time.time() - started, 1),
-        "lora": {"r": args.lora_r, "alpha": args.lora_alpha, "target_modules": sorted(args.target_modules.split(","))},
+        "lora": {"r": args.lora_r, "alpha": args.lora_alpha, "target_modules": sorted(lora.target_modules)},
         "seed": args.seed,
         "dtype": str(dtype).replace("torch.", ""),
     }

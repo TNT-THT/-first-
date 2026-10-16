@@ -6,7 +6,13 @@ web/dist/
 *.log
 .DS_Store
 
-# 训练运行时产物（不进入仓库）
+# 训练运行时：个人配置、数据、模型、中间产物都不进入仓库
+training/config.json
+training/data/
+training/models/
+training/work/
+training/libs/
+training/.venv/
 training/runs/
 training/out/
 training/**/__pycache__/

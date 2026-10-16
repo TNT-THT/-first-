@@ -56,3 +56,85 @@ class PrepareDatasetTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+import json as _json  # noqa: E402
+import tempfile  # noqa: E402
+
+
+class LoadAndSplitTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, name, text):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_csv_with_bom_and_blank_rows(self):
+        path = self._write("d.csv", "\ufeffprompt,response\n问一,答一\n,\n问二,答二\n")
+        objs, skipped = pd.load_objects(path)
+        self.assertEqual(len(objs), 2)
+        kept, _ = pd.process_objects(objs)
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(kept[1]["messages"][0]["content"], "问二")
+
+    def test_json_array(self):
+        path = self._write("d.json", _json.dumps([{"prompt": "问", "response": "答"}], ensure_ascii=False))
+        objs, _ = pd.load_objects(path)
+        self.assertEqual(len(objs), 1)
+
+    def test_json_must_be_array(self):
+        path = self._write("d.json", '{"prompt": "问"}')
+        with self.assertRaisesRegex(ValueError, "数组"):
+            pd.load_objects(path)
+
+    def test_unsupported_extension(self):
+        path = self._write("d.xlsx", "x")
+        with self.assertRaisesRegex(ValueError, "不支持"):
+            pd.load_objects(path)
+
+    def test_split_is_deterministic_and_disjoint(self):
+        items = [{"messages": [{"role": "user", "content": str(i)}]} for i in range(100)]
+        train_a, val_a = pd.split(items, 0.1, seed=7)
+        train_b, val_b = pd.split(items, 0.1, seed=7)
+        self.assertEqual(val_a, val_b)
+        self.assertEqual(len(val_a), 10)
+        self.assertEqual(len(train_a) + len(val_a), 100)
+        self.assertFalse({id(x) for x in train_a} & {id(x) for x in val_a})
+
+    def test_small_dataset_is_not_split(self):
+        items = [{"messages": []}] * 5
+        train, val = pd.split(items, 0.5)
+        self.assertEqual(len(train), 5)
+        self.assertEqual(val, [])
+
+    def test_build_dataset_writes_files_and_stats(self):
+        rows = [{"prompt": f"问{i}", "response": f"答{i}"} for i in range(40)] + [{"prompt": "", "response": "x"}]
+        path = self._write("raw.jsonl", "\n".join(_json.dumps(r, ensure_ascii=False) for r in rows))
+        out = os.path.join(self.dir, "out")
+        info = pd.build_dataset(path, out, val_ratio=0.1, seed=1)
+        self.assertEqual(info["train"] + info["val"], 40)
+        self.assertEqual(info["skipped"], {"prompt 为空": 1})
+        self.assertTrue(os.path.isfile(os.path.join(out, "train.jsonl")))
+        self.assertTrue(os.path.isfile(os.path.join(out, "val.jsonl")))
+
+    def test_build_dataset_without_split_removes_stale_val(self):
+        path = self._write("raw.jsonl", '{"prompt": "问", "response": "答"}')
+        out = os.path.join(self.dir, "out")
+        os.makedirs(out)
+        with open(os.path.join(out, "val.jsonl"), "w") as f:
+            f.write("stale")
+        info = pd.build_dataset(path, out, val_ratio=0.0)
+        self.assertIsNone(info["val_path"])
+        self.assertFalse(os.path.exists(os.path.join(out, "val.jsonl")))
+
+    def test_build_dataset_rejects_when_nothing_valid(self):
+        path = self._write("raw.jsonl", '{"prompt": "", "response": ""}')
+        with self.assertRaisesRegex(ValueError, "没有可用的样本"):
+            pd.build_dataset(path, self.dir)

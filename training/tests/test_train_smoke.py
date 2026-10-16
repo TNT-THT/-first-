@@ -85,5 +85,79 @@ class TrainSmokeTest(unittest.TestCase):
         self.assertEqual(model(ids).logits.shape[-1], model.config.vocab_size)
 
 
+
+@unittest.skipUnless(HAVE_DEPS, "未安装 torch/transformers/peft，跳过训练冒烟测试")
+class ArchitectureTest(unittest.TestCase):
+    """不同架构的极小随机模型都能完成 LoRA 训练与合并；不验证模型质量。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.data = os.path.join(cls.tmp.name, "data.jsonl")
+        with open(cls.data, "w", encoding="utf-8") as f:
+            for i in range(6):
+                f.write(json.dumps({"messages": [
+                    {"role": "system", "content": "你是刷题助手"},
+                    {"role": "user", "content": f"题{i}"},
+                    {"role": "assistant", "content": f"答{i}"},
+                ]}, ensure_ascii=False) + "\n")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def _train(self, arch, reject_system=False):
+        import make_tiny_model
+        import train_lora
+
+        base = os.path.join(self.tmp.name, f"base-{arch}-{int(reject_system)}")
+        make_tiny_model.build(base, arch=arch, reject_system=reject_system)
+        out = os.path.join(self.tmp.name, f"run-{arch}-{int(reject_system)}")
+        merged = os.path.join(self.tmp.name, f"merged-{arch}-{int(reject_system)}")
+        rc = train_lora.main([
+            "--base", base, "--data", self.data, "--output-dir", out, "--merged-dir", merged,
+            "--max-steps", "1", "--batch-size", "1", "--grad-accum", "1", "--cpu", "--dtype", "fp32",
+            "--lora-r", "4", "--lora-alpha", "8", "--target-modules", "q_proj,k_proj,v_proj,o_proj",
+        ])
+        self.assertEqual(rc, 0)
+        with open(os.path.join(out, "training_meta.json"), encoding="utf-8") as f:
+            return json.load(f), merged
+
+    def test_qwen_style_uses_q_k_v_o(self):
+        meta, merged = self._train("qwen2")
+        self.assertEqual(meta["lora"]["target_modules"], ["k_proj", "o_proj", "q_proj", "v_proj"])
+        self.assertTrue(os.path.isfile(os.path.join(merged, "model.safetensors")))
+
+    def test_each_architecture_trains_and_merges(self):
+        for arch in ("llama", "mistral", "qwen3", "gemma2"):
+            with self.subTest(arch=arch):
+                meta, merged = self._train(arch)
+                self.assertEqual(meta["steps"], 1)
+                self.assertTrue(os.path.isfile(os.path.join(merged, "model.safetensors")))
+
+    def test_phi3_falls_back_to_fused_projections(self):
+        meta, _ = self._train("phi3")
+        self.assertEqual(meta["lora"]["target_modules"], ["o_proj", "qkv_proj"])
+
+    def test_template_without_system_role(self):
+        meta, _ = self._train("gemma2", reject_system=True)
+        self.assertEqual(meta["steps"], 1)
+        self.assertEqual(meta["examples"], 6)
+
+    def test_unknown_module_request_falls_back_with_note(self):
+        import io
+        import contextlib
+        import train_lora
+        from transformers import AutoModelForCausalLM
+
+        base = os.path.join(self.tmp.name, "base-qwen2-0")
+        model = AutoModelForCausalLM.from_pretrained(base)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            chosen = train_lora.resolve_target_modules(model, ["no_such_proj"])
+        self.assertEqual(sorted(chosen), ["k_proj", "o_proj", "q_proj", "v_proj"])
+        self.assertIn("no_such_proj", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
