@@ -18,6 +18,8 @@
  * 注意：Cache Storage 按站点（协议 + 域名 + 端口）隔离，导入必须在同一个站点上进行。
  */
 
+import { LOCAL_MODEL_PREFIX } from './model-source.js';
+
 const MAGIC = 'OJMD';
 const PREFIX_BYTES = 8;
 const MAX_HEADER_BYTES = 16 * 1024 * 1024;
@@ -41,6 +43,17 @@ function fileUrl(base, name) {
 
 function safeFileName(id) {
   return String(id).replace(/[^A-Za-z0-9._-]+/g, '_');
+}
+
+function pickDefined(obj, keys) {
+  const out = {};
+  for (const k of keys) if (obj[k] !== undefined) out[k] = obj[k];
+  return out;
+}
+
+function makeLocalId(modelId) {
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `${safeFileName(modelId)}-${Date.now().toString(36)}-${rand}`;
 }
 
 async function keysOf(storage, scope) {
@@ -100,7 +113,7 @@ function encodePrefix(headerLength) {
  * 把缓存中的模型打包成 .ojmodel Blob。
  * @returns {Promise<{blob: Blob, filename: string, size: number, entryCount: number}>}
  */
-export async function buildModelFile(record, { storage = globalThis.caches, onProgress } = {}) {
+export async function buildModelFile(record, { storage = globalThis.caches, onProgress, label } = {}) {
   const entries = await collectModelEntries(record, storage);
   const blobs = [];
   const meta = [];
@@ -120,7 +133,12 @@ export async function buildModelFile(record, { storage = globalThis.caches, onPr
     format: FORMAT,
     version: FORMAT_VERSION,
     modelId: record.model_id,
-    source: { model: record.model, model_lib: record.model_lib },
+    ...(label ? { label: String(label).slice(0, 200) } : {}),
+    source: {
+      model: record.model,
+      model_lib: record.model_lib,
+      ...pickDefined(record, ['overrides', 'vram_required_MB', 'low_resource_required']),
+    },
     createdAt: new Date().toISOString(),
     entries: meta,
   };
@@ -187,36 +205,63 @@ export async function readModelFileHeader(file) {
 }
 
 /**
- * 把 .ojmodel 文件写回缓存，使 WebLLM 可以离线读取该模型。
- * @param {File} file 用户选择的文件
- * @param {object} record 当前配置中与文件 modelId 对应的模型记录（包含 model 与 model_lib）
+ * 把 .ojmodel 文件导入为一个独立的“新建 AI”，写入浏览器缓存。
+ *
+ * 为避免污染官方模型：文件中的缓存地址会被改写到本地虚拟地址
+ * （LOCAL_MODEL_PREFIX + 新 id）下，因此即使导入的是同一个官方模型，
+ * 也不会覆盖官方缓存。wasm 运行库地址保持不变（同一架构的运行库可共用）。
+ *
+ * @returns {Promise<{record: object, entryCount: number}>} 可直接用于推理的模型记录
  */
-export async function importModelFile(file, record, { storage = globalThis.caches, onProgress } = {}) {
+export async function importModelFile(file, { storage = globalThis.caches, localId, onProgress } = {}) {
   const { header, dataStart } = await readModelFileHeader(file);
-  if (header.modelId !== record.model_id) {
-    throw new Error(`文件属于模型 ${header.modelId}，与所选模型 ${record.model_id} 不一致`);
-  }
-  // 缓存键必须与当前配置的下载地址一致，否则 WebLLM 找不到这些条目
-  const base = cleanModelUrl(record.model);
-  for (const e of header.entries) {
-    const ok = e.scope === 'webllm/wasm' ? e.url === record.model_lib : e.url.startsWith(base);
-    if (!ok) {
-      throw new Error('模型文件的下载地址与当前配置不一致（可能是镜像设置不同），无法导入。请检查 config.json 中的 mirrorOwner。');
+  const src = header.source || {};
+  if (!src.model || !src.model_lib) throw new Error('模型文件缺少来源信息，无法导入');
+
+  const origBase = cleanModelUrl(src.model);
+  const id = localId || makeLocalId(header.modelId);
+  const record = {
+    model_id: id,
+    model: `${LOCAL_MODEL_PREFIX}${id}`,
+    model_lib: src.model_lib,
+    ...pickDefined(src, ['overrides', 'vram_required_MB', 'low_resource_required']),
+  };
+  const newBase = cleanModelUrl(record.model);
+
+  const plan = header.entries.map((e) => {
+    if (e.scope === 'webllm/wasm') {
+      if (e.url !== src.model_lib) throw new Error('模型文件中的运行库地址与来源不一致，文件可能已损坏');
+      return { ...e, url: e.url };
     }
-  }
+    if (!e.url.startsWith(origBase)) throw new Error('模型文件中的地址与来源不一致，文件可能已损坏');
+    return { ...e, url: newBase + e.url.slice(origBase.length) };
+  });
 
-  let done = 0;
-  for (const e of header.entries) {
-    const cache = await storage.open(e.scope);
-    const body = file.slice(dataStart + e.offset, dataStart + e.offset + e.size);
-    await cache.put(e.url, new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }));
-    done += 1;
-    onProgress?.({ done, total: header.entries.length });
+  const written = [];
+  try {
+    let done = 0;
+    for (const e of plan) {
+      const cache = await storage.open(e.scope);
+      const body = file.slice(dataStart + e.offset, dataStart + e.offset + e.size);
+      await cache.put(e.url, new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }));
+      written.push({ scope: e.scope, url: e.url });
+      done += 1;
+      onProgress?.({ done, total: plan.length });
+    }
+    // 导入后再校验一次，确保模型已完整可用
+    await collectModelEntries(record, storage);
+  } catch (err) {
+    // 失败时清理已写入的条目，避免残留半成品
+    for (const w of written) {
+      try {
+        await (await storage.open(w.scope)).delete(w.url);
+      } catch {
+        /* 忽略清理错误 */
+      }
+    }
+    throw err;
   }
-
-  // 导入后再校验一次，确保模型已完整可用
-  await collectModelEntries(record, storage);
-  return { modelId: header.modelId, entryCount: header.entries.length };
+  return { record, entryCount: plan.length };
 }
 
 /**
@@ -224,6 +269,23 @@ export async function importModelFile(file, record, { storage = globalThis.cache
  * @param {Array<object>} records 模型记录列表
  * @returns {Promise<Set<string>>} 已缓存的 model_id 集合
  */
+/**
+ * 删除一个“新建 AI”在缓存中的文件（仅限本地虚拟地址下的权重与配置）。
+ * 运行库（wasm）可能被官方模型共用，因此保留，不删除。
+ */
+export async function removeLocalModelFiles(record, storage = globalThis.caches) {
+  if (!String(record.model || '').startsWith(LOCAL_MODEL_PREFIX)) throw new Error('只能删除新建 AI 的缓存');
+  const base = cleanModelUrl(record.model);
+  let removed = 0;
+  for (const scope of ['webllm/model', 'webllm/config']) {
+    const cache = await storage.open(scope);
+    for (const url of await keysOf(storage, scope)) {
+      if (url.startsWith(base) && (await cache.delete(url))) removed += 1;
+    }
+  }
+  return removed;
+}
+
 export async function listCachedModelIds(records, storage = globalThis.caches) {
   const sets = {};
   for (const scope of CACHE_SCOPES) sets[scope] = new Set(await keysOf(storage, scope));

@@ -8,7 +8,8 @@ import { createToken, verifyToken, checkPassword } from '../server/auth.js';
 import { createHash } from 'node:crypto';
 import { sha256TextHex } from '../web/src/sha256.js';
 import { stripThinking, hasThinking } from '../web/src/think.js';
-import { buildModelList } from '../web/src/model-source.js';
+import { buildModelList, isLocalRecord, LOCAL_MODEL_PREFIX } from '../web/src/model-source.js';
+import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from '../web/src/local-models.js';
 import { sha256Hex, verifyAccessPassword } from '../web/src/access.js';
 
 test('Markdown：代码块带语言标签与复制按钮，并做语法高亮', () => {
@@ -169,6 +170,39 @@ test('模型列表：自定义记录加入，同 model_id 的内置记录被替�
 test('模型列表：设置 mirrorOwner 后所有模型地址指向自己的 Hugging Face 仓库', () => {
   const list = buildModelList([{ model_id: 'A', model: 'x' }], [], 'my-name');
   assert.equal(list[0].model, 'https://huggingface.co/my-name/A');
+});
+
+test('模型列表：设置 mirrorOwner 时不改写“新建AI”的本地地址', () => {
+  const local = { model_id: 'local-1', model: `${LOCAL_MODEL_PREFIX}local-1`, model_lib: 'w.wasm' };
+  const list = buildModelList([{ model_id: 'A', model: 'x' }], [local], 'my-name');
+  assert.equal(list.find((r) => r.model_id === 'local-1').model, `${LOCAL_MODEL_PREFIX}local-1`);
+  assert.equal(list.find((r) => r.model_id === 'A').model, 'https://huggingface.co/my-name/A');
+  assert.ok(isLocalRecord(local));
+  assert.ok(!isLocalRecord({ model: 'https://huggingface.co/a/b' }));
+});
+
+/** 内存版 localStorage，接口与浏览器 Storage 的子集一致。 */
+function memStorage() {
+  const m = new Map();
+  return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k) };
+}
+
+test('新建AI登记：增删改查，并忽略非本地记录', () => {
+  const st = memStorage();
+  const rec = { model_id: 'local-1', model: `${LOCAL_MODEL_PREFIX}local-1`, model_lib: 'w.wasm' };
+  addLocalModel({ id: 'local-1', label: 'X（导入）', baseLabel: 'X', source: 'import', record: rec }, st);
+  addLocalModel({ id: 'bad', label: 'bad', record: { model: 'https://huggingface.co/a/b' } }, st);
+  const list = loadLocalModels(st);
+  assert.deepEqual(list.map((e) => e.id), ['local-1']);
+  assert.deepEqual(localRecords(list), [rec]);
+  removeLocalModel('local-1', st);
+  assert.deepEqual(loadLocalModels(st), []);
+});
+
+test('新建AI登记：损坏的存储内容不会导致报错', () => {
+  const st = memStorage();
+  st.setItem('oj-ai.localModels', '{not json');
+  assert.deepEqual(loadLocalModels(st), []);
 });
 
 test('模型列表：mirrorOwner 含斜杠或非法字符时拒绝', () => {

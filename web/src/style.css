@@ -473,6 +473,39 @@ body.embed .model-select { display: none !important; }
 .model-tools { display: flex; gap: 6px; width: 100%; }
 .model-tools .btn { flex: 1 1 0; }
 body.embed .model-tools { display: none !important; }
+body.embed .role-section { display: none !important; }
+
+/* ---------- 权限 / 新建AI ---------- */
+.role-badge {
+  flex: 0 0 auto;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.role-badge.is-admin { color: var(--accent, #2563eb); border-color: currentColor; }
+.role-panel { max-height: 70vh; display: flex; flex-direction: column; gap: 8px; }
+.role-status { margin: 0; font-size: 13px; }
+.role-form { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.role-form input {
+  flex: 1 1 160px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+.role-form .error { flex: 1 1 100%; margin: 0; }
+.role-section { border-top: 1px solid var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.role-section p { margin: 0; }
+.local-list { display: flex; flex-direction: column; gap: 6px; }
+.local-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 6px 4px; border-bottom: 1px dashed var(--border); }
+.local-name { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.local-meta { grid-column: 1 / -1; word-break: break-all; }
+.local-row .btn { grid-row: 1; grid-column: 2; align-self: start; }
+
 
 /* ---------- 引用选中文字 ---------- */
 .quote-btn {

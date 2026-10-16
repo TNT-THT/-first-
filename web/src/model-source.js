@@ -11,6 +11,16 @@
 const OWNER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$/;
 
 /**
+ * 本地“新建 AI”的虚拟地址前缀。这些模型的文件只存在于浏览器缓存中，
+ * 地址只用作缓存键，不会真正访问网络，也不会被镜像设置改写。
+ */
+export const LOCAL_MODEL_PREFIX = 'https://local.oj-ai.invalid/models/';
+
+export function isLocalRecord(record) {
+  return String(record?.model || '').startsWith(LOCAL_MODEL_PREFIX);
+}
+
+/**
  * 合并内置模型列表、自定义记录，并按需替换为自己的 Hugging Face 地址。
  * @param {Array<{model_id: string, model: string}>} builtinList WebLLM 内置的模型记录
  * @param {Array<object>} [extraRecords] 自定义模型记录，同 model_id 的内置记录会被替换
@@ -27,8 +37,9 @@ export function buildModelList(builtinList, extraRecords = [], mirrorOwner = '')
   if (!OWNER_PATTERN.test(owner)) {
     throw new Error('mirrorOwner 只能包含字母、数字、点、下划线和短横线，且不能包含斜杠。');
   }
-  return merged.map((record) => ({
-    ...record,
-    model: `https://huggingface.co/${owner}/${record.model_id}`,
-  }));
+  return merged.map((record) =>
+    isLocalRecord(record)
+      ? record
+      : { ...record, model: `https://huggingface.co/${owner}/${record.model_id}` }
+  );
 }

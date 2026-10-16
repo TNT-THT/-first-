@@ -7,8 +7,15 @@ import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
 import { checkWebGPU, getModelRecords, WEBGPU_MISSING } from './engines/webllm.js';
-import { buildModelFile, importModelFile, listCachedModelIds, readModelFileHeader } from './model-file.js';
-import { hasAccessGate, isUnlocked, setUnlocked, verifyAccessPassword } from './access.js';
+import {
+  buildModelFile,
+  importModelFile,
+  listCachedModelIds,
+  readModelFileHeader,
+  removeLocalModelFiles,
+} from './model-file.js';
+import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
+import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
 import {
   buildContext,
   createSession,
@@ -54,6 +61,19 @@ const els = {
   exportModelBtn: $('#exportModelBtn'),
   importModelBtn: $('#importModelBtn'),
   importModelInput: $('#importModelInput'),
+  importTrainBtn: $('#importTrainBtn'),
+  importTrainInput: $('#importTrainInput'),
+  roleBtn: $('#roleBtn'),
+  roleBadge: $('#roleBadge'),
+  rolePanel: $('#rolePanel'),
+  roleStatus: $('#roleStatus'),
+  roleForm: $('#roleForm'),
+  adminKey: $('#adminKey'),
+  roleSubmit: $('#roleSubmit'),
+  roleError: $('#roleError'),
+  roleLogoutBtn: $('#roleLogoutBtn'),
+  modelAdminHint: $('#modelAdminHint'),
+  localModelList: $('#localModelList'),
 };
 
 // ---------- 运行参数 ----------
@@ -525,8 +545,43 @@ function optionLabel(id) {
   return opt?.dataset.label || id;
 }
 
+/** 基础名称（不含“导入/训练结果”后缀），用于导出文件头。 */
+function baseLabelOf(id) {
+  const local = loadLocalModels().find((e) => e.id === id);
+  return local?.baseLabel || optionLabel(id);
+}
+
+/** 官方模型（含自定义 extraRecords）+ 本地“新建 AI”的模型记录，用于缓存检查与导出。 */
 function getRecords() {
-  return getModelRecords(state.appConfig.webllm || {});
+  const cfg = state.appConfig.webllm || {};
+  return getModelRecords({
+    mirrorOwner: cfg.mirrorOwner,
+    extraRecords: [...(cfg.extraRecords || []), ...localRecords(loadLocalModels())],
+  });
+}
+
+function makeOption(value, label) {
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = label;
+  opt.dataset.label = label;
+  return opt;
+}
+
+/** 重建下拉框：官方模型在前，“新建AI”分组在后（仅本浏览器可用，不上传云端）。 */
+function renderModelOptions(selectId = state.backend.modelId) {
+  const children = state.backend.models.map((m) => makeOption(m.id, m.label));
+  const locals = loadLocalModels();
+  if (locals.length) {
+    const group = document.createElement('optgroup');
+    group.label = '新建AI';
+    for (const e of locals) group.append(makeOption(e.id, e.label));
+    children.push(group);
+  }
+  els.modelSelect.replaceChildren(...children);
+  if ([...els.modelSelect.options].some((o) => o.value === selectId)) {
+    els.modelSelect.value = selectId;
+  }
 }
 
 /** 在下拉框中给已下载到本机的模型加上 ✓。 */
@@ -543,7 +598,15 @@ async function refreshModelCacheStatus() {
   }
 }
 
+/** 导出、导入、删除新建 AI 都需要管理员权限。 */
+function requireAdmin(action) {
+  if (isAdmin()) return true;
+  showStatus(`${action}需要管理员权限。请点击右上角“更改权限”，输入管理员密钥。`, { error: true });
+  return false;
+}
+
 async function exportCurrentModel() {
+  if (!requireAdmin('导出模型')) return;
   if (state.streaming) return showStatus('请等待当前回复结束后再导出模型。');
   const modelId = state.backend.modelId;
   const label = optionLabel(modelId);
@@ -553,6 +616,7 @@ async function exportCurrentModel() {
     if (!record) throw new Error(`找不到模型记录：${modelId}`);
     showStatus(`正在打包 ${label}…`, { progress: 0 });
     const { blob, filename, size, entryCount } = await buildModelFile(record, {
+      label: baseLabelOf(modelId),
       onProgress: ({ done, total }) =>
         showStatus(`正在打包 ${label}（${done}/${total} 个文件）…`, { progress: done / total }),
     });
@@ -561,45 +625,89 @@ async function exportCurrentModel() {
   } catch (err) {
     showStatus(`导出失败：${err.message}`, { error: true });
   } finally {
-    els.exportModelBtn.disabled = false;
+    els.exportModelBtn.disabled = !isAdmin();
   }
 }
 
-async function importModelFromFile(file) {
-  if (state.streaming) return showStatus('请等待当前回复结束后再导入模型。');
-  els.importModelBtn.disabled = true;
+/**
+ * 导入 .ojmodel 为“新建AI”。缓存写入本地虚拟地址，不会覆盖官方模型缓存；
+ * 登记信息保存在 localStorage（oj-ai.localModels），不上传云端。
+ * kind: 'import'（导入模型文件）| 'training'（导入训练结果）
+ */
+async function importModelFromFile(file, kind = 'import') {
+  const action = kind === 'training' ? '导入训练结果' : '导入模型';
+  if (!requireAdmin(action)) return;
+  if (state.streaming) return showStatus(`请等待当前回复结束后再${action}。`);
+  setImportButtons(false);
   try {
     const { header } = await readModelFileHeader(file);
-    const record = (await getRecords()).find((r) => r.model_id === header.modelId);
-    if (!record) throw new Error(`当前模型列表中没有 ${header.modelId}，请检查 config.json 中的模型配置。`);
-    const label = optionLabel(record.model_id);
+    const baseLabel = header.label || state.backend.models.find((m) => m.id === header.modelId)?.label || header.modelId;
+    const label = `${baseLabel}（${kind === 'training' ? '训练结果' : '导入'}）`;
     showStatus(`正在导入 ${label}（${formatBytes(file.size)}）…`, { progress: 0 });
-    await importModelFile(file, record, {
+    const { record } = await importModelFile(file, {
       onProgress: ({ done, total }) =>
         showStatus(`正在导入 ${label}（${done}/${total} 个文件）…`, { progress: done / total }),
     });
+    addLocalModel({
+      id: record.model_id,
+      label,
+      baseLabel,
+      source: kind,
+      originId: header.modelId,
+      createdAt: new Date().toISOString(),
+      record,
+    });
+    renderModelOptions(record.model_id);
+    state.backend.setModel(record.model_id);
     await refreshModelCacheStatus();
-    const inMenu = [...els.modelSelect.options].some((o) => o.value === record.model_id);
-    if (inMenu) {
-      state.backend.setModel(record.model_id);
-      els.modelSelect.value = record.model_id;
-      showStatus(`导入完成：${label} 已可离线使用。发送消息时将直接从本机加载。`);
-    } else {
-      showStatus(`导入完成，但 ${label} 不在下拉框中，无法选择使用。`, { error: true });
-    }
+    renderLocalList();
+    showStatus(`导入完成：${label} 已加入“新建AI”，可离线使用。发送消息时将直接从本机加载。`);
   } catch (err) {
-    showStatus(`导入失败：${err.message}`, { error: true });
+    showStatus(`${action}失败：${err.message}`, { error: true });
   } finally {
-    els.importModelBtn.disabled = false;
+    setImportButtons(isAdmin());
     els.importModelInput.value = '';
+    els.importTrainInput.value = '';
+  }
+}
+
+function setImportButtons(enabled) {
+  els.importModelBtn.disabled = !enabled;
+  els.importTrainBtn.disabled = !enabled;
+}
+
+async function deleteLocalModel(id) {
+  if (!requireAdmin('删除新建AI')) return;
+  const entry = loadLocalModels().find((e) => e.id === id);
+  if (!entry) return;
+  if (!window.confirm(`删除「${entry.label}」？将清除本机缓存的该模型文件，不影响官方模型。`)) return;
+  try {
+    const removed = await removeLocalModelFiles(entry.record);
+    removeLocalModel(id);
+    if (state.backend.modelId === id) state.backend.setModel(state.appConfig.webllm.defaultModel);
+    renderModelOptions(state.backend.modelId);
+    renderLocalList();
+    await refreshModelCacheStatus();
+    showStatus(`已删除 ${entry.label}（清除 ${removed} 个缓存文件）。`);
+  } catch (err) {
+    showStatus(`删除失败：${err.message}`, { error: true });
   }
 }
 
 els.exportModelBtn.addEventListener('click', exportCurrentModel);
-els.importModelBtn.addEventListener('click', () => els.importModelInput.click());
+els.importModelBtn.addEventListener('click', () => {
+  if (requireAdmin('导入模型')) els.importModelInput.click();
+});
+els.importTrainBtn.addEventListener('click', () => {
+  if (requireAdmin('导入训练结果')) els.importTrainInput.click();
+});
 els.importModelInput.addEventListener('change', () => {
   const file = els.importModelInput.files?.[0];
-  if (file) importModelFromFile(file);
+  if (file) importModelFromFile(file, 'import');
+});
+els.importTrainInput.addEventListener('change', () => {
+  const file = els.importTrainInput.files?.[0];
+  if (file) importModelFromFile(file, 'training');
 });
 
 // 引用：在回复中选中文字后显示按钮
@@ -614,7 +722,7 @@ document.addEventListener(
   true
 );
 
-// ---------- 登录 ----------
+// ---------- 登录（仅远程模式；webllm 模式无需口令即可使用） ----------
 function showLogin(message = '') {
   els.main.hidden = true;
   els.login.hidden = false;
@@ -636,19 +744,112 @@ els.loginForm.addEventListener('submit', async (e) => {
   els.loginError.textContent = '';
   els.loginBtn.disabled = true;
   try {
-    if (MODE === 'remote') {
-      await login(els.password.value);
-    } else {
-      const ok = await verifyAccessPassword(state.appConfig.access, els.password.value);
-      if (!ok) throw new Error('口令错误');
-      setUnlocked();
-    }
+    await login(els.password.value);
     showMain();
   } catch (err) {
     els.loginError.textContent = err.message || '登录失败';
   } finally {
     els.loginBtn.disabled = false;
   }
+});
+
+// ---------- 权限（管理员） ----------
+function toggleRolePanel(force) {
+  const open = typeof force === 'boolean' ? force : els.rolePanel.hidden;
+  if (open) {
+    closeHistory();
+    refreshRoleUI();
+  }
+  els.rolePanel.hidden = !open;
+  els.roleBtn.setAttribute('aria-expanded', String(open));
+  if (open && !els.roleForm.hidden) els.adminKey.focus();
+}
+
+function refreshRoleUI() {
+  const admin = isAdmin();
+  const exp = adminExpiry();
+  const hasKey = hasAccessGate(state.appConfig.access);
+  els.roleBadge.textContent = admin ? '管理员' : '访客';
+  els.roleBadge.classList.toggle('is-admin', admin);
+  els.roleForm.hidden = admin || !hasKey;
+  els.roleLogoutBtn.hidden = !admin;
+  if (admin) {
+    els.roleStatus.textContent = `当前为管理员（有效至 ${exp.toLocaleDateString('zh-CN')}）。可导出和导入模型。`;
+  } else if (hasKey) {
+    els.roleStatus.textContent = '当前为访客。输入管理员密钥可升级，以导出和导入模型；聊天功能不受影响。';
+  } else {
+    els.roleStatus.textContent = '未配置管理员密钥，无法升级权限。';
+  }
+  els.exportModelBtn.disabled = !admin;
+  setImportButtons(admin);
+  els.modelAdminHint.textContent = admin
+    ? 'AI 训练：浏览器内训练尚未实现；可在外部训练后用“导入训练结果”加入新建AI。'
+    : '导出与导入模型仅限管理员。';
+  renderLocalList();
+}
+
+/** 新建AI 列表：显示导入地址（本地缓存标识），管理员可删除。 */
+function renderLocalList() {
+  const list = loadLocalModels();
+  const admin = isAdmin();
+  els.localModelList.replaceChildren();
+  if (!list.length) {
+    const p = document.createElement('p');
+    p.className = 'muted small';
+    p.textContent = '暂无“新建AI”。';
+    els.localModelList.append(p);
+    return;
+  }
+  for (const e of list) {
+    const row = document.createElement('div');
+    row.className = 'local-row';
+    const name = document.createElement('div');
+    name.className = 'local-name';
+    name.textContent = e.label;
+    const meta = document.createElement('div');
+    meta.className = 'muted small local-meta';
+    const addr = e.record?.model || '';
+    meta.textContent = `${e.source === 'training' ? '训练结果' : '导入'} · 本机缓存 · ${addr}`;
+    row.append(name, meta);
+    if (admin) {
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn ghost small';
+      del.dataset.action = 'local-delete';
+      del.dataset.id = e.id;
+      del.textContent = '删除';
+      row.append(del);
+    }
+    els.localModelList.append(row);
+  }
+}
+
+els.roleBtn.addEventListener('click', () => toggleRolePanel());
+els.roleForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  els.roleError.textContent = '';
+  if (!hasAccessGate(state.appConfig.access)) {
+    els.roleError.textContent = '未配置管理员密钥';
+    return;
+  }
+  els.roleSubmit.disabled = true;
+  try {
+    const ok = await verifyAccessPassword(state.appConfig.access, els.adminKey.value);
+    if (!ok) throw new Error('管理员密钥错误');
+    grantAdmin();
+    els.adminKey.value = '';
+    refreshRoleUI();
+    showStatus('已升级为管理员，有效期 30 天。可导出和导入模型。');
+  } catch (err) {
+    els.roleError.textContent = err.message || '验证失败';
+  } finally {
+    els.roleSubmit.disabled = false;
+  }
+});
+els.roleLogoutBtn.addEventListener('click', () => {
+  revokeAdmin();
+  refreshRoleUI();
+  showStatus('已退出管理员。');
 });
 
 // ---------- 输入框 ----------
@@ -678,7 +879,10 @@ els.stopBtn.addEventListener('click', stop);
 els.newChatBtn.addEventListener('click', newChat);
 els.embedNewBtn.addEventListener('click', newChat);
 els.clearAllBtn.addEventListener('click', clearAll);
-els.historyBtn.addEventListener('click', () => toggleHistory());
+els.historyBtn.addEventListener('click', () => {
+  toggleRolePanel(false);
+  toggleHistory();
+});
 
 els.modelSelect.addEventListener('change', () => {
   state.backend.setModel(els.modelSelect.value);
@@ -692,7 +896,11 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'delete') return removeSession(btn.dataset.id);
   if (btn && btn.dataset.action === 'copy') return copyCode(btn);
   if (btn && btn.dataset.action === 'regen') return regenerate();
-  if (!els.historyPanel.hidden && !e.target.closest('.chat-head')) closeHistory();
+  if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
+  if (!e.target.closest('.chat-head')) {
+    if (!els.historyPanel.hidden) closeHistory();
+    if (!els.rolePanel.hidden) toggleRolePanel(false);
+  }
 });
 
 async function copyCode(btn) {
@@ -788,22 +996,15 @@ async function init() {
 
   state.backend = createBackend({ mode: MODE, appConfig: state.appConfig });
   if (MODE === 'webllm') {
-    els.modelSelect.replaceChildren(
-      ...state.backend.models.map((m) => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.label;
-        opt.dataset.label = m.label;
-        return opt;
-      })
-    );
-    els.modelSelect.value = state.backend.modelId;
+    renderModelOptions(state.backend.modelId);
     els.modelSelect.hidden = false;
     els.modelSelect.title = '✓ 表示模型已下载到本机，可离线使用';
     els.modelLabel.hidden = true;
     setTimeout(refreshModelCacheStatus, 0);
+    refreshRoleUI();
   } else {
     els.modelLabel.textContent = state.appConfig.model ? `模型：${state.appConfig.model}` : '';
+    els.roleBtn.hidden = true;
   }
 
   if (state.store.sessions.length === 0) createSession(state.store);
@@ -815,10 +1016,9 @@ async function init() {
   if (MODE === 'remote') {
     if (getToken() && (await checkSession())) showMain();
     else showLogin();
-  } else if (isUnlocked(state.appConfig.access)) {
-    showMain();
   } else {
-    showLogin(hasAccessGate(state.appConfig.access) ? '' : '');
+    // webllm 模式：默认无需口令，直接进入聊天；管理员权限在“更改权限”中升级
+    showMain();
   }
 }
 

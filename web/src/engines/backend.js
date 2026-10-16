@@ -1,5 +1,6 @@
 import { streamChat } from '../api.js';
 import { checkWebGPU, getLoadedModelId, loadWebLLMEngine, streamWebLLM, WEBGPU_MISSING } from './webllm.js';
+import { loadLocalModels, localRecords } from '../local-models.js';
 
 /**
  * 统一的推理后端接口：
@@ -48,7 +49,9 @@ function createWebLLMBackend(cfg) {
     async ensureReady(onProgress) {
       if (getLoadedModelId() === modelId) return;
       if (!(await checkWebGPU())) throw new Error(WEBGPU_MISSING);
-      await loadWebLLMEngine(modelId, onProgress, { mirrorOwner: cfg.mirrorOwner, extraRecords: cfg.extraRecords });
+      // 自定义记录 + 本地“新建 AI”（仅存在于浏览器缓存中）
+      const extraRecords = [...(cfg.extraRecords || []), ...localRecords(loadLocalModels())];
+      await loadWebLLMEngine(modelId, onProgress, { mirrorOwner: cfg.mirrorOwner, extraRecords });
     },
     async *stream({ messages, signal }) {
       yield* streamWebLLM({
