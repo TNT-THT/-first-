@@ -14,83 +14,131 @@
     "models": [
       {
         "id": "Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 0.5B（非推理，最小）"
+        "label": "Qwen2.5-Coder 0.5B（非推理·极小）"
       },
       {
         "id": "Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 1.5B（非推理，默认）"
+        "label": "Qwen2.5-Coder 1.5B（非推理·小·默认）"
       },
       {
         "id": "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 3B（非推理）"
+        "label": "Qwen2.5-Coder 3B（非推理·小）"
       },
       {
         "id": "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 7B（非推理）"
+        "label": "Qwen2.5-Coder 7B（非推理·中）"
       },
       {
         "id": "Qwen2.5-Math-1.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Math 1.5B（非推理，数学）"
+        "label": "Qwen2.5-Math 1.5B（非推理·小·数学）"
       },
       {
         "id": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5 3B（非推理）"
+        "label": "Qwen2.5 3B（非推理·小）"
       },
       {
         "id": "Qwen2.5-7B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5 7B（非推理）"
-      },
-      {
-        "id": "Llama-3.2-1B-Instruct-q4f16_1-MLC",
-        "label": "Llama 3.2 1B（非推理）"
-      },
-      {
-        "id": "Llama-3.2-3B-Instruct-q4f16_1-MLC",
-        "label": "Llama 3.2 3B（非推理）"
-      },
-      {
-        "id": "gemma-2-2b-it-q4f16_1-MLC",
-        "label": "Gemma 2 2B（非推理）"
-      },
-      {
-        "id": "Mistral-7B-Instruct-v0.3-q4f16_1-MLC",
-        "label": "Mistral 7B v0.3（非推理）"
-      },
-      {
-        "id": "SmolLM2-1.7B-Instruct-q4f16_1-MLC",
-        "label": "SmolLM2 1.7B（非推理）"
-      },
-      {
-        "id": "Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
-        "label": "Hermes 3 3B（非推理）"
-      },
-      {
-        "id": "Phi-4-mini-instruct-q4f16_1-MLC",
-        "label": "Phi-4 mini（非推理）"
-      },
-      {
-        "id": "Llama-3.1-8B-Instruct-q4f16_1-MLC",
-        "label": "Llama 3.1 8B（非推理）"
+        "label": "Qwen2.5 7B（非推理·中）"
       },
       {
         "id": "Qwen3-1.7B-q4f16_1-MLC",
-        "label": "Qwen3 1.7B（推理）"
+        "label": "Qwen3 1.7B（推理·小）"
       },
       {
         "id": "Qwen3-4B-q4f16_1-MLC",
-        "label": "Qwen3 4B（推理）"
+        "label": "Qwen3 4B（推理·小）"
       },
       {
         "id": "Qwen3-8B-q4f16_1-MLC",
-        "label": "Qwen3 8B（推理）"
+        "label": "Qwen3 8B（推理·中）"
+      },
+      {
+        "id": "Qwen3.5-4B-q4f16_1-MLC",
+        "label": "Qwen3.5 4B（推理·小）"
+      },
+      {
+        "id": "Llama-3.2-1B-Instruct-q4f16_1-MLC",
+        "label": "Llama 3.2 1B（非推理·极小）"
+      },
+      {
+        "id": "Llama-3.2-3B-Instruct-q4f16_1-MLC",
+        "label": "Llama 3.2 3B（非推理·小）"
+      },
+      {
+        "id": "Llama-3.1-8B-Instruct-q4f16_1-MLC",
+        "label": "Llama 3.1 8B（非推理·中）"
+      },
+      {
+        "id": "Llama-2-13b-chat-hf-q4f16_1-MLC",
+        "label": "Llama 2 13B（非推理·大·需约 12 GB 显存）"
+      },
+      {
+        "id": "gemma3-1b-it-q4f16_1-MLC",
+        "label": "Gemma 3 1B（非推理·极小）"
+      },
+      {
+        "id": "gemma-2-2b-it-q4f16_1-MLC",
+        "label": "Gemma 2 2B（非推理·小）"
+      },
+      {
+        "id": "gemma-2-9b-it-q4f16_1-MLC",
+        "label": "Gemma 2 9B（非推理·中）"
+      },
+      {
+        "id": "Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC",
+        "label": "Ministral 3 3B（非推理·小）"
+      },
+      {
+        "id": "Mistral-7B-Instruct-v0.3-q4f16_1-MLC",
+        "label": "Mistral 7B v0.3（非推理·中）"
+      },
+      {
+        "id": "Phi-4-mini-instruct-q4f16_1-MLC",
+        "label": "Phi-4 mini 3.8B（非推理·小）"
+      },
+      {
+        "id": "Phi-3.5-mini-instruct-q4f16_1-MLC",
+        "label": "Phi-3.5 mini 3.8B（非推理·小）"
+      },
+      {
+        "id": "SmolLM2-360M-Instruct-q4f16_1-MLC",
+        "label": "SmolLM2 360M（非推理·极小）"
+      },
+      {
+        "id": "SmolLM2-1.7B-Instruct-q4f16_1-MLC",
+        "label": "SmolLM2 1.7B（非推理·小）"
+      },
+      {
+        "id": "OLMo-2-0425-1B-Instruct-q4f16_1-MLC",
+        "label": "OLMo 2 1B（非推理·极小）"
+      },
+      {
+        "id": "OLMo-2-1124-7B-Instruct-q4f16_1-MLC",
+        "label": "OLMo 2 7B（非推理·中）"
+      },
+      {
+        "id": "TinyLlama-1.1B-Chat-v1.0-q4f16_1-MLC",
+        "label": "TinyLlama 1.1B（非推理·小）"
+      },
+      {
+        "id": "stablelm-2-zephyr-1_6b-q4f16_1-MLC",
+        "label": "StableLM 2 1.6B（非推理·小）"
+      },
+      {
+        "id": "Hermes-3-Llama-3.2-3B-q4f16_1-MLC",
+        "label": "Hermes 3 3B（非推理·小）"
+      },
+      {
+        "id": "DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC",
+        "label": "DeepSeek-R1 8B（推理·中）"
       },
       {
         "id": "DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
-        "label": "DeepSeek-R1 1.5B（推理，实验性）"
+        "label": "DeepSeek-R1 1.5B（推理·小·实验性）"
       },
       {
         "id": "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC",
-        "label": "DeepSeek-R1 7B（推理）"
+        "label": "DeepSeek-R1 7B（推理·中）"
       }
     ],
     "temperature": 0.3,
