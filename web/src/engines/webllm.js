@@ -34,6 +34,15 @@ export function getLoadedModelId() {
   return loadedId;
 }
 
+/**
+ * 当前生效的完整模型记录（内置列表 + 自定义记录 + 镜像设置），用于导出 / 导入 / 缓存状态检查。
+ * 动态导入推理库，避免首屏变重。
+ */
+export async function getModelRecords({ mirrorOwner, extraRecords } = {}) {
+  const { prebuiltAppConfig } = await import('@mlc-ai/web-llm');
+  return buildModelList(prebuiltAppConfig.model_list, extraRecords, mirrorOwner);
+}
+
 export async function loadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecords } = {}) {
   if (!(await checkWebGPU())) {
     throw new Error(WEBGPU_MISSING);

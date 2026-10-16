@@ -29,10 +29,6 @@
         "label": "Qwen2.5-Coder 7B（非推理·中）"
       },
       {
-        "id": "Qwen2.5-Math-1.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Math 1.5B（非推理·小·数学）"
-      },
-      {
         "id": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
         "label": "Qwen2.5 3B（非推理·小）"
       },
@@ -131,10 +127,6 @@
       {
         "id": "DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC",
         "label": "DeepSeek-R1 8B（推理·中）"
-      },
-      {
-        "id": "DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
-        "label": "DeepSeek-R1 1.5B（推理·小·实验性）"
       },
       {
         "id": "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC",
