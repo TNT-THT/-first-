@@ -14,17 +14,35 @@ The first repository of me,and first of "炸药工厂"
 - **嵌入模式**：`?embed=1` 一键隐藏自带侧边栏、Logo 和模型设置。
 - **postMessage 填题**：父页面可以把题目文本填入输入框（默认不自动发送）。
 - **Markdown、代码高亮、一键复制、LaTeX 公式**（KaTeX，本地打包）。
+- **引用回复**：选中任意回复中的文字，点出现的“引用”按钮，内容会以 Markdown 引用格式填入输入框，方便针对某段内容继续提问（超过 4000 字会截取）。
+- **重新生成**：每条回复下方可以“重新生成”，用同一问题再问一次。
+- **模型导出 / 导入**：侧边栏可把已下载的模型导出为 `.ojmodel` 文件，在另一台电脑上导入即可离线使用（见下文）。
+- **已下载标记**：模型下拉框中，已下载到本机的模型前显示 ✓。
+- **下载失败提示**：出错时会显示失败时的下载进度，并提示可以改用“导入模型”。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B。共 31 个可选：非推理 25 个、推理 6 个。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B。共 30 个可选：非推理 24 个、推理 6 个。
   - 厂商：Qwen（阿里）、Meta Llama、Google Gemma、Mistral、Microsoft Phi、Hugging Face SmolLM2、AI2 OLMo、TinyLlama、Stability StableLM、Nous Hermes、DeepSeek（仅 R1 蒸馏版，均为推理模型）。
   - 大型：Llama 2 13B（需约 12 GB 显存，多数设备无法运行）。
   - DeepSeek 的小型非推理模型（如 deepseek-coder-1.3b-instruct）不在 WebLLM 内置列表中，无法直接使用。
 - **DeepSeek-R1 1.5B 暂时隐藏**：该模型在下拉框中已移除，记录仍保留在 `webllm.extraRecords` 中。原因：它借用的 wasm 库（Qwen2-1.5B，与 Qwen2.5-Coder 1.5B 等共用）是按 `rope_theta: 1000000`、`tie_word_embeddings: true` 编译的，而 DeepSeek-R1 1.5B 的权重配置是 `rope_theta: 10000`、`tie_word_embeddings: false`。这两个参数编译进 wasm，运行时无法通过配置修改，因此输出会乱码（已有用户实测复现）。WebLLM 官方注释也写明 “Qwen2-1.5B is experiencing correctness issue”。要恢复该模型，需要为它单独编译匹配参数的 wasm，然后把 `extraRecords` 中的 `model_lib` 指向新文件，并在 `webllm.models` 中加回条目。
-- **Qwen2.5-Math 1.5B 可能存在同样问题**：它也借用 Qwen2-1.5B wasm，但其权重配置为 `rope_theta: 10000`，与 wasm 不一致，尚未在浏览器中验证。
+- **Qwen2.5-Math 1.5B 已从下拉框移除**：它同样借用 Qwen2-1.5B wasm，但权重配置为 `rope_theta: 10000`，与 wasm 不一致，原因与上面相同。
 - **自定义模型记录**：`webllm.extraRecords` 用于放置 WebLLM 内置列表中没有、但需要手动补充的模型记录。
 - **推理模型的思考过程会被隐藏**：Qwen3、DeepSeek-R1 等模型输出的 `<think>` 内容不展示，只显示最终回答，也不计入历史上下文。
 - **系统提示词**可在 `config.json` 的 `systemPrompt` 中自由修改，默认不限制话题与回答格式。
+
+## 模型导出与导入（离线使用）
+
+模型第一次使用时从 Hugging Face 下载，之后保存在浏览器缓存里。如果某台电脑无法访问 Hugging Face，可以在能访问的电脑上导出，再导入过去。
+
+- **导出**：侧边栏点“导出模型”，把当前所选模型保存为 `模型名.ojmodel`。模型必须已经下载过（至少成功对话一次）。文件包含权重、配置和运行库，通常从几百 MB 到几 GB。导出只读取缓存，不会删除本机的模型。
+- **导入**：点“导入模型”，选择 `.ojmodel` 文件。导入完成后，该模型前显示 ✓，选中即可使用，发送消息时直接从本机加载，不访问 Hugging Face / GitHub。
+- **注意**：
+  - 浏览器的缓存按网站隔离，需要在同一个网址（例如 `https://tnt-tht.github.io/-first-/`）上导入，换一个域名就要重新导入。
+  - 导入时要求 `config.json` 中的模型下载地址与导出时一致；如果设置了 `mirrorOwner`，两台电脑的配置需要相同。
+  - 模型文件包含原始模型的权重，分享前请遵守对应模型的许可协议（如 Llama、Gemma、Qwen 等）。
+  - 嵌入到 OJ 页面（iframe）中时，浏览器可能把缓存与直接打开网站时分开，建议在同一种方式下导入和导出。
+  - 文件格式：4 字节魔数 `OJMD` + 4 字节头部长度 + JSON 头部（模型 id、来源地址、各文件的缓存地址、偏移和大小）+ 原始数据。
 
 ## 硬件与浏览器要求
 

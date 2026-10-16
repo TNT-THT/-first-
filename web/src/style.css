@@ -189,7 +189,7 @@ body {
 }
 .session-item:hover .session-del, .session-item.active .session-del { opacity: 1; }
 
-.sidebar-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.sidebar-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px; }
 
 .chat {
   flex: 1;
@@ -468,3 +468,29 @@ body.embed .login-card { box-shadow: none; }
   transition: width 0.2s ease;
 }
 body.embed .model-select { display: none !important; }
+
+/* ---------- 模型导出 / 导入（侧边栏） ---------- */
+.model-tools { display: flex; gap: 6px; width: 100%; }
+.model-tools .btn { flex: 1 1 0; }
+body.embed .model-tools { display: none !important; }
+
+/* ---------- 引用选中文字 ---------- */
+.quote-btn {
+  position: fixed;
+  z-index: 60;
+  transform: translateX(-50%);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+}
+.quote-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- 回复操作（重新生成） ---------- */
+.msg-actions { display: flex; gap: 6px; padding: 0 2px 8px; }

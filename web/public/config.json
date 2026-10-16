@@ -29,10 +29,6 @@
         "label": "Qwen2.5-Coder 7B（非推理·中）"
       },
       {
-        "id": "Qwen2.5-Math-1.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Math 1.5B（非推理·小·数学）"
-      },
-      {
         "id": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
         "label": "Qwen2.5 3B（非推理·小）"
       },

@@ -34,6 +34,11 @@
             <button id="clearAllBtn" type="button" class="btn ghost small">清空全部</button>
             <select id="modelSelect" class="model-select" hidden aria-label="选择模型"></select>
             <span id="modelLabel" class="muted small"></span>
+            <div class="model-tools">
+              <button id="exportModelBtn" type="button" class="btn ghost small" title="把当前模型（需已下载）导出为 .ojmodel 文件，可在其他电脑导入后离线使用">导出模型</button>
+              <button id="importModelBtn" type="button" class="btn ghost small" title="导入 .ojmodel 文件，导入后无需访问 Hugging Face 即可使用">导入模型</button>
+              <input id="importModelInput" type="file" accept=".ojmodel" hidden />
+            </div>
           </div>
         </aside>
 
