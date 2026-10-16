@@ -1,7 +1,8 @@
-# 训练运行时依赖（需要 NVIDIA GPU 环境；数据整理与打包只用标准库）
+# 训练运行时依赖（需要 NVIDIA GPU 环境）。数据整理、打包、配置等只用标准库。
 torch>=2.3
 transformers>=4.56
 peft>=0.12
 accelerate>=0.33
 safetensors>=0.4
 tokenizers>=0.20
+huggingface_hub>=0.25

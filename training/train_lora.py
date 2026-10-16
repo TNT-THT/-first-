@@ -27,6 +27,7 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description="LoRA 微调（仅对 assistant 回复计算损失）")
     p.add_argument("--base", required=True, help="基础模型：HF 仓库 id 或本地目录")
     p.add_argument("--data", required=True, help="训练数据 JSONL（messages 格式）")
+    p.add_argument("--val-data", default=None, help="可选：验证集 JSONL，每个 epoch 结束计算验证 loss")
     p.add_argument("--output-dir", required=True, help="保存 LoRA 适配器的目录")
     p.add_argument("--merged-dir", default=None, help="可选：保存合并后的完整模型")
     p.add_argument("--epochs", type=float, default=2.0)
@@ -153,6 +154,14 @@ def train(args):
         raise SystemExit("没有可训练的样本（全部超长或没有 assistant 回复）。")
     print(f"训练样本：{len(features)} 条，跳过 {skipped} 条", flush=True)
 
+    val_features = None
+    if args.val_data:
+        val_examples = load_examples(args.val_data)
+        val_features, val_skipped = build_features(val_examples, tokenizer, args.max_length)
+        if not val_features:
+            val_features = None
+        print(f"验证样本：{len(val_features or [])} 条，跳过 {val_skipped} 条", flush=True)
+
     dtype = pick_dtype(args.dtype, args.cpu)
     model = AutoModelForCausalLM.from_pretrained(args.base, dtype=dtype)
     if args.grad_checkpointing:
@@ -178,6 +187,7 @@ def train(args):
         max_steps=args.max_steps,
         logging_steps=10,
         save_strategy="no",
+        eval_strategy="epoch" if val_features else "no",
         bf16=use_cuda and dtype == torch.bfloat16,
         fp16=use_cuda and dtype == torch.float16,
         report_to=[],
@@ -189,10 +199,14 @@ def train(args):
         model=model,
         args=training_args,
         train_dataset=features,
+        eval_dataset=val_features,
         data_collator=make_collator(tokenizer.pad_token_id),
     )
     started = time.time()
     result = trainer.train()
+    eval_loss = None
+    if val_features:
+        eval_loss = trainer.evaluate().get("eval_loss")
 
     os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir)
@@ -211,6 +225,8 @@ def train(args):
         "skipped": skipped,
         "steps": result.global_step,
         "train_loss": result.training_loss,
+        "val_examples": len(val_features) if val_features else 0,
+        "eval_loss": eval_loss,
         "seconds": round(time.time() - started, 1),
         "lora": {"r": args.lora_r, "alpha": args.lora_alpha, "target_modules": sorted(args.target_modules.split(","))},
         "seed": args.seed,
