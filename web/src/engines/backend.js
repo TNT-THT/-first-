@@ -1,6 +1,7 @@
 import { streamChat } from '../api.js';
 import { checkWebGPU, getLoadedModelId, loadWebLLMEngine, streamWebLLM, WEBGPU_MISSING } from './webllm.js';
 import { loadLocalModels, localRecords } from '../local-models.js';
+import { composeSystemPrompt, getModelParams } from '../adaptation.js';
 
 /**
  * 统一的推理后端接口：
@@ -33,7 +34,6 @@ function createRemoteBackend() {
 
 function createWebLLMBackend(cfg) {
   let modelId = cfg.defaultModel;
-  const systemMessage = { role: 'system', content: cfg.systemPrompt };
 
   return {
     mode: 'webllm',
@@ -54,11 +54,14 @@ function createWebLLMBackend(cfg) {
       await loadWebLLMEngine(modelId, onProgress, { mirrorOwner: cfg.mirrorOwner, extraRecords });
     },
     async *stream({ messages, signal }) {
+      // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
+      const system = { role: 'system', content: composeSystemPrompt(cfg.systemPrompt, modelId) };
+      const params = getModelParams(modelId);
       yield* streamWebLLM({
-        messages: [systemMessage, ...messages],
+        messages: [system, ...messages],
         signal,
-        temperature: cfg.temperature,
-        maxTokens: cfg.maxTokens,
+        temperature: params.temperature ?? cfg.temperature,
+        maxTokens: params.maxTokens ?? cfg.maxTokens,
       });
     },
   };

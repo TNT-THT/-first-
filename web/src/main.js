@@ -16,6 +16,7 @@ import {
 } from './model-file.js';
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
+import { adaptedModelIds, clearModelAdaptation, listAdaptation, recordFeedback, removeNote } from './adaptation.js';
 import {
   buildContext,
   createSession,
@@ -74,6 +75,8 @@ const els = {
   roleLogoutBtn: $('#roleLogoutBtn'),
   modelAdminHint: $('#modelAdminHint'),
   localModelList: $('#localModelList'),
+  adaptHint: $('#adaptHint'),
+  adaptList: $('#adaptList'),
 };
 
 // ---------- 运行参数 ----------
@@ -284,6 +287,24 @@ function modelDisplayName(id) {
   return opt?.dataset.label || state.backend.models.find((m) => m.id === id)?.label || id;
 }
 
+/**
+ * 管理员（且为本机模式）在某个 AI 的回复之后发送的消息，视为对该 AI 的反馈：
+ * 仅保存在本机，并在之后的回答中作为该 AI 的附加说明（参数行可调整该 AI 的采样参数）。
+ * 反馈仍会照常发送给当前 AI，不影响对话。
+ */
+function recordAdminFeedback(session, text) {
+  if (MODE !== 'webllm' || !isAdmin()) return;
+  const last = [...session.messages].reverse().find((m) => m.role === 'assistant');
+  if (!last || !last.model || last.error || !last.content) return;
+  const rec = recordFeedback(last.model, text);
+  if (!rec) return;
+  const parts = [];
+  if (rec.note) parts.push('已记录反馈');
+  if (rec.params) parts.push('已更新参数 ' + Object.entries(rec.params).map(([k, v]) => `${k}=${v}`).join(', '));
+  showStatus(`${parts.join('，')}（仅本机，对「${modelDisplayName(last.model)}」生效，不上传）。`);
+  renderAdaptList();
+}
+
 async function send(rawText) {
   const text = (rawText || '').trim();
   if (!text || state.streaming) return;
@@ -291,6 +312,7 @@ async function send(rawText) {
   const session = ensureSession();
   const isFirst = session.messages.length === 0;
   const userMsg = { role: 'user', content: text, ts: Date.now() };
+  recordAdminFeedback(session, text);
   // 记录本次回答所用的 AI（名称快照保存，之后删除或改名模型也能正确标注）
   const modelId = state.backend.modelId;
   const modelLabel = modelDisplayName(modelId);
@@ -695,6 +717,19 @@ function setImportButtons(enabled) {
   els.importTrainBtn.disabled = !enabled;
 }
 
+function deleteAdaptNote(modelId, noteId) {
+  if (!requireAdmin('删除 AI 适应记录')) return;
+  removeNote(modelId, noteId);
+  renderAdaptList();
+}
+
+function clearAdaptation(modelId) {
+  if (!requireAdmin('清空 AI 适应记录')) return;
+  if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录？`)) return;
+  clearModelAdaptation(modelId);
+  renderAdaptList();
+}
+
 async function deleteLocalModel(id) {
   if (!requireAdmin('删除新建AI')) return;
   const entry = loadLocalModels().find((e) => e.id === id);
@@ -703,6 +738,7 @@ async function deleteLocalModel(id) {
   try {
     const removed = await removeLocalModelFiles(entry.record);
     removeLocalModel(id);
+    clearModelAdaptation(id);
     if (state.backend.modelId === id) state.backend.setModel(state.appConfig.webllm.defaultModel);
     renderModelOptions(state.backend.modelId);
     renderLocalList();
@@ -805,6 +841,68 @@ function refreshRoleUI() {
     ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
     : '导出与导入模型仅限管理员。';
   renderLocalList();
+  renderAdaptList();
+}
+
+/** AI 适应记录：管理员可查看、删除（仅本机）。 */
+function renderAdaptList() {
+  const admin = isAdmin();
+  const list = els.adaptList;
+  if (!list) return;
+  list.replaceChildren();
+  if (MODE !== 'webllm' || !admin) {
+    els.adaptHint.textContent = MODE !== 'webllm' ? '服务端模式下不记录 AI 适应反馈。' : 'AI 适应记录仅管理员可见。';
+    return;
+  }
+  els.adaptHint.textContent =
+    '管理员在 AI 回复之后发送的消息会记为该 AI 的反馈（仅本机，不上传）；' +
+    '以“参数：temperature=0.2, maxTokens=800”开头的一行可调整该 AI 的参数。';
+  const ids = adaptedModelIds();
+  if (!ids.length) {
+    const p = document.createElement('p');
+    p.className = 'muted small';
+    p.textContent = '暂无适应记录。';
+    list.append(p);
+    return;
+  }
+  for (const id of ids) {
+    const { notes, params } = listAdaptation(id);
+    const head = document.createElement('div');
+    head.className = 'local-row';
+    const name = document.createElement('div');
+    name.className = 'local-name';
+    name.textContent = `${modelDisplayName(id)}（${notes.length} 条${Object.keys(params).length ? '，有参数' : ''}）`;
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'btn ghost small';
+    clear.dataset.action = 'adapt-clear';
+    clear.dataset.id = id;
+    clear.textContent = '清空';
+    head.append(name, clear);
+    list.append(head);
+    for (const n of notes) {
+      const row = document.createElement('div');
+      row.className = 'local-row';
+      const t = document.createElement('div');
+      t.className = 'muted small local-meta';
+      t.textContent = n.text;
+      const del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'btn ghost small';
+      del.dataset.action = 'adapt-delete';
+      del.dataset.id = id;
+      del.dataset.note = n.id;
+      del.textContent = '删除';
+      row.append(t, del);
+      list.append(row);
+    }
+    if (Object.keys(params).length) {
+      const p = document.createElement('div');
+      p.className = 'muted small local-meta';
+      p.textContent = '参数：' + Object.entries(params).map(([k, v]) => `${k}=${v}`).join(', ');
+      list.append(p);
+    }
+  }
 }
 
 /** 新建AI 列表：显示导入地址（本地缓存标识），管理员可删除。 */
@@ -916,6 +1014,8 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'copy') return copyCode(btn);
   if (btn && btn.dataset.action === 'regen') return regenerate();
   if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
+  if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
+  if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
   if (!e.target.closest('.chat-head')) {
     if (!els.historyPanel.hidden) closeHistory();
     if (!els.rolePanel.hidden) toggleRolePanel(false);
