@@ -25,7 +25,10 @@ import {
   listParamLog,
   recordFeedback,
   removeNote,
+  resetAllParams,
   resetParam,
+  sanitizeParams,
+  setModelParams,
   suggestParams,
 } from './adaptation.js';
 import {
@@ -88,6 +91,10 @@ const els = {
   localModelList: $('#localModelList'),
   adaptHint: $('#adaptHint'),
   adaptSuggest: $('#adaptSuggest'),
+  paramOverrides: $('#paramOverrides'),
+  exportWithParams: $('#exportWithParams'),
+  exportParamsText: $('#exportParamsText'),
+  exportParamsLabel: $('#exportParamsLabel'),
   adaptList: $('#adaptList'),
 };
 
@@ -750,14 +757,19 @@ async function exportCurrentModel() {
   try {
     const record = (await getRecords()).find((r) => r.model_id === modelId);
     if (!record) throw new Error(`找不到模型记录：${modelId}`);
+    // 勾选“同时保存自定义参数”时，把本机覆盖的 temperature / maxTokens 写入文件头部
+    const overrides = sanitizeParams(listAdaptation(modelId).params);
+    const withParams = !!overrides && els.exportWithParams.checked;
     showStatus(`正在打包 ${label}…`, { progress: 0 });
     const { blob, filename, size, entryCount } = await buildModelFile(record, {
       label: baseLabelOf(modelId),
+      adaptation: withParams ? { params: overrides } : undefined,
       onProgress: ({ done, total }) =>
         showStatus(`正在打包 ${label}（${done}/${total} 个文件）…`, { progress: done / total }),
     });
     downloadBlob(blob, filename);
-    showStatus(`已导出 ${filename}（${formatBytes(size)}，${entryCount} 个文件）。导入后即可离线使用。`);
+    const paramNote = withParams ? `，已保存自定义参数（${paramSummary(overrides)}）` : '';
+    showStatus(`已导出 ${filename}（${formatBytes(size)}，${entryCount} 个文件${paramNote}）。导入后即可离线使用。`);
   } catch (err) {
     showStatus(`导出失败：${err.message}`, { error: true });
   } finally {
@@ -780,10 +792,12 @@ async function importModelFromFile(file, kind = 'import') {
     const baseLabel = header.label || state.backend.models.find((m) => m.id === header.modelId)?.label || header.modelId;
     const label = `${baseLabel}（${kind === 'training' ? '训练结果' : '导入'}）`;
     showStatus(`正在导入 ${label}（${formatBytes(file.size)}）…`, { progress: 0 });
-    const { record } = await importModelFile(file, {
+    const { record, adaptation } = await importModelFile(file, {
       onProgress: ({ done, total }) =>
         showStatus(`正在导入 ${label}（${done}/${total} 个文件）…`, { progress: done / total }),
     });
+    // 文件中带有的自定义参数只作用于这个新建AI（以新的本地 id 保存）
+    const carried = adaptation ? setModelParams(record.model_id, adaptation, { source: 'import', reason: '导入模型文件' }) : null;
     addLocalModel({
       id: record.model_id,
       label,
@@ -797,7 +811,8 @@ async function importModelFromFile(file, kind = 'import') {
     state.backend.setModel(record.model_id);
     await refreshModelCacheStatus();
     renderLocalList();
-    showStatus(`导入完成：${label} 已加入“新建AI”，可离线使用。发送消息时将直接从本机加载。`);
+    const carriedNote = carried ? `，并带入自定义参数（${paramSummary(carried)}）` : '';
+    showStatus(`导入完成：${label} 已加入“新建AI”，可离线使用${carriedNote}。发送消息时将直接从本机加载。`);
   } catch (err) {
     showStatus(`${action}失败：${err.message}`, { error: true });
   } finally {
@@ -941,11 +956,13 @@ function refreshRoleUI() {
   renderAdaptList();
   if (!admin) pendingSuggestions = [];
   renderSuggestions();
+  renderParamOverrides();
 }
 
 /** AI 适应记录：管理员可查看、删除（仅本机）。 */
 function renderAdaptList() {
   const admin = isAdmin();
+  renderExportParamsOption();
   const list = els.adaptList;
   if (!list) return;
   list.replaceChildren();
@@ -1052,11 +1069,105 @@ function renderParamDetails(list, modelId, overrides) {
   }
 }
 
-function resetAdaptParam(modelId, key) {
+/**
+ * 撤回参数覆盖：任何人都可以在“更改权限”面板中恢复某个参数为默认值（只影响本浏览器）。
+ * 说明（notes）仍只能由管理员删除。
+ */
+function revertParam(modelId, key) {
   if (!requireAdmin('恢复默认参数')) return;
   if (!resetParam(modelId, key)) return;
-  renderAdaptList();
+  refreshParamViews();
   showStatus(`已恢复「${modelDisplayName(modelId)}」的 ${key} 为默认值（仅本机，从下一次回答起生效）。`);
+}
+
+function revertAllParams(modelId) {
+  if (!requireAdmin('恢复默认参数')) return;
+  const n = resetAllParams(modelId);
+  if (!n) return;
+  refreshParamViews();
+  showStatus(`已恢复「${modelDisplayName(modelId)}」的全部 ${n} 项参数为默认值（仅本机，从下一次回答起生效）。`);
+}
+
+function refreshParamViews() {
+  renderAdaptList();
+  renderParamOverrides();
+}
+
+/** 参数摘要，例如 “temperature=0.2，maxTokens=800”。 */
+function paramSummary(params) {
+  return Object.entries(params).map(([k, v]) => `${k}=${v}`).join('，');
+}
+
+/**
+ * “更改权限”面板中，所有用户都能看到当前模型的本机参数覆盖，并可撤回。
+ * 参数对同一浏览器的所有用户生效，因此这里不限定管理员。
+ */
+function renderParamOverrides() {
+  const box = els.paramOverrides;
+  if (!box) return;
+  box.replaceChildren();
+  // 普通用户看不到任何参数改动（参数仍会生效，但界面不显示）
+  box.hidden = true;
+  if (MODE !== 'webllm' || !state.backend || !isAdmin()) return;
+  box.hidden = false;
+  const modelId = state.backend.modelId;
+  const overrides = sanitizeParams(listAdaptation(modelId).params) || {};
+  const head = document.createElement('p');
+  head.className = 'muted small';
+  head.textContent = `当前模型「${modelDisplayName(modelId)}」的自定义参数（对本浏览器所有用户生效）：`;
+  box.append(head);
+  const keys = Object.keys(overrides);
+  if (!keys.length) {
+    const none = document.createElement('p');
+    none.className = 'muted small';
+    none.textContent = '没有自定义参数，使用默认值。';
+    box.append(none);
+    return;
+  }
+  for (const key of keys) {
+    const row = document.createElement('div');
+    row.className = 'local-row';
+    const t = document.createElement('div');
+    t.className = 'small';
+    t.textContent = `${key} = ${overrides[key]}（本机覆盖）`;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn ghost small';
+    btn.dataset.action = 'param-revert';
+    btn.dataset.id = modelId;
+    btn.dataset.key = key;
+    btn.textContent = '恢复默认';
+    row.append(t, btn);
+    box.append(row);
+  }
+  if (keys.length > 1) {
+    const all = document.createElement('button');
+    all.type = 'button';
+    all.className = 'btn ghost small';
+    all.dataset.action = 'param-revert-all';
+    all.dataset.id = modelId;
+    all.textContent = '全部恢复默认';
+    box.append(all);
+  }
+}
+
+/** 导出选项：有自定义参数时可勾选保存；没有时禁用。 */
+function renderExportParamsOption() {
+  const admin = isAdmin() && MODE === 'webllm';
+  els.exportParamsLabel.hidden = !admin;
+  if (!admin) {
+    els.exportWithParams.disabled = true;
+    els.exportWithParams.checked = false;
+    els.exportParamsText.textContent = '';
+    return;
+  }
+  const overrides = sanitizeParams(listAdaptation(state.backend?.modelId).params);
+  const has = !!overrides;
+  els.exportWithParams.disabled = !has;
+  els.exportWithParams.checked = has;
+  els.exportParamsText.textContent = has
+    ? `同时保存自定义参数（${paramSummary(overrides)}）`
+    : '当前模型没有自定义参数可保存';
 }
 
 /** 新建AI 列表：显示导入地址（本地缓存标识），管理员可删除。 */
@@ -1157,6 +1268,8 @@ els.historyBtn.addEventListener('click', () => {
 
 els.modelSelect.addEventListener('change', () => {
   state.backend.setModel(els.modelSelect.value);
+  renderParamOverrides();
+  renderExportParamsOption();
   const label = els.modelSelect.selectedOptions[0]?.textContent || els.modelSelect.value;
   // 超大模型：显存需求远超普通显卡（如 RTX 4060 的 8 GB），需要提前提醒
   if (label.includes('超大')) {
@@ -1179,7 +1292,9 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
   if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
   if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
-  if (btn && btn.dataset.action === 'adapt-reset') return resetAdaptParam(btn.dataset.id, btn.dataset.key);
+  if (btn && btn.dataset.action === 'adapt-reset') return revertParam(btn.dataset.id, btn.dataset.key);
+  if (btn && btn.dataset.action === 'param-revert') return revertParam(btn.dataset.id, btn.dataset.key);
+  if (btn && btn.dataset.action === 'param-revert-all') return revertAllParams(btn.dataset.id);
   if (btn && btn.dataset.action === 'suggest-accept') return acceptSuggestion(btn.dataset.id);
   if (btn && btn.dataset.action === 'suggest-dismiss') return dismissSuggestion(btn.dataset.id);
   if (!e.target.closest('.chat-head')) {
