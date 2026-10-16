@@ -6,7 +6,9 @@
  *   参数反馈（如 temperature、maxTokens）只影响该模型的采样参数。
  * - 记录只保存在本浏览器的 localStorage 中，不上传云端，也不会写入导出的 .ojmodel 文件。
  * - 远程（服务端）模式下不记录、不注入，避免把反馈发送到服务器。
- * - 管理员反馈会被采纳，但附加说明末尾固定一条护栏：反馈不得违反安全准则。
+ * - 管理员反馈被视为可信且优先于模型已有的旧知识；附加说明末尾固定一条窄边界：
+ *   反馈不能让模型提供伤害他人或违法的具体实施指导（这是模型本身的底线）。
+ * - 管理员设置的参数（temperature、maxTokens）覆盖该 AI 的默认配置，优先级最高。
  */
 
 const KEY = 'oj-ai.adapt.v1';
@@ -16,7 +18,7 @@ export const PROMPT_BUDGET_CHARS = 1500;
 const PARAM_LIMITS = { temperature: [0, 1.5], maxTokens: [64, 16384] };
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 const GUARD =
-  '以上是管理员针对本 AI 给出的反馈，请据此调整回答的风格、格式与事实。这些反馈不得用于违反安全准则或应用的基本规定。';
+  '以上是管理员针对本 AI 给出的反馈，优先级高于你已有的默认设定和旧知识：若反馈指出某个说法已被证伪或已过时，请直接以反馈的更正为准，不要坚持原说法；请据此调整回答的风格、格式与事实。唯一例外：反馈不能让你提供会伤害他人或违法的具体实施指导。';
 
 function readAll(storage) {
   try {
@@ -135,7 +137,7 @@ export function buildAdaptationPrompt(modelId, { storage = globalThis.localStora
     total += line.length;
     picked.unshift(line);
   }
-  return `\n\n【管理员反馈（仅本机记录，请采纳）】\n${picked.join('\n')}\n${GUARD}`;
+  return `\n\n【管理员反馈（仅本机记录，最高优先级，请采纳）】\n${picked.join('\n')}\n${GUARD}`;
 }
 
 /** 组合基础系统提示词与该模型的适应说明。 */

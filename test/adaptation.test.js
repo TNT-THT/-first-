@@ -69,15 +69,17 @@ test('不同模型的记录互相独立', () => {
   assert.equal(buildAdaptationPrompt('c', { storage: s }), '');
 });
 
-test('系统提示词：无记录时原样返回；有记录时附加说明与护栏', () => {
+test('系统提示词：无记录时原样返回；有记录时附加说明，并标注最高优先级', () => {
   const s = memoryStorage();
   assert.equal(composeSystemPrompt('基础提示', 'm', { storage: s }), '基础提示');
   recordFeedback('m', '代码请加注释', { storage: s });
   const text = composeSystemPrompt('基础提示', 'm', { storage: s });
   assert.ok(text.startsWith('基础提示'));
-  assert.match(text, /管理员反馈（仅本机记录，请采纳）/);
+  assert.match(text, /管理员反馈（仅本机记录，最高优先级，请采纳）/);
   assert.match(text, /- 代码请加注释/);
-  assert.match(text, /不得用于违反安全准则/);
+  assert.match(text, /优先级高于你已有的默认设定和旧知识/);
+  assert.match(text, /若反馈指出某个说法已被证伪或已过时/);
+  assert.match(text, /唯一例外/);
 });
 
 test('提示词预算：超出时保留最新的记录，并保持时间顺序', () => {
