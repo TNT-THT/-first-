@@ -1,0 +1,6 @@
+{"prompt": "两数之和：给定数组和目标值，返回两个下标。请给出思路和复杂度。", "response": "用哈希表记录每个数的下标，遍历时查找 target - x。时间 O(n)，空间 O(n)。"}
+{"messages": [{"role": "system", "content": "你是 OJ 刷题助手"}, {"role": "user", "content": "什么是二分答案？"}, {"role": "assistant", "content": "在答案具有单调性时，对答案二分，并用判定函数检查是否可行。"}]}
+{"instruction": "判断回文串", "input": "s = \"abba\"", "output": "双指针从两端向中间比较，全部相等则为回文。"}
+{"messages": [{"role": "user", "content": "只有一句问题"}]}
+{"prompt": "", "response": "空问题应被丢弃"}
+not json

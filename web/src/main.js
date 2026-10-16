@@ -185,6 +185,13 @@ function paintAssistant(bubble, msg, { streaming = false, label = '正在思考�
 function createMessageEl(msg, { streaming = false } = {}) {
   const wrap = document.createElement('div');
   wrap.className = `msg ${msg.role}`;
+  if (msg.role === 'assistant' && msg.modelLabel) {
+    // 标明回答的 AI，便于区分不同模型的回复
+    const who = document.createElement('div');
+    who.className = 'msg-model';
+    who.textContent = msg.modelLabel;
+    wrap.appendChild(who);
+  }
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   if (msg.role === 'user') {
@@ -266,6 +273,15 @@ function refreshAll() {
 function setBusy(busy) {
   els.sendBtn.hidden = busy;
   els.stopBtn.hidden = !busy;
+  // 生成期间不能切换模型，否则回答的标注与实际生成的模型可能不一致
+  els.modelSelect.disabled = busy;
+}
+
+/** 当前回答 AI 的显示名称（不含 ✓ 等缓存标记）。 */
+function modelDisplayName(id) {
+  if (MODE !== 'webllm') return state.appConfig.model || '服务端模型';
+  const opt = [...els.modelSelect.options].find((o) => o.value === id);
+  return opt?.dataset.label || state.backend.models.find((m) => m.id === id)?.label || id;
 }
 
 async function send(rawText) {
@@ -275,7 +291,10 @@ async function send(rawText) {
   const session = ensureSession();
   const isFirst = session.messages.length === 0;
   const userMsg = { role: 'user', content: text, ts: Date.now() };
-  const assistantMsg = { role: 'assistant', content: '', ts: Date.now() };
+  // 记录本次回答所用的 AI（名称快照保存，之后删除或改名模型也能正确标注）
+  const modelId = state.backend.modelId;
+  const modelLabel = modelDisplayName(modelId);
+  const assistantMsg = { role: 'assistant', content: '', ts: Date.now(), model: modelId, modelLabel };
   session.messages.push(userMsg, assistantMsg);
   if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
     session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
@@ -285,7 +304,7 @@ async function send(rawText) {
   persist();
 
   // 上下文：不包含本次刚添加的空占位回复
-  const context = buildContext(session.messages.slice(0, -1), state.backend.limits);
+  const context = buildContext(session.messages.slice(0, -1), { ...state.backend.limits, currentModel: modelId });
 
   const controller = new AbortController();
   state.streaming = { controller, session, assistant: assistantMsg };
@@ -783,7 +802,7 @@ function refreshRoleUI() {
   els.exportModelBtn.disabled = !admin;
   setImportButtons(admin);
   els.modelAdminHint.textContent = admin
-    ? 'AI 训练：浏览器内训练尚未实现；可在外部训练后用“导入训练结果”加入新建AI。'
+    ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
     : '导出与导入模型仅限管理员。';
   renderLocalList();
 }
@@ -887,7 +906,7 @@ els.historyBtn.addEventListener('click', () => {
 els.modelSelect.addEventListener('change', () => {
   state.backend.setModel(els.modelSelect.value);
   const label = els.modelSelect.selectedOptions[0]?.textContent || els.modelSelect.value;
-  showStatus(`已切换到 ${label}，发送消息时将自动加载。`);
+  showStatus(`已切换到 ${label}，发送消息时将自动加载。之后的回答会标注为该 AI，并沿用本会话的上下文。`);
 });
 
 document.addEventListener('click', (e) => {

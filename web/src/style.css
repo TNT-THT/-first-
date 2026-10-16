@@ -254,7 +254,7 @@ body {
 
 .msg { display: flex; min-width: 0; }
 .msg.user { justify-content: flex-end; }
-.msg.assistant { justify-content: flex-start; }
+.msg.assistant { justify-content: flex-start; flex-direction: column; }
 
 .bubble {
   max-width: 100%;
@@ -527,3 +527,12 @@ body.embed .role-section { display: none !important; }
 
 /* ---------- 回复操作（重新生成） ---------- */
 .msg-actions { display: flex; gap: 6px; padding: 0 2px 8px; }
+.msg-model {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 0 2px 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
