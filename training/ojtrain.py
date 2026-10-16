@@ -63,7 +63,8 @@ def cmd_models(args):
     if args.json:
         print(json.dumps(models, ensure_ascii=False, indent=2))
         return 0
-    print(f"可训练的模型（共 {len(models)} 个，来自网页下拉框）：")
+    in_dd = sum(1 for m in models if m.get("in_dropdown", True))
+    print(f"可训练的模型（共 {len(models)} 个：网页下拉框 {in_dd} 个，另有仅训练目录 {len(models) - in_dd} 个）：")
     print("\n".join(catalog.summary_lines(models)))
     print("\n用法：python3 training/ojtrain.py init --model <上面的 id>")
     print("清单之外的模型：init --hf-repo 组织/模型 --conv-template <模板名> --context-window-size 4096")

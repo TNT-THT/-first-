@@ -23,9 +23,11 @@ The first repository of me,and first of "炸药工厂"
 - **下载失败提示**：出错时会显示失败时的下载进度，并提示可以改用“导入模型”。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B。共 30 个可选：非推理 24 个、推理 6 个。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 32 个可选：非推理 26 个、推理 6 个。每个标签末尾都标注了推理所需的显存（WebLLM 记录值，或注明为估算）。
   - 厂商：Qwen（阿里）、Meta Llama、Google Gemma、Mistral、Microsoft Phi、Hugging Face SmolLM2、AI2 OLMo、TinyLlama、Stability StableLM、Nous Hermes、DeepSeek（仅 R1 蒸馏版，均为推理模型）。
-  - 大型：Llama 2 13B（需约 12 GB 显存，多数设备无法运行）。
+  - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）。
+  - 超大：Llama 3.1 70B、Llama 3 70B（均为 q3f16 量化，需约 30.4 GB 显存）。**8 GB 显存的 RTX 4060 无法加载这两个模型，即使是 16 GB 的 4060 Ti 也无法加载**，选中时会显示警告。这两个模型不能满足“4060 上 1 分钟内回复”的要求，也没有在任何真实硬件上测过速度。
+  - 仅训练目录（不在下拉框中）的超大模型：Qwen2.5 32B、Yi 1.5 34B。WebLLM 没有它们的预编译运行库，需要在本机用训练流程编译后才能用，见 [`training/README.md`](training/README.md)。
   - DeepSeek 的小型非推理模型（如 deepseek-coder-1.3b-instruct）不在 WebLLM 内置列表中，无法直接使用。
 - **DeepSeek-R1 1.5B 暂时隐藏**：该模型在下拉框中已移除，记录仍保留在 `webllm.extraRecords` 中。原因：它借用的 wasm 库（Qwen2-1.5B，与 Qwen2.5-Coder 1.5B 等共用）是按 `rope_theta: 1000000`、`tie_word_embeddings: true` 编译的，而 DeepSeek-R1 1.5B 的权重配置是 `rope_theta: 10000`、`tie_word_embeddings: false`。这两个参数编译进 wasm，运行时无法通过配置修改，因此输出会乱码（已有用户实测复现）。WebLLM 官方注释也写明 “Qwen2-1.5B is experiencing correctness issue”。要恢复该模型，需要为它单独编译匹配参数的 wasm，然后把 `extraRecords` 中的 `model_lib` 指向新文件，并在 `webllm.models` 中加回条目。
 - **Qwen2.5-Math 1.5B 已从下拉框移除**：它同样借用 Qwen2-1.5B wasm，但权重配置为 `rope_theta: 10000`，与 wasm 不一致，原因与上面相同。
@@ -60,6 +62,7 @@ The first repository of me,and first of "炸药工厂"
 - 推理模型（Qwen3、DeepSeek-R1）会先输出较长的思考过程，默认 `maxTokens` 为 16384（见 `config.json`），但每个模型的上下文窗口通常只有 4096 token，思考过程与回答合计超出时会提前停止；如遇到“只输出了思考过程”的提示，可在 `config.json` 中调大 `maxTokens`，或换用非推理模型。
 - 中国大陆网络访问 Hugging Face 可能需要代理工具，请先确认代理已开启并允许访问 `huggingface.co`。
 - 如果浏览器不支持 WebGPU，页面会在状态栏给出提示，而不是静默失败。
+- **超大模型（≥30B）**：需要约 30 GB 以上显存，远超 RTX 4060（8 GB）和 4060 Ti（16 GB）的显存。模型权重还需下载数十 GB，首次加载可能失败。本项目没有任何能满足“4060 上回复不超过 1 分钟”的超大模型，相关速度也无法在本仓库的环境中测量。
 
 ## AI 适应（管理员反馈，仅本机）
 

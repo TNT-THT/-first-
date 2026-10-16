@@ -1158,6 +1158,15 @@ els.historyBtn.addEventListener('click', () => {
 els.modelSelect.addEventListener('change', () => {
   state.backend.setModel(els.modelSelect.value);
   const label = els.modelSelect.selectedOptions[0]?.textContent || els.modelSelect.value;
+  // 超大模型：显存需求远超普通显卡（如 RTX 4060 的 8 GB），需要提前提醒
+  if (label.includes('超大')) {
+    showStatus(
+      `${label} 为超大模型，需要约 30 GB 以上显存，8 GB 显卡（如 RTX 4060）无法加载或运行；` +
+        '首次使用还需下载数十 GB 的文件。发送消息时可能加载失败。',
+      { error: true },
+    );
+    return;
+  }
   showStatus(`已切换到 ${label}，发送消息时将自动加载。之后的回答会标注为该 AI，并沿用本会话的上下文。`);
 });
 

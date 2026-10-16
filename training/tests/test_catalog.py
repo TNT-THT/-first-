@@ -18,17 +18,29 @@ class CatalogDataTest(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
         ids = [m["id"] for m in cfg["webllm"]["models"]]
-        self.assertEqual(sorted(ids), sorted(m["id"] for m in self.models))
-        self.assertEqual(len(self.models), 30)
+        in_dd = [m["id"] for m in self.models if m.get("in_dropdown", True)]
+        self.assertEqual(sorted(ids), sorted(in_dd))
+        self.assertEqual(len(in_dd), 32)
+        self.assertEqual(len(self.models), 34)  # 另有 2 个仅训练目录的超大模型
+
+    def test_catalog_only_models_are_not_in_dropdown(self):
+        only = [m for m in self.models if not m.get("in_dropdown", True)]
+        self.assertEqual(sorted(m["id"] for m in only), ["Qwen2.5-32B-Instruct", "Yi-1.5-34B-Chat"])
+        for m in only:
+            with self.subTest(model=m["id"]):
+                self.assertIsNone(m["model_lib_url"])
+                self.assertEqual(m["size_class"], "超大")
+                self.assertEqual(m["inference_vram_source"], "estimate")
 
     def test_every_entry_is_complete(self):
         for m in self.models:
             with self.subTest(model=m["id"]):
                 self.assertTrue(m["hf_repo"].count("/") == 1)
-                self.assertIn(m["size_class"], ("极小", "小", "中", "大"))
-                self.assertTrue(m["model_lib_url"].startswith("https://"))
-                self.assertTrue(m["wasm_file"].endswith(".wasm"))
-                self.assertTrue(m["quantization"].startswith("q4f16"))
+                self.assertIn(m["size_class"], ("超大", "极小", "小", "中", "大"))
+                if m.get("in_dropdown", True):
+                    self.assertTrue(m["model_lib_url"].startswith("https://"))
+                    self.assertTrue(m["wasm_file"].endswith(".wasm"))
+                self.assertRegex(m["quantization"], r"^q[34]f16")  # 70B 使用 q3f16 以适应显存
                 self.assertTrue(m["conv_template"])
                 self.assertFalse(m["verified"])  # 原始仓库与模板名尚未核对
 
@@ -38,6 +50,8 @@ class CatalogDataTest(unittest.TestCase):
         self.assertFalse(by_id["Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC"]["reasoning"])
         self.assertEqual(by_id["Llama-2-13b-chat-hf-q4f16_1-MLC"]["size_class"], "大")
         self.assertEqual(by_id["Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC"]["size_class"], "极小")
+        self.assertEqual(by_id["Llama-3.1-70B-Instruct-q3f16_1-MLC"]["size_class"], "超大")
+        self.assertEqual(by_id["Llama-3.1-70B-Instruct-q3f16_1-MLC"]["inference_vram_gb"], 30.4)
 
     def test_gated_models_are_flagged(self):
         by_id = {m["id"]: m for m in self.models}
@@ -74,9 +88,16 @@ class ApplyCatalogTest(unittest.TestCase):
 
     def test_every_catalog_model_gives_valid_config(self):
         for entry in catalog.load():
+            if not entry.get("in_dropdown", True):
+                continue
             with self.subTest(model=entry["id"]):
                 cfg = catalog.apply_catalog(cfgmod.load_example(), entry)
                 self.assertEqual(cfgmod.validate(cfg), [])
+
+    def test_catalog_only_model_refuses_official_library(self):
+        entry = catalog.find("Qwen2.5-32B-Instruct")
+        with self.assertRaisesRegex(catalog.CatalogError, "--hf-repo Qwen/Qwen2.5-32B-Instruct"):
+            catalog.apply_catalog(cfgmod.load_example(), entry)
 
     def test_custom_model_compiles_locally(self):
         cfg = catalog.apply_custom(
