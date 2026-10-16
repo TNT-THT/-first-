@@ -34,11 +34,6 @@
             <button id="clearAllBtn" type="button" class="btn ghost small">清空全部</button>
             <select id="modelSelect" class="model-select" hidden aria-label="选择模型"></select>
             <span id="modelLabel" class="muted small"></span>
-            <div class="model-tools">
-              <button id="exportModelBtn" type="button" class="btn ghost small" title="把当前模型（需已下载）导出为 .ojmodel 文件，可在其他电脑导入后离线使用">导出模型</button>
-              <button id="importModelBtn" type="button" class="btn ghost small" title="导入 .ojmodel 文件，导入后无需访问 Hugging Face 即可使用">导入模型</button>
-              <input id="importModelInput" type="file" accept=".ojmodel" hidden />
-            </div>
           </div>
         </aside>
 
@@ -47,8 +42,30 @@
             <button id="historyBtn" type="button" class="btn ghost small history-toggle" aria-expanded="false">历史</button>
             <span id="chatTitle" class="chat-title"></span>
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
+            <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
+            <button id="roleBtn" type="button" class="btn ghost small" aria-expanded="false">更改权限</button>
             <div id="historyPanel" class="history-panel" hidden>
               <div class="history-list" data-session-list></div>
+            </div>
+            <div id="rolePanel" class="history-panel role-panel" hidden>
+              <p id="roleStatus" class="role-status"></p>
+              <form id="roleForm" class="role-form">
+                <input id="adminKey" type="password" autocomplete="off" placeholder="管理员密钥" aria-label="管理员密钥" />
+                <button id="roleSubmit" type="submit" class="btn primary small">验证并升级</button>
+                <p id="roleError" class="error small" role="alert"></p>
+              </form>
+              <button id="roleLogoutBtn" type="button" class="btn ghost small" hidden>退出管理员</button>
+              <div class="role-section">
+                <p id="modelAdminHint" class="muted small"></p>
+                <div class="model-tools">
+                  <button id="exportModelBtn" type="button" class="btn ghost small" title="把当前模型（需已下载）导出为 .ojmodel 文件">导出当前模型</button>
+                  <button id="importModelBtn" type="button" class="btn ghost small" title="导入 .ojmodel 文件，成为“新建 AI”">导入模型文件</button>
+                  <button id="importTrainBtn" type="button" class="btn ghost small" title="导入外部训练得到的 .ojmodel，成为“新建 AI”">导入训练结果</button>
+                  <input id="importModelInput" type="file" accept=".ojmodel" hidden />
+                  <input id="importTrainInput" type="file" accept=".ojmodel" hidden />
+                </div>
+                <div id="localModelList" class="local-list"></div>
+              </div>
             </div>
           </header>
 
