@@ -133,10 +133,6 @@
         "label": "DeepSeek-R1 8B（推理·中）"
       },
       {
-        "id": "DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
-        "label": "DeepSeek-R1 1.5B（推理·小·实验性）"
-      },
-      {
         "id": "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC",
         "label": "DeepSeek-R1 7B（推理·中）"
       }

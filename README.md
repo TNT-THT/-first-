@@ -16,11 +16,13 @@ The first repository of me,and first of "炸药工厂"
 - **Markdown、代码高亮、一键复制、LaTeX 公式**（KaTeX，本地打包）。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B。共 32 个：非推理 25 个、推理 7 个。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B。共 31 个可选：非推理 25 个、推理 6 个。
   - 厂商：Qwen（阿里）、Meta Llama、Google Gemma、Mistral、Microsoft Phi、Hugging Face SmolLM2、AI2 OLMo、TinyLlama、Stability StableLM、Nous Hermes、DeepSeek（仅 R1 蒸馏版，均为推理模型）。
   - 大型：Llama 2 13B（需约 12 GB 显存，多数设备无法运行）。
   - DeepSeek 的小型非推理模型（如 deepseek-coder-1.3b-instruct）不在 WebLLM 内置列表中，无法直接使用。
-- **自定义模型记录**：`webllm.extraRecords` 用于保留 WebLLM 内置列表中被注释掉、但仍可使用的模型（当前是 DeepSeek-R1 蒸馏 1.5B）。WebLLM 官方在注释中写明 “Qwen2-1.5B is experiencing correctness issue”，即该模型所用的 wasm 库（与 Qwen2.5-Coder 1.5B 等共用）曾出现正确性问题，请以实际输出为准。
+- **DeepSeek-R1 1.5B 暂时隐藏**：该模型在下拉框中已移除，记录仍保留在 `webllm.extraRecords` 中。原因：它借用的 wasm 库（Qwen2-1.5B，与 Qwen2.5-Coder 1.5B 等共用）是按 `rope_theta: 1000000`、`tie_word_embeddings: true` 编译的，而 DeepSeek-R1 1.5B 的权重配置是 `rope_theta: 10000`、`tie_word_embeddings: false`。这两个参数编译进 wasm，运行时无法通过配置修改，因此输出会乱码（已有用户实测复现）。WebLLM 官方注释也写明 “Qwen2-1.5B is experiencing correctness issue”。要恢复该模型，需要为它单独编译匹配参数的 wasm，然后把 `extraRecords` 中的 `model_lib` 指向新文件，并在 `webllm.models` 中加回条目。
+- **Qwen2.5-Math 1.5B 可能存在同样问题**：它也借用 Qwen2-1.5B wasm，但其权重配置为 `rope_theta: 10000`，与 wasm 不一致，尚未在浏览器中验证。
+- **自定义模型记录**：`webllm.extraRecords` 用于放置 WebLLM 内置列表中没有、但需要手动补充的模型记录。
 - **推理模型的思考过程会被隐藏**：Qwen3、DeepSeek-R1 等模型输出的 `<think>` 内容不展示，只显示最终回答，也不计入历史上下文。
 - **系统提示词**可在 `config.json` 的 `systemPrompt` 中自由修改，默认不限制话题与回答格式。
 
