@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { renderMarkdown } from '../web/src/markdown.js';
 import { isAllowedOrigin } from '../web/src/origin.js';
-import { buildContext } from '../web/src/store.js';
+import { attributeContent, buildContext } from '../web/src/store.js';
 import { validateMessages } from '../server/chat.js';
 import { createToken, verifyToken, checkPassword } from '../server/auth.js';
 import { createHash } from 'node:crypto';
@@ -208,4 +208,42 @@ test('新建AI登记：损坏的存储内容不会导致报错', () => {
 test('模型列表：mirrorOwner 含斜杠或非法字符时拒绝', () => {
   assert.throws(() => buildModelList([{ model_id: 'A', model: 'x' }], [], 'a/b'));
   assert.throws(() => buildModelList([{ model_id: 'A', model: 'x' }], [], '../evil'));
+});
+
+test('多 AI 对话：其他模型的回复带来源标记，当前模型自己的回复保持原样', () => {
+  const msgs = [
+    { role: 'user', content: '第一问' },
+    { role: 'assistant', content: '甲的回答', model: 'A', modelLabel: 'AI 甲' },
+    { role: 'user', content: '第二问' },
+    { role: 'assistant', content: '乙的回答', model: 'B', modelLabel: 'AI 乙' },
+    { role: 'user', content: '第三问' },
+  ];
+  const ctx = buildContext(msgs, { maxMessages: 10, currentModel: 'B' });
+  assert.deepEqual(
+    ctx.map((m) => m.role),
+    ['user', 'assistant', 'user', 'assistant', 'user'].slice(0, ctx.length)
+  );
+  assert.equal(ctx[1].content, '【以下回复由其他AI「AI 甲」给出】\n甲的回答');
+  assert.equal(ctx[3].content, '乙的回答');
+  assert.equal(ctx[0].content, '第一问');
+});
+
+test('多 AI 对话：没有模型标记的旧消息不加标记；标签缺失时用模型 id', () => {
+  assert.equal(attributeContent({ role: 'assistant', content: 'x' }, 'B'), 'x');
+  assert.equal(attributeContent({ role: 'assistant', content: 'x', model: 'A' }, 'B'), '【以下回复由其他AI「A」给出】\nx');
+  assert.equal(attributeContent({ role: 'user', content: 'x', model: 'A' }, 'B'), 'x');
+  assert.equal(attributeContent({ role: 'assistant', content: 'x', model: 'B' }, 'B'), 'x');
+});
+
+test('多 AI 对话：切换模型后仍保留完整的上下文轮次（不以助手消息开头）', () => {
+  const msgs = [
+    { role: 'user', content: 'q1' },
+    { role: 'assistant', content: 'a1', model: 'A', modelLabel: 'A' },
+    { role: 'user', content: 'q2' },
+    { role: 'assistant', content: 'a2', model: 'A', modelLabel: 'A' },
+    { role: 'user', content: 'q3' },
+  ];
+  const ctx = buildContext(msgs, { maxMessages: 3, currentModel: 'B' });
+  assert.equal(ctx[0].role, 'user');
+  assert.equal(ctx.at(-1).content, 'q3');
 });

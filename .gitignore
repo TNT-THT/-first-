@@ -5,3 +5,10 @@ web/dist/
 !.env.example
 *.log
 .DS_Store
+
+# 训练运行时产物（不进入仓库）
+training/runs/
+training/out/
+training/**/__pycache__/
+*.ojmodel
+*.ojmodel.part
