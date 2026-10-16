@@ -379,6 +379,12 @@ body {
 }
 .composer .btn { height: 38px; }
 
+/* ---------- 参数建议（仅管理员，需确认） ---------- */
+.adapt-suggest { display: flex; flex-direction: column; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); background: var(--panel); }
+.adapt-suggest[hidden] { display: none; }
+.adapt-suggest-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-size: 13px; }
+.adapt-suggest-row span { flex: 1 1 260px; }
+
 /* ---------- 嵌入模式（侧边栏 / iframe） ---------- */
 /* 隐藏自带侧边栏、Logo、设置按钮；只保留聊天区域 */
 body.embed .sidebar,

@@ -16,7 +16,16 @@ import {
 } from './model-file.js';
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
-import { adaptedModelIds, clearModelAdaptation, listAdaptation, recordFeedback, removeNote } from './adaptation.js';
+import {
+  adaptedModelIds,
+  applyParamSuggestion,
+  clearModelAdaptation,
+  getModelParams,
+  listAdaptation,
+  recordFeedback,
+  removeNote,
+  suggestParams,
+} from './adaptation.js';
 import {
   buildContext,
   createSession,
@@ -76,6 +85,7 @@ const els = {
   modelAdminHint: $('#modelAdminHint'),
   localModelList: $('#localModelList'),
   adaptHint: $('#adaptHint'),
+  adaptSuggest: $('#adaptSuggest'),
   adaptList: $('#adaptList'),
 };
 
@@ -301,8 +311,88 @@ function recordAdminFeedback(session, text) {
   const parts = [];
   if (rec.note) parts.push('已记录反馈');
   if (rec.params) parts.push('已更新参数 ' + Object.entries(rec.params).map(([k, v]) => `${k}=${v}`).join(', '));
-  showStatus(`${parts.join('，')}（仅本机，对「${modelDisplayName(last.model)}」生效，不上传）。`);
+  // 没有显式参数行时，按关键词给出“建议参数”，必须由管理员确认后才生效
+  let suggested = 0;
+  if (!rec.params) {
+    const found = suggestParams(text, effectiveParams(last.model));
+    suggested = addSuggestions(last.model, last.modelLabel || modelDisplayName(last.model), found);
+    if (suggested) parts.push(`有 ${suggested} 条参数建议，请在输入框上方确认（确认前不生效）`);
+  }
+  if (parts.length) {
+    showStatus(`${parts.join('，')}（仅本机，对「${modelDisplayName(last.model)}」生效，不上传）。`);
+  }
   renderAdaptList();
+}
+
+/** 待管理员确认的参数建议（仅内存中保存；刷新页面或退出管理员后清空）。 */
+let pendingSuggestions = [];
+
+/** 某模型当前生效的参数：本机覆盖优先，否则使用配置默认值。 */
+function effectiveParams(modelId) {
+  const d = state.appConfig.webllm;
+  return { temperature: d.temperature, maxTokens: d.maxTokens, ...getModelParams(modelId) };
+}
+
+function addSuggestions(modelId, modelLabel, found) {
+  for (const f of found) {
+    pendingSuggestions = pendingSuggestions.filter((x) => !(x.modelId === modelId && x.key === f.key));
+    pendingSuggestions.push({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, modelId, modelLabel, ...f });
+  }
+  pendingSuggestions = pendingSuggestions.slice(-6);
+  renderSuggestions();
+  return found.length;
+}
+
+function dropPendingSuggestions(modelId) {
+  pendingSuggestions = pendingSuggestions.filter((x) => x.modelId !== modelId);
+  renderSuggestions();
+}
+
+/** 输入框上方的建议卡片：仅管理员可见。 */
+function renderSuggestions() {
+  const box = els.adaptSuggest;
+  if (!box) return;
+  box.replaceChildren();
+  const items = isAdmin() && MODE === 'webllm' ? pendingSuggestions : [];
+  box.hidden = items.length === 0;
+  for (const s of items) {
+    const row = document.createElement('div');
+    row.className = 'adapt-suggest-row';
+    const text = document.createElement('span');
+    const name = s.key === 'maxTokens' ? 'maxTokens（最大输出长度）' : 'temperature（温度）';
+    text.textContent = `检测到你${s.reason}，是否将「${s.modelLabel}」的 ${name} 设为 ${s.value}？`;
+    const ok = document.createElement('button');
+    ok.type = 'button';
+    ok.className = 'btn primary small';
+    ok.dataset.action = 'suggest-accept';
+    ok.dataset.id = s.id;
+    ok.textContent = '确认';
+    const no = document.createElement('button');
+    no.type = 'button';
+    no.className = 'btn ghost small';
+    no.dataset.action = 'suggest-dismiss';
+    no.dataset.id = s.id;
+    no.textContent = '忽略';
+    row.append(text, ok, no);
+    box.append(row);
+  }
+}
+
+function acceptSuggestion(id) {
+  if (!requireAdmin('确认参数建议')) return;
+  const s = pendingSuggestions.find((x) => x.id === id);
+  if (!s) return;
+  const value = applyParamSuggestion(s.modelId, s.key, s.value);
+  pendingSuggestions = pendingSuggestions.filter((x) => x.id !== id);
+  renderSuggestions();
+  renderAdaptList();
+  if (value === null) return showStatus('参数建议无效，未生效。', { error: true });
+  showStatus(`已确认：「${s.modelLabel}」的 ${s.key} = ${value}（仅本机，从下一次回答起生效）。`);
+}
+
+function dismissSuggestion(id) {
+  pendingSuggestions = pendingSuggestions.filter((x) => x.id !== id);
+  renderSuggestions();
 }
 
 async function send(rawText) {
@@ -727,6 +817,7 @@ function clearAdaptation(modelId) {
   if (!requireAdmin('清空 AI 适应记录')) return;
   if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录？`)) return;
   clearModelAdaptation(modelId);
+  dropPendingSuggestions(modelId);
   renderAdaptList();
 }
 
@@ -739,6 +830,7 @@ async function deleteLocalModel(id) {
     const removed = await removeLocalModelFiles(entry.record);
     removeLocalModel(id);
     clearModelAdaptation(id);
+    dropPendingSuggestions(id);
     if (state.backend.modelId === id) state.backend.setModel(state.appConfig.webllm.defaultModel);
     renderModelOptions(state.backend.modelId);
     renderLocalList();
@@ -842,6 +934,8 @@ function refreshRoleUI() {
     : '导出与导入模型仅限管理员。';
   renderLocalList();
   renderAdaptList();
+  if (!admin) pendingSuggestions = [];
+  renderSuggestions();
 }
 
 /** AI 适应记录：管理员可查看、删除（仅本机）。 */
@@ -1016,6 +1110,8 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
   if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
   if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
+  if (btn && btn.dataset.action === 'suggest-accept') return acceptSuggestion(btn.dataset.id);
+  if (btn && btn.dataset.action === 'suggest-dismiss') return dismissSuggestion(btn.dataset.id);
   if (!e.target.closest('.chat-head')) {
     if (!els.historyPanel.hidden) closeHistory();
     if (!els.rolePanel.hidden) toggleRolePanel(false);
