@@ -94,6 +94,7 @@ const els = {
   paramOverrides: $('#paramOverrides'),
   exportWithParams: $('#exportWithParams'),
   exportParamsText: $('#exportParamsText'),
+  exportParamsLabel: $('#exportParamsLabel'),
   adaptList: $('#adaptList'),
 };
 
@@ -1073,12 +1074,14 @@ function renderParamDetails(list, modelId, overrides) {
  * 说明（notes）仍只能由管理员删除。
  */
 function revertParam(modelId, key) {
+  if (!requireAdmin('恢复默认参数')) return;
   if (!resetParam(modelId, key)) return;
   refreshParamViews();
   showStatus(`已恢复「${modelDisplayName(modelId)}」的 ${key} 为默认值（仅本机，从下一次回答起生效）。`);
 }
 
 function revertAllParams(modelId) {
+  if (!requireAdmin('恢复默认参数')) return;
   const n = resetAllParams(modelId);
   if (!n) return;
   refreshParamViews();
@@ -1103,8 +1106,10 @@ function renderParamOverrides() {
   const box = els.paramOverrides;
   if (!box) return;
   box.replaceChildren();
-  box.hidden = MODE !== 'webllm';
-  if (MODE !== 'webllm' || !state.backend) return;
+  // 普通用户看不到任何参数改动（参数仍会生效，但界面不显示）
+  box.hidden = true;
+  if (MODE !== 'webllm' || !state.backend || !isAdmin()) return;
+  box.hidden = false;
   const modelId = state.backend.modelId;
   const overrides = sanitizeParams(listAdaptation(modelId).params) || {};
   const head = document.createElement('p');
@@ -1148,8 +1153,16 @@ function renderParamOverrides() {
 
 /** 导出选项：有自定义参数时可勾选保存；没有时禁用。 */
 function renderExportParamsOption() {
+  const admin = isAdmin() && MODE === 'webllm';
+  els.exportParamsLabel.hidden = !admin;
+  if (!admin) {
+    els.exportWithParams.disabled = true;
+    els.exportWithParams.checked = false;
+    els.exportParamsText.textContent = '';
+    return;
+  }
   const overrides = sanitizeParams(listAdaptation(state.backend?.modelId).params);
-  const has = !!overrides && MODE === 'webllm';
+  const has = !!overrides;
   els.exportWithParams.disabled = !has;
   els.exportWithParams.checked = has;
   els.exportParamsText.textContent = has
