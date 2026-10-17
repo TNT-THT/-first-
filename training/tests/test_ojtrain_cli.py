@@ -97,19 +97,19 @@ class CliTest(unittest.TestCase):
     def test_models_lists_catalog(self):
         code, out = run(["models"])
         self.assertEqual(code, 0)
-        self.assertIn("共 30 个", out)
-        self.assertIn("Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC", out)
+        self.assertIn("共 29 个", out)
+        self.assertIn("Qwen2.5-3B-Instruct-q4f16_1-MLC", out)
         code, out = run(["models", "--json"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(json.loads(out)), 30)
+        self.assertEqual(len(json.loads(out)), 29)
 
     def test_init_with_catalog_model(self):
-        code, out = run(["init", "--config", self.cfg, "--model", "Qwen3-4B-q4f16_1-MLC"])
+        code, out = run(["init", "--config", self.cfg, "--model", "Qwen3-8B-q4f16_1-MLC"])
         self.assertEqual(code, 0, out)
         self.assertIn("沿用官方", out)
         with open(self.cfg, encoding="utf-8") as f:
             data = json.load(f)
-        self.assertEqual(data["base"]["hf_repo"], "Qwen/Qwen3-4B")
+        self.assertEqual(data["base"]["hf_repo"], "Qwen/Qwen3-8B")
         self.assertFalse(data["mlc"]["compile"])
 
     def test_init_with_custom_repo_compiles(self):
@@ -123,7 +123,7 @@ class CliTest(unittest.TestCase):
         self.assertEqual(data["mlc"]["context_window_size"], 2048)
 
     def test_init_rejects_conflicting_or_incomplete_options(self):
-        code, _ = run(["init", "--config", self.cfg, "--model", "Qwen3-4B-q4f16_1-MLC", "--hf-repo", "a/b"])
+        code, _ = run(["init", "--config", self.cfg, "--model", "Qwen3-8B-q4f16_1-MLC", "--hf-repo", "a/b"])
         self.assertEqual(code, 1)
         code, _ = run(["init", "--config", self.cfg, "--hf-repo", "a/b"])
         self.assertEqual(code, 1)

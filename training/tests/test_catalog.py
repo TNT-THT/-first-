@@ -20,8 +20,8 @@ class CatalogDataTest(unittest.TestCase):
         ids = [m["id"] for m in cfg["webllm"]["models"]]
         in_dd = [m["id"] for m in self.models if m.get("in_dropdown", True)]
         self.assertEqual(sorted(ids), sorted(in_dd))
-        self.assertEqual(len(in_dd), 32)
-        self.assertEqual(len(self.models), 34)  # 另有 2 个仅训练目录的超大模型
+        self.assertEqual(len(in_dd), 27)
+        self.assertEqual(len(self.models), 29)  # 另有 2 个仅训练目录的超大模型
 
     def test_catalog_only_models_are_not_in_dropdown(self):
         only = [m for m in self.models if not m.get("in_dropdown", True)]
@@ -47,17 +47,17 @@ class CatalogDataTest(unittest.TestCase):
     def test_labels_parse_reasoning_and_size(self):
         by_id = {m["id"]: m for m in self.models}
         self.assertTrue(by_id["Qwen3-8B-q4f16_1-MLC"]["reasoning"])
-        self.assertFalse(by_id["Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC"]["reasoning"])
+        self.assertFalse(by_id["Qwen2.5-3B-Instruct-q4f16_1-MLC"]["reasoning"])
         self.assertEqual(by_id["Llama-2-13b-chat-hf-q4f16_1-MLC"]["size_class"], "大")
-        self.assertEqual(by_id["Qwen2.5-Coder-0.5B-Instruct-q4f16_1-MLC"]["size_class"], "极小")
+        self.assertEqual(by_id["OLMo-2-0425-1B-Instruct-q4f16_1-MLC"]["size_class"], "极小")
         self.assertEqual(by_id["Llama-3.1-70B-Instruct-q3f16_1-MLC"]["size_class"], "超大")
         self.assertEqual(by_id["Llama-3.1-70B-Instruct-q3f16_1-MLC"]["inference_vram_gb"], 30.4)
 
     def test_gated_models_are_flagged(self):
         by_id = {m["id"]: m for m in self.models}
-        self.assertTrue(by_id["Llama-3.2-1B-Instruct-q4f16_1-MLC"]["hf_gated"])
-        self.assertTrue(by_id["gemma-2-2b-it-q4f16_1-MLC"]["hf_gated"])
-        self.assertFalse(by_id["Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC"]["hf_gated"])
+        self.assertTrue(by_id["Llama-3.2-3B-Instruct-q4f16_1-MLC"]["hf_gated"])
+        self.assertTrue(by_id["gemma3-1b-it-q4f16_1-MLC"]["hf_gated"])
+        self.assertFalse(by_id["Qwen2.5-3B-Instruct-q4f16_1-MLC"]["hf_gated"])
 
     def test_find_unknown_model_gives_hint(self):
         with self.assertRaisesRegex(catalog.CatalogError, "ojtrain.py models"):
@@ -66,11 +66,11 @@ class CatalogDataTest(unittest.TestCase):
 
 class ApplyCatalogTest(unittest.TestCase):
     def test_catalog_model_reuses_official_library(self):
-        entry = catalog.find("Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC")
+        entry = catalog.find("Qwen2.5-3B-Instruct-q4f16_1-MLC")
         cfg = catalog.apply_catalog(cfgmod.load_example(), entry)
-        self.assertEqual(cfg["name"], "Qwen2.5-Coder-1.5B-Instruct-tuned")
-        self.assertEqual(cfg["pack"]["model_id"], "Qwen2.5-Coder-1.5B-Instruct-tuned-v1")
-        self.assertEqual(cfg["base"]["hf_repo"], "Qwen/Qwen2.5-Coder-1.5B-Instruct")
+        self.assertEqual(cfg["name"], "Qwen2.5-3B-Instruct-tuned")
+        self.assertEqual(cfg["pack"]["model_id"], "Qwen2.5-3B-Instruct-tuned-v1")
+        self.assertEqual(cfg["base"]["hf_repo"], "Qwen/Qwen2.5-3B-Instruct")
         self.assertFalse(cfg["mlc"]["compile"])
         self.assertEqual(cfg["mlc"]["model_lib_url"], entry["model_lib_url"])
         self.assertEqual(cfg["mlc"]["wasm_url"], entry["model_lib_url"])
@@ -81,9 +81,9 @@ class ApplyCatalogTest(unittest.TestCase):
         self.assertEqual(cfgmod.validate(cfg), [])
 
     def test_overrides_are_carried_into_pack(self):
-        entry = catalog.find("Qwen3.5-4B-q4f16_1-MLC")
+        entry = catalog.find("Qwen2.5-3B-Instruct-q4f16_1-MLC")
         cfg = catalog.apply_catalog(cfgmod.load_example(), entry)
-        self.assertEqual(cfg["pack"]["overrides"], {"context_window_size": 4096, "max_history_size": 1})
+        self.assertEqual(cfg["pack"]["overrides"], {"context_window_size": 4096})
         self.assertEqual(cfgmod.validate(cfg), [])
 
     def test_every_catalog_model_gives_valid_config(self):
@@ -129,9 +129,9 @@ class InitWithModelTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_init_model_writes_valid_config(self):
-        cfgmod.init_config(self.path, model="Phi-3.5-mini-instruct-q4f16_1-MLC")
+        cfgmod.init_config(self.path, model="Phi-4-mini-instruct-q4f16_1-MLC")
         cfg = cfgmod.load_config(self.path)
-        self.assertEqual(cfg["base"]["hf_repo"], "microsoft/Phi-3.5-mini-instruct")
+        self.assertEqual(cfg["base"]["hf_repo"], "microsoft/Phi-4-mini-instruct")
 
     def test_init_custom_writes_compile_mode(self):
         cfgmod.init_config(self.path, custom={"hf_repo": "acme/x-1b", "conv_template": "chatml",
