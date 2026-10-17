@@ -97,11 +97,11 @@ class CliTest(unittest.TestCase):
     def test_models_lists_catalog(self):
         code, out = run(["models"])
         self.assertEqual(code, 0)
-        self.assertIn("共 29 个", out)
+        self.assertIn("共 22 个", out)
         self.assertIn("Qwen2.5-3B-Instruct-q4f16_1-MLC", out)
         code, out = run(["models", "--json"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(json.loads(out)), 29)
+        self.assertEqual(len(json.loads(out)), 22)
 
     def test_init_with_catalog_model(self):
         code, out = run(["init", "--config", self.cfg, "--model", "Qwen3-8B-q4f16_1-MLC"])
