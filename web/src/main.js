@@ -22,9 +22,12 @@ import {
   clearModelAdaptation,
   getModelParams,
   listAdaptation,
+  listCorrections,
   listKnowledge,
   listParamLog,
+  parseCorrections,
   recordFeedback,
+  removeCorrection,
   removeKnowledge,
   removeNote,
   resetAllParams,
@@ -88,6 +91,13 @@ const els = {
   adminKey: $('#adminKey'),
   roleSubmit: $('#roleSubmit'),
   roleError: $('#roleError'),
+  correctionDialog: $('#correctionDialog'),
+  correctionForm: $('#correctionForm'),
+  correctionPreview: $('#correctionPreview'),
+  correctionKey: $('#correctionKey'),
+  correctionError: $('#correctionError'),
+  correctionCancel: $('#correctionCancel'),
+  correctionSubmit: $('#correctionSubmit'),
   roleLogoutBtn: $('#roleLogoutBtn'),
   modelAdminHint: $('#modelAdminHint'),
   localModelList: $('#localModelList'),
@@ -313,21 +323,31 @@ function modelDisplayName(id) {
  * 仅保存在本机，并在之后的回答中作为该 AI 的附加说明（参数行可调整该 AI 的采样参数）。
  * 反馈仍会照常发送给当前 AI，不影响对话。
  */
-function recordAdminFeedback(session, text) {
+/** 可以接收管理员反馈的目标：会话中最后一条已完成的 AI 回复（且带有模型信息）。 */
+function feedbackTarget(session) {
+  const last = [...(session?.messages || [])].reverse().find((m) => m.role === 'assistant');
+  if (!last || !last.model || last.error || !last.content) return null;
+  return last;
+}
+
+function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
   if (MODE !== 'webllm' || !isAdmin()) return;
-  const last = [...session.messages].reverse().find((m) => m.role === 'assistant');
-  if (!last || !last.model || last.error || !last.content) return;
-  const rec = recordFeedback(last.model, text);
+  const last = feedbackTarget(session);
+  if (!last) return;
+  const rec = recordFeedback(last.model, text, { allowCorrections });
   if (!rec) return;
   const parts = [];
   if (rec.note) parts.push('已记录反馈');
+  if (rec.corrections?.length) {
+    parts.push(`已记录 ${rec.corrections.length} 条更正（已验证密钥，作为该 AI 的底层设定，无条件采纳）`);
+  }
   if (rec.params) {
     const changed = (rec.changes || []).map((c) => `${c.key} ${c.from ?? '默认'}→${c.to}`);
     parts.push('已更新参数 ' + (changed.length ? changed.join(', ') : '（未变化）'));
   }
-  // 没有显式参数行时，按关键词给出“建议参数”，必须由管理员确认后才生效
+  // 没有显式参数行、也没有更正时，按关键词给出“建议参数”，必须由管理员确认后才生效
   let suggested = 0;
-  if (!rec.params) {
+  if (!rec.params && !rec.corrections?.length) {
     const found = suggestParams(text, effectiveParams(last.model));
     suggested = addSuggestions(last.model, last.modelLabel || modelDisplayName(last.model), found);
     if (suggested) parts.push(`有 ${suggested} 条参数建议，请在输入框上方确认（确认前不生效）`);
@@ -409,14 +429,81 @@ function dismissSuggestion(id) {
   renderSuggestions();
 }
 
+/**
+ * 管理员密钥验证（用于更正）。返回 Promise<boolean>：验证通过为 true；取消或密钥错误则不发送，文字保留在输入框中。
+ */
+function verifyCorrectionKey(text) {
+  return new Promise((resolve) => {
+    if (!hasAccessGate(state.appConfig.access)) {
+      showStatus('未配置管理员密钥，无法记录更正，消息未发送。', { error: true });
+      resolve(false);
+      return;
+    }
+    const dlg = els.correctionDialog;
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      els.correctionForm.removeEventListener('submit', onSubmit);
+      els.correctionCancel.removeEventListener('click', onCancel);
+      dlg.removeEventListener('close', onCancel);
+      if (dlg.open) dlg.close();
+      els.correctionKey.value = '';
+      resolve(ok);
+    };
+    const onSubmit = async (e) => {
+      e.preventDefault();
+      els.correctionError.textContent = '';
+      els.correctionSubmit.disabled = true;
+      try {
+        const ok = await verifyAccessPassword(state.appConfig.access, els.correctionKey.value);
+        if (ok) finish(true);
+        else {
+          els.correctionError.textContent = '管理员密钥错误，更正未记录，消息未发送。';
+          els.correctionKey.select();
+        }
+      } finally {
+        els.correctionSubmit.disabled = false;
+      }
+    };
+    const onCancel = () => finish(false);
+    els.correctionForm.addEventListener('submit', onSubmit);
+    els.correctionCancel.addEventListener('click', onCancel);
+    dlg.addEventListener('close', onCancel);
+    els.correctionPreview.textContent = text;
+    els.correctionError.textContent = '';
+    els.correctionKey.value = '';
+    dlg.showModal();
+    els.correctionKey.focus();
+  });
+}
+
 async function send(rawText) {
   const text = (rawText || '').trim();
   if (!text || state.streaming) return;
 
+  // 更正需要管理员密钥验证（仅 WebLLM 本机模式、管理员、且存在可接收反馈的 AI 回复时）
+  let allowCorrections = false;
+  if (MODE === 'webllm' && isAdmin() && parseCorrections(text).length) {
+    if (feedbackTarget(activeSession())) {
+      const ok = await verifyCorrectionKey(text);
+      if (!ok) {
+        if (!els.input.value) {
+          els.input.value = text;
+          autoGrow();
+        }
+        return;
+      }
+      allowCorrections = true;
+    } else {
+      showStatus('更正需要在某个 AI 的回复之后发送，本条未记录为更正。');
+    }
+  }
+
   const session = ensureSession();
   const isFirst = session.messages.length === 0;
   const userMsg = { role: 'user', content: text, ts: Date.now() };
-  recordAdminFeedback(session, text);
+  recordAdminFeedback(session, text, { allowCorrections });
   // 记录本次回答所用的 AI（名称快照保存，之后删除或改名模型也能正确标注）
   const modelId = state.backend.modelId;
   const modelLabel = modelDisplayName(modelId);
@@ -835,6 +922,13 @@ function deleteAdaptNote(modelId, noteId) {
   renderAdaptList();
 }
 
+/** 删除一条更正（仅本机）。 */
+function deleteCorrection(modelId, correctionId) {
+  if (!requireAdmin('删除更正')) return;
+  removeCorrection(modelId, correctionId);
+  renderAdaptList();
+}
+
 /** 删除本地知识库中的一条管理员信息（仅本机）。 */
 function deleteKnowledgeEntry(modelId, entryId) {
   if (!requireAdmin('删除本地知识库条目')) return;
@@ -982,7 +1076,8 @@ function renderAdaptList() {
   els.adaptHint.textContent =
     '管理员在 AI 回复之后发送的消息会记为该 AI 的反馈（仅本机，不上传）；' +
     '以“参数：temperature=0.2, maxTokens=800”开头的一行可调整该 AI 的参数；' +
-    '反馈同时写入该 AI 的本地知识库（最高优先级，仅本机，不上传，不随导出文件保存）。';
+    '反馈同时写入该 AI 的本地知识库（最高优先级，仅本机，不上传，不随导出文件保存）；' +
+    '以“更正：”开头的一行需输入管理员密钥验证后，才会作为该 AI 的底层设定，无条件采纳（仅本机）。';
   const ids = adaptedModelIds();
   if (!ids.length) {
     const p = document.createElement('p');
@@ -994,11 +1089,12 @@ function renderAdaptList() {
   for (const id of ids) {
     const { notes, params } = listAdaptation(id);
     const kb = listKnowledge(id);
+    const corrections = listCorrections(id);
     const head = document.createElement('div');
     head.className = 'local-row';
     const name = document.createElement('div');
     name.className = 'local-name';
-    name.textContent = `${modelDisplayName(id)}（${notes.length} 条${kb.length ? `，知识库 ${kb.length} 条` : ''}${Object.keys(params).length ? '，有参数' : ''}）`;
+    name.textContent = `${modelDisplayName(id)}（${notes.length} 条${corrections.length ? `，更正 ${corrections.length} 条` : ''}${kb.length ? `，知识库 ${kb.length} 条` : ''}${Object.keys(params).length ? '，有参数' : ''}）`;
     const clear = document.createElement('button');
     clear.type = 'button';
     clear.className = 'btn ghost small';
@@ -1022,6 +1118,28 @@ function renderAdaptList() {
       del.textContent = '删除';
       row.append(t, del);
       list.append(row);
+    }
+    if (corrections.length) {
+      const title = document.createElement('div');
+      title.className = 'muted small local-meta';
+      title.textContent = '更正（底层设定，无条件采纳，仅本机，经管理员密钥验证）：';
+      list.append(title);
+      for (const c of corrections) {
+        const row = document.createElement('div');
+        row.className = 'local-row';
+        const t = document.createElement('div');
+        t.className = 'muted small local-meta';
+        t.textContent = `更正：${c.text}`;
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'btn ghost small';
+        del.dataset.action = 'correction-delete';
+        del.dataset.id = id;
+        del.dataset.entry = c.id;
+        del.textContent = '删除';
+        row.append(t, del);
+        list.append(row);
+      }
     }
     if (kb.length) {
       const title = document.createElement('div');
@@ -1326,6 +1444,7 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
   if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
   if (btn && btn.dataset.action === 'kb-delete') return deleteKnowledgeEntry(btn.dataset.id, btn.dataset.entry);
+  if (btn && btn.dataset.action === 'correction-delete') return deleteCorrection(btn.dataset.id, btn.dataset.entry);
   if (btn && btn.dataset.action === 'adapt-reset') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert-all') return revertAllParams(btn.dataset.id);
