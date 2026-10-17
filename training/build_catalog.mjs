@@ -53,6 +53,10 @@ const UPSTREAM = {
   'Hermes-3-Llama-3.2-3B-q4f16_1-MLC': ['NousResearch/Hermes-3-Llama-3.2-3B', 'chatml', 3.2],
   'DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC': ['deepseek-ai/DeepSeek-R1-Distill-Llama-8B', 'llama-3', 8.0],
   'DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC': ['deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', 'deepseek_r1_qwen', 7.6],
+  'Hermes-3-Llama-3.1-8B-q4f16_1-MLC': ['NousResearch/Hermes-3-Llama-3.1-8B', 'chatml', 8.0],
+  'Qwen2-7B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2-7B-Instruct', 'qwen2', 7.6],
+  'Mistral-7B-Instruct-v0.2-q4f16_1-MLC': ['mistralai/Mistral-7B-Instruct-v0.2', 'mistral_default', 7.2],
+  'Llama-3-8B-Instruct-q4f16_1-MLC': ['meta-llama/Meta-Llama-3-8B-Instruct', 'llama-3', 8.0],
   'Llama-3.1-70B-Instruct-q3f16_1-MLC': ['meta-llama/Llama-3.1-70B-Instruct', 'llama-3', 70.6],
   'Llama-3-70B-Instruct-q3f16_1-MLC': ['meta-llama/Meta-Llama-3-70B-Instruct', 'llama-3', 70.6],
 };

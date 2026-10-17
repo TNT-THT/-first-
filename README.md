@@ -23,7 +23,7 @@ The first repository of me,and first of "炸药工厂"
 - **下载失败提示**：出错时会显示失败时的下载进度，并提示可以改用“导入模型”。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 32 个可选：非推理 26 个、推理 6 个。每个标签末尾都标注了推理所需的显存（WebLLM 记录值，或注明为估算）。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 36 个可选：非推理 30 个、推理 6 个。每个标签末尾都标注了推理所需的显存（WebLLM 记录值，或注明为估算）。标签中带“纯文本”的模型（Hermes 3 8B、Qwen2 7B、Mistral 7B v0.2、Llama 3 8B）为纯文本语言模型，不接受图片输入。
   - 厂商：Qwen（阿里）、Meta Llama、Google Gemma、Mistral、Microsoft Phi、Hugging Face SmolLM2、AI2 OLMo、TinyLlama、Stability StableLM、Nous Hermes、DeepSeek（仅 R1 蒸馏版，均为推理模型）。
   - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）。
   - 超大：Llama 3.1 70B、Llama 3 70B（均为 q3f16 量化，需约 30.4 GB 显存）。**8 GB 显存的 RTX 4060 无法加载这两个模型，即使是 16 GB 的 4060 Ti 也无法加载**，选中时会显示警告。这两个模型不能满足“4060 上 1 分钟内回复”的要求，也没有在任何真实硬件上测过速度。
