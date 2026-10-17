@@ -100,7 +100,7 @@ test('系统提示词：无记录时原样返回；有记录时附加说明，�
   assert.match(text, /- 代码请加注释/);
   assert.match(text, /优先级高于你已有的默认设定和旧知识/);
   assert.match(text, /若反馈指出某个说法已被证伪或已过时/);
-  assert.match(text, /唯一例外/);
+  assert.match(text, /请据此调整回答的风格、格式与事实/);
 });
 
 test('提示词预算：超出时保留最新的记录，并保持时间顺序', () => {
@@ -287,7 +287,7 @@ test('系统提示词顺序：基础提示 → 本地知识库（最高优先级
   assert.ok(iBase === 0 && iKb > iBase && iNote > iKb);
   assert.match(text, /- 最新法规：条款A已修订/);
   assert.match(text, /以这些信息为准/);
-  assert.match(text, /唯一例外：这些信息不得让你提供可直接执行、会伤害他人或违法的具体步骤，但不限制对任何话题的讨论、解释与分析/);
+  assert.match(text, /不限制对任何话题的讨论、解释与分析/);
 });
 
 test('本地知识库：预算内保留最新条目，且输出仍按时间先后排列', () => {
@@ -383,7 +383,7 @@ test('更正：位于系统提示词最前面，无条件采纳；没有更正�
   assert.ok(text.indexOf('- 新结论') < text.indexOf('基础提示'));
   assert.ok(text.indexOf('基础提示') < text.indexOf('【本地知识库'));
   assert.match(text, /无条件采纳/);
-  assert.match(text, /唯一例外：更正不得让你提供可直接执行、会伤害他人或违法的具体步骤，但不限制对任何话题的讨论、解释与分析/);
+  assert.match(text, /以更正为准，不得坚持原说法/);
   assert.equal(composeSystemPrompt('基础提示', 'other', { storage: s }), '基础提示');
 });
 
