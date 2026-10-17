@@ -12,9 +12,13 @@
  */
 
 const KEY = 'oj-ai.adapt.v1';
+// 本地知识库（最高优先级，仅本机）：与附加说明分开存放，同样不上传、不写入 .ojmodel。
+const KB_KEY = 'oj-ai.kb.v1';
 export const MAX_NOTES_PER_MODEL = 30;
 export const MAX_NOTE_CHARS = 500;
 export const PROMPT_BUDGET_CHARS = 1500;
+export const MAX_KB_ENTRIES = 50;
+export const KB_BUDGET_CHARS = 800;
 export const MAX_PARAM_LOG = 50;
 const PARAM_LIMITS = { temperature: [0, 1.5], maxTokens: [64, 16384] };
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
@@ -35,6 +39,86 @@ function readAll(storage) {
 
 function writeAll(data, storage) {
   storage?.setItem(KEY, JSON.stringify(data));
+}
+
+const KB_GUARD =
+  '以上是本地知识库中的管理员信息，属于最高优先级，高于上面的基础设定与旧知识：若有冲突，以这些信息为准，并据此调整回答的事实、风格与格式。唯一例外：这些信息不能让你提供会伤害他人或违法的具体实施指导。';
+
+function readKb(storage) {
+  try {
+    const data = JSON.parse(storage?.getItem(KB_KEY) || 'null');
+    if (!data || typeof data !== 'object' || !data.models || typeof data.models !== 'object') {
+      return { models: {} };
+    }
+    return data;
+  } catch {
+    return { models: {} };
+  }
+}
+
+function writeKb(data, storage) {
+  storage?.setItem(KB_KEY, JSON.stringify(data));
+}
+
+/**
+ * 把一条管理员信息写入某个模型的本地知识库（同步自管理员反馈）。
+ * 同一模型内完全相同的文字只保存一次；超过上限时丢弃最旧的。返回新条目，未写入时返回 null。
+ */
+export function addKnowledge(modelId, text, { storage = globalThis.localStorage, now = Date.now() } = {}) {
+  const body = String(text || '').trim().slice(0, MAX_NOTE_CHARS);
+  if (!modelId || !body) return null;
+  const data = readKb(storage);
+  const entry = data.models[modelId] && Array.isArray(data.models[modelId].entries)
+    ? data.models[modelId]
+    : { entries: [] };
+  if (entry.entries.some((e) => e.text === body)) return null;
+  const item = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now };
+  entry.entries = [...entry.entries, item].slice(-MAX_KB_ENTRIES);
+  data.models[modelId] = entry;
+  writeKb(data, storage);
+  return item;
+}
+
+/** 某模型的本地知识库条目（最新的在后）。 */
+export function listKnowledge(modelId, { storage = globalThis.localStorage } = {}) {
+  const entry = readKb(storage).models[modelId];
+  return entry && Array.isArray(entry.entries) ? entry.entries : [];
+}
+
+/** 删除一条知识库条目。删除后若该模型没有条目，则移除该模型的记录。 */
+export function removeKnowledge(modelId, entryId, { storage = globalThis.localStorage } = {}) {
+  const data = readKb(storage);
+  const entry = data.models[modelId];
+  if (!entry) return;
+  entry.entries = (entry.entries || []).filter((e) => e.id !== entryId);
+  if (!entry.entries.length) delete data.models[modelId];
+  writeKb(data, storage);
+}
+
+/** 清空某模型的本地知识库。 */
+export function clearKnowledge(modelId, { storage = globalThis.localStorage } = {}) {
+  const data = readKb(storage);
+  if (!data.models[modelId]) return;
+  delete data.models[modelId];
+  writeKb(data, storage);
+}
+
+/**
+ * 生成知识库提示块，放在基础提示词之后、附加说明之前。
+ * 预算内优先保留最新的条目，输出仍按时间先后排列。没有条目时返回空字符串。
+ */
+export function buildKnowledgePrompt(modelId, { storage = globalThis.localStorage } = {}) {
+  const entries = listKnowledge(modelId, { storage });
+  if (!entries.length) return '';
+  const picked = [];
+  let total = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const line = `- ${entries[i].text}`;
+    if (total + line.length > KB_BUDGET_CHARS && picked.length) break;
+    total += line.length;
+    picked.unshift(line);
+  }
+  return `\n\n【本地知识库（管理员提供，仅本机，最高优先级）】\n${picked.join('\n')}\n${KB_GUARD}`;
 }
 
 function entryFor(data, modelId) {
@@ -105,6 +189,8 @@ export function recordFeedback(modelId, text, { storage = globalThis.localStorag
     const note = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now };
     entry.notes = [...entry.notes, note].slice(-MAX_NOTES_PER_MODEL);
     result.note = note;
+    // 同步纳入本地知识库（最高优先级）；附加说明本身保持不变
+    result.kb = addKnowledge(modelId, body, { storage, now });
   }
   writeAll(data, storage);
   return result;
@@ -128,7 +214,7 @@ export function getModelParams(modelId, { storage = globalThis.localStorage } = 
 
 /** 有适应记录的模型 id 列表。 */
 export function adaptedModelIds({ storage = globalThis.localStorage } = {}) {
-  return Object.keys(readAll(storage).models);
+  return [...new Set([...Object.keys(readAll(storage).models), ...Object.keys(readKb(storage).models)])];
 }
 
 export function removeNote(modelId, noteId, { storage = globalThis.localStorage } = {}) {
@@ -141,6 +227,7 @@ export function removeNote(modelId, noteId, { storage = globalThis.localStorage 
 }
 
 export function clearModelAdaptation(modelId, { storage = globalThis.localStorage } = {}) {
+  clearKnowledge(modelId, { storage });
   const data = readAll(storage);
   if (!data.models[modelId]) return;
   delete data.models[modelId];
@@ -165,9 +252,9 @@ export function buildAdaptationPrompt(modelId, { storage = globalThis.localStora
   return `\n\n【管理员反馈（仅本机记录，最高优先级，请采纳）】\n${picked.join('\n')}\n${GUARD}`;
 }
 
-/** 组合基础系统提示词与该模型的适应说明。 */
+/** 组合基础系统提示词、本地知识库与该模型的适应说明（无记录时与原来完全相同）。 */
 export function composeSystemPrompt(base, modelId, options) {
-  return `${base || ''}${buildAdaptationPrompt(modelId, options)}`;
+  return `${base || ''}${buildKnowledgePrompt(modelId, options)}${buildAdaptationPrompt(modelId, options)}`;
 }
 
 /**

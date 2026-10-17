@@ -21,6 +21,13 @@ import {
   sanitizeParams,
   setModelParams,
   suggestParams,
+  addKnowledge,
+  buildKnowledgePrompt,
+  clearKnowledge,
+  KB_BUDGET_CHARS,
+  listKnowledge,
+  MAX_KB_ENTRIES,
+  removeKnowledge,
 } from '../web/src/adaptation.js';
 
 function memoryStorage() {
@@ -124,7 +131,8 @@ test('存储内容损坏时安全回退，不抛出异常', () => {
 test('记录只写入传入的存储（不涉及网络）', () => {
   const s = memoryStorage();
   recordFeedback('m', '反馈', { storage: s });
-  assert.deepEqual([...s.raw.keys()], ['oj-ai.adapt.v1']);
+  // 附加说明与本地知识库分别保存在两个本地存储键中，均不涉及网络
+  assert.deepEqual([...s.raw.keys()].sort(), ['oj-ai.adapt.v1', 'oj-ai.kb.v1']);
 });
 
 test('参数建议：关键词命中并与当前值比较', () => {
@@ -240,4 +248,78 @@ test('全部撤回：删除所有覆盖并记入变更记录；没有覆盖时�
   ]);
   assert.equal(resetAllParams('m', { storage: s }), 0);
   assert.equal(resetAllParams('nobody', { storage: s }), 0);
+});
+
+test('本地知识库：管理员反馈同步写入，参数行不写入，完全相同的文字只保存一次', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '代码请加注释', { storage: s, now: 1 });
+  recordFeedback('m', '代码请加注释', { storage: s, now: 2 });
+  assert.deepEqual(listKnowledge('m', { storage: s }).map((e) => e.text), ['代码请加注释']);
+  recordFeedback('m', '参数：temperature=0.2', { storage: s, now: 3 });
+  assert.equal(listKnowledge('m', { storage: s }).length, 1);
+  // 附加说明保持原样
+  // 附加说明保持原有行为：同一文字重复反馈仍各记一条
+  assert.deepEqual(listAdaptation('m', { storage: s }).notes.map((n) => n.text), ['代码请加注释', '代码请加注释']);
+});
+
+test('本地知识库：超过上限时丢弃最旧的条目', () => {
+  const s = memoryStorage();
+  for (let i = 0; i < MAX_KB_ENTRIES + 3; i++) addKnowledge('m', `知识${i}`, { storage: s, now: i });
+  const list = listKnowledge('m', { storage: s });
+  assert.equal(list.length, MAX_KB_ENTRIES);
+  assert.equal(list[0].text, '知识3');
+  assert.equal(list.at(-1).text, `知识${MAX_KB_ENTRIES + 2}`);
+});
+
+test('系统提示词顺序：基础提示 → 本地知识库（最高优先级）→ 附加说明', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '最新法规：条款A已修订', { storage: s, now: 1 });
+  const text = composeSystemPrompt('基础提示', 'm', { storage: s });
+  const iBase = text.indexOf('基础提示');
+  const iKb = text.indexOf('【本地知识库（管理员提供，仅本机，最高优先级）】');
+  const iNote = text.indexOf('【管理员反馈（仅本机记录，最高优先级，请采纳）】');
+  assert.ok(iBase === 0 && iKb > iBase && iNote > iKb);
+  assert.match(text, /- 最新法规：条款A已修订/);
+  assert.match(text, /以这些信息为准/);
+  assert.match(text, /唯一例外：这些信息不能让你提供会伤害他人或违法的具体实施指导/);
+});
+
+test('本地知识库：预算内保留最新条目，且输出仍按时间先后排列', () => {
+  const s = memoryStorage();
+  const long = '长'.repeat(300);
+  for (let i = 0; i < 6; i++) addKnowledge('m', `${i}-${long}`, { storage: s, now: i });
+  const prompt = buildKnowledgePrompt('m', { storage: s });
+  assert.ok(!prompt.includes('0-' + long));
+  assert.ok(prompt.includes('5-' + long));
+  assert.ok(prompt.indexOf('2-' + long) < prompt.indexOf('5-' + long));
+  const bulletChars = prompt.split('\n').filter((l) => l.startsWith('- ')).join('').length;
+  assert.ok(bulletChars <= KB_BUDGET_CHARS + 2 + long.length);
+});
+
+test('本地知识库：删除、清空与模型列表', () => {
+  const s = memoryStorage();
+  recordFeedback('a', '知识A', { storage: s, now: 1 });
+  recordFeedback('b', '知识B', { storage: s, now: 2 });
+  assert.deepEqual(adaptedModelIds({ storage: s }).sort(), ['a', 'b']);
+  // 删除附加说明不会删除知识库条目
+  removeNote('a', listAdaptation('a', { storage: s }).notes[0].id, { storage: s });
+  assert.equal(listKnowledge('a', { storage: s }).length, 1);
+  assert.ok(adaptedModelIds({ storage: s }).includes('a'));
+  // 删除知识库条目
+  removeKnowledge('a', listKnowledge('a', { storage: s })[0].id, { storage: s });
+  assert.equal(buildKnowledgePrompt('a', { storage: s }), '');
+  assert.ok(!adaptedModelIds({ storage: s }).includes('a'));
+  // 清空整个模型的适应记录同时清空知识库
+  clearModelAdaptation('b', { storage: s });
+  assert.deepEqual(listKnowledge('b', { storage: s }), []);
+  assert.deepEqual(adaptedModelIds({ storage: s }), []);
+  clearKnowledge('nobody', { storage: s });
+});
+
+test('本地知识库：与附加说明、参数分开存放，不改变原有存储键', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '知识', { storage: s, now: 1 });
+  assert.ok(s.raw.has('oj-ai.adapt.v1'));
+  assert.ok(s.raw.has('oj-ai.kb.v1'));
+  assert.deepEqual(JSON.parse(s.raw.get('oj-ai.adapt.v1')).models.m.params, {});
 });
