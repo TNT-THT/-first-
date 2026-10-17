@@ -4,12 +4,18 @@
  */
 import { buildModelList } from '../model-source.js';
 import { decideVariant, diagnoseOutput, fp32VariantOf, HEALTH_MAX_TOKENS, HEALTH_PROMPT } from './health.js';
+import { createSerialQueue, gpuResetError, isGpuResetError } from './lifecycle.js';
 
 export const WEBGPU_MISSING =
   '当前浏览器不支持 WebGPU，无法运行本地模型。请使用最新版 Chrome 或 Edge（桌面端），并确认显卡驱动正常。';
 
 let engine = null;
+let worker = null;
 let loadedId = null;
+// 当前进行中的生成（流式输出结束时才 resolve）。加载模型前必须等待它结束，否则 GPU 资源可能被提前销毁。
+let inflight = null;
+// 所有加载请求排队执行，避免两次 reload 交错。
+const enqueueLoad = createSerialQueue();
 
 let gpuCheck = null;
 
@@ -44,7 +50,30 @@ export async function getModelRecords({ mirrorOwner, extraRecords } = {}) {
   return buildModelList(prebuiltAppConfig.model_list, extraRecords, mirrorOwner);
 }
 
-export async function loadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecords } = {}) {
+/** 丢弃当前引擎与 worker；下次加载会创建新的 worker。 */
+function resetEngine() {
+  const w = worker;
+  worker = null;
+  engine = null;
+  loadedId = null;
+  try {
+    w?.terminate();
+  } catch {
+    // 忽略：worker 可能已经结束
+  }
+}
+
+/** 加载模型（排队执行）。 */
+export function loadWebLLMEngine(modelId, onProgress, opts = {}) {
+  return enqueueLoad(() => doLoadWebLLMEngine(modelId, onProgress, opts));
+}
+
+async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecords } = {}) {
+  // 先等待进行中的生成结束（如有），再重新加载，避免 unload 时销毁仍在读回的 GPU 缓冲区
+  if (inflight) {
+    engine?.interruptGenerate().catch(() => {});
+    await inflight;
+  }
   if (!(await checkWebGPU())) {
     throw new Error(WEBGPU_MISSING);
   }
@@ -58,27 +87,43 @@ export async function loadWebLLMEngine(modelId, onProgress, { mirrorOwner, extra
   };
 
   loadedId = null;
-  if (!engine) {
-    const worker = new Worker(new URL('../llm-worker.js', import.meta.url), { type: 'module' });
-    engine = await CreateWebWorkerMLCEngine(worker, modelId, { initProgressCallback: progress, appConfig });
-  } else {
-    engine.setInitProgressCallback(progress);
-    engine.setAppConfig(appConfig);
-    await engine.reload(modelId);
+  try {
+    if (!engine) {
+      worker = new Worker(new URL('../llm-worker.js', import.meta.url), { type: 'module' });
+      engine = await CreateWebWorkerMLCEngine(worker, modelId, { initProgressCallback: progress, appConfig });
+    } else {
+      engine.setInitProgressCallback(progress);
+      engine.setAppConfig(appConfig);
+      await engine.reload(modelId);
+    }
+  } catch (err) {
+    if (isGpuResetError(err)) {
+      resetEngine();
+      throw gpuResetError();
+    }
+    throw err;
   }
   loadedId = modelId;
 }
 
 /** 用固定提示词做一次确定性短输出，返回 {sample, reason}；reason 为 null 表示正常。 */
 export async function runHealthCheck() {
-  const res = await engine.chat.completions.create({
-    messages: [{ role: 'user', content: HEALTH_PROMPT }],
-    stream: false,
-    temperature: 0,
-    max_tokens: HEALTH_MAX_TOKENS,
-  });
-  const sample = res.choices?.[0]?.message?.content ?? '';
-  return { sample, reason: diagnoseOutput(sample) };
+  try {
+    const res = await engine.chat.completions.create({
+      messages: [{ role: 'user', content: HEALTH_PROMPT }],
+      stream: false,
+      temperature: 0,
+      max_tokens: HEALTH_MAX_TOKENS,
+    });
+    const sample = res.choices?.[0]?.message?.content ?? '';
+    return { sample, reason: diagnoseOutput(sample) };
+  } catch (err) {
+    if (isGpuResetError(err)) {
+      resetEngine();
+      throw gpuResetError();
+    }
+    throw err;
+  }
 }
 
 /**
@@ -91,7 +136,8 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
   let check;
   try {
     check = await runHealthCheck();
-  } catch {
+  } catch (err) {
+    if (isGpuResetError(err)) throw err; // GPU 资源已重置：交给上层提示重新发送
     // 自检本身出错：不切换，只标记为未完成
     return { variant: 'default', healthy: null, note: '输出自检未能完成' };
   }
@@ -115,7 +161,8 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
   let second;
   try {
     second = await runHealthCheck();
-  } catch {
+  } catch (err) {
+    if (isGpuResetError(err)) throw err;
     second = { reason: null };
   }
   return second.reason
@@ -125,23 +172,40 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
 
 export async function* streamWebLLM({ messages, signal, temperature, maxTokens }) {
   if (!engine || !loadedId) throw new Error('模型尚未加载');
+  if (signal?.aborted) return;
+  const current = engine;
+  let markDone;
+  const done = new Promise((resolve) => {
+    markDone = resolve;
+  });
+  inflight = done;
   const onAbort = () => {
-    engine.interruptGenerate().catch(() => {});
+    current.interruptGenerate().catch(() => {});
   };
   signal?.addEventListener('abort', onAbort, { once: true });
   try {
-    const stream = await engine.chat.completions.create({
+    const stream = await current.chat.completions.create({
       messages,
       stream: true,
       temperature,
       max_tokens: maxTokens,
     });
+    // 用户停止后仍把剩余的流读完（不再输出）：引擎会在下一个 token 前停止，
+    // 读完才表示本次生成的 GPU 工作已经结束，之后才允许重新加载模型。
     for await (const chunk of stream) {
-      if (signal?.aborted) break;
+      if (signal?.aborted) continue;
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) yield delta;
     }
+  } catch (err) {
+    if (isGpuResetError(err)) {
+      resetEngine();
+      throw gpuResetError();
+    }
+    throw err;
   } finally {
     signal?.removeEventListener('abort', onAbort);
+    markDone();
+    if (inflight === done) inflight = null;
   }
 }
