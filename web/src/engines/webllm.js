@@ -3,6 +3,7 @@
  * 之后的对话完全在本机完成，不需要服务器，也不需要 API Key。
  */
 import { buildModelList } from '../model-source.js';
+import { decideVariant, diagnoseOutput, fp32VariantOf, HEALTH_MAX_TOKENS, HEALTH_PROMPT } from './health.js';
 
 export const WEBGPU_MISSING =
   '当前浏览器不支持 WebGPU，无法运行本地模型。请使用最新版 Chrome 或 Edge（桌面端），并确认显卡驱动正常。';
@@ -66,6 +67,60 @@ export async function loadWebLLMEngine(modelId, onProgress, { mirrorOwner, extra
     await engine.reload(modelId);
   }
   loadedId = modelId;
+}
+
+/** 用固定提示词做一次确定性短输出，返回 {sample, reason}；reason 为 null 表示正常。 */
+export async function runHealthCheck() {
+  const res = await engine.chat.completions.create({
+    messages: [{ role: 'user', content: HEALTH_PROMPT }],
+    stream: false,
+    temperature: 0,
+    max_tokens: HEALTH_MAX_TOKENS,
+  });
+  const sample = res.choices?.[0]?.message?.content ?? '';
+  return { sample, reason: diagnoseOutput(sample) };
+}
+
+/**
+ * 加载模型并做输出自检。异常且存在 fp32 版本时，自动切换到 fp32，
+ * 但对外仍以用户选中的 modelId 作为“当前模型”（对话归属、参数、适应记录都不变）。
+ * 返回 {variant: 'default'|'fp16'|'fp32', healthy, note}；note 用于界面提示。
+ */
+export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
+  await loadWebLLMEngine(modelId, onProgress, opts);
+  let check;
+  try {
+    check = await runHealthCheck();
+  } catch {
+    // 自检本身出错：不切换，只标记为未完成
+    return { variant: 'default', healthy: null, note: '输出自检未能完成' };
+  }
+  const variantOf = (id) => (id.endsWith('q4f16_1-MLC') ? 'fp16' : id.endsWith('q4f32_1-MLC') ? 'fp32' : 'default');
+  if (!check.reason) return { variant: variantOf(modelId), healthy: true, note: '' };
+
+  const fp32 = fp32VariantOf(modelId);
+  const records = fp32 ? await getModelRecords(opts) : [];
+  const fp32Available = !!fp32 && records.some((r) => r.model_id === fp32);
+  const decision = decideVariant({ modelId, healthy: false, fp32Available });
+  if (decision.action !== 'fallback') {
+    return {
+      variant: variantOf(modelId),
+      healthy: false,
+      note: `输出自检异常（${check.reason}），且没有可用的 fp32 版本，回答可能乱码`,
+    };
+  }
+
+  await loadWebLLMEngine(decision.to, onProgress, opts);
+  loadedId = modelId; // 对外仍是用户选中的模型
+  let second;
+  try {
+    second = await runHealthCheck();
+  } catch {
+    second = { reason: null };
+  }
+  return second.reason
+    ? { variant: 'fp32', healthy: false, note: `已切换到 fp32，但自检仍异常（${second.reason}）` }
+    : { variant: 'fp32', healthy: true, note: '检测到 fp16 输出异常，已自动切换到 fp32 版本' };
 }
 
 export async function* streamWebLLM({ messages, signal, temperature, maxTokens }) {

@@ -13,7 +13,7 @@
     "build:remote": "VITE_ENGINE=remote vite build --config web/vite.config.js",
     "start": "node server/index.js",
     "set-password": "node scripts/set-access-password.mjs",
-    "test": "node --test test/unit.test.js test/server.test.js test/model-file.test.js test/training-pack.test.js test/training-catalog.test.js test/adaptation.test.js",
+    "test": "node --test test/unit.test.js test/server.test.js test/model-file.test.js test/training-pack.test.js test/training-catalog.test.js test/adaptation.test.js test/health.test.js",
     "test:training": "python3 -m unittest discover -s training/tests -p \"test_*.py\""
   },
   "dependencies": {

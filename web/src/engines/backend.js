@@ -1,5 +1,5 @@
 import { streamChat } from '../api.js';
-import { checkWebGPU, getLoadedModelId, loadWebLLMEngine, streamWebLLM, WEBGPU_MISSING } from './webllm.js';
+import { checkWebGPU, getLoadedModelId, loadVerifiedWebLLMEngine, streamWebLLM, WEBGPU_MISSING } from './webllm.js';
 import { loadLocalModels, localRecords } from '../local-models.js';
 import { composeSystemPrompt, getModelParams } from '../adaptation.js';
 
@@ -51,7 +51,8 @@ function createWebLLMBackend(cfg) {
       if (!(await checkWebGPU())) throw new Error(WEBGPU_MISSING);
       // 自定义记录 + 本地“新建 AI”（仅存在于浏览器缓存中）
       const extraRecords = [...(cfg.extraRecords || []), ...localRecords(loadLocalModels())];
-      await loadWebLLMEngine(modelId, onProgress, { mirrorOwner: cfg.mirrorOwner, extraRecords });
+      // 加载后做输出自检；fp16 异常时自动切换到 fp32（见 health.js）
+      return loadVerifiedWebLLMEngine(modelId, onProgress, { mirrorOwner: cfg.mirrorOwner, extraRecords });
     },
     async *stream({ messages, signal }) {
       // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
