@@ -133,6 +133,22 @@
         "label": "DeepSeek-R1 7B（推理·中·需约 5.0 GB 显存）"
       },
       {
+        "id": "Hermes-3-Llama-3.1-8B-q4f16_1-MLC",
+        "label": "Hermes 3 8B（非推理·中·纯文本·需约 4.8 GB 显存）"
+      },
+      {
+        "id": "Qwen2-7B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2 7B（非推理·中·纯文本·需约 5.0 GB 显存）"
+      },
+      {
+        "id": "Mistral-7B-Instruct-v0.2-q4f16_1-MLC",
+        "label": "Mistral 7B v0.2（非推理·中·纯文本·需约 4.5 GB 显存）"
+      },
+      {
+        "id": "Llama-3-8B-Instruct-q4f16_1-MLC",
+        "label": "Llama 3 8B（非推理·中·纯文本·需约 4.9 GB 显存）"
+      },
+      {
         "id": "Llama-3.1-70B-Instruct-q3f16_1-MLC",
         "label": "Llama 3.1 70B（非推理·超大·需约 30.4 GB 显存）"
       },
