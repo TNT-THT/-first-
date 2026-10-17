@@ -14,21 +14,21 @@ models → init → setup → doctor → import-model / import-data → run（fe
 
 | 类别 | 怎么选 | 运行库 | 备注 |
 | --- | --- | --- | --- |
-| 网页下拉框中的 36 个模型 | `init --model <id>` | 沿用官方运行库，**不需要编译** | 清单见 `catalog.json`，`ojtrain.py models` 查看 |
+| 网页下拉框中的 27 个模型 | `init --model <id>` | 沿用官方运行库，**不需要编译** | 清单见 `catalog.json`，`ojtrain.py models` 查看 |
 | 仅训练目录的超大模型（Qwen2.5 32B、Yi 1.5 34B） | `init --hf-repo <仓库> --conv-template <模板名> --context-window-size 4096` | 在本机用 `mlc_llm compile` 编译 | 不在网页下拉框中；`init --model` 会拒绝并给出上述命令；显存约 19–20 GB（估算），训练显存需 70 GB 以上 |
 | 其他 Hugging Face 模型 | `init --hf-repo 组织/模型 --conv-template <模板名>` | 在本机用 `mlc_llm compile` 编译 | 需要 MLC-LLM 支持该架构，且 transformers 能加载 |
 
-**“所有模型”的含义**：下拉框中的 36 个模型都使用同一套流程，因为训练后的权重与官方模型的架构、量化、形状完全相同，所以可以复用同一个 wasm 运行库。清单之外的模型取决于两件事：MLC-LLM 是否支持该架构，以及 transformers 能否加载它。并不是每个 Hugging Face 模型都能用。
+**“所有模型”的含义**：下拉框中的 27 个模型都使用同一套流程，因为训练后的权重与官方模型的架构、量化、形状完全相同，所以可以复用同一个 wasm 运行库。清单之外的模型取决于两件事：MLC-LLM 是否支持该架构，以及 transformers 能否加载它。并不是每个 Hugging Face 模型都能用。
 
-**验证范围**：流程对下拉框中的 36 个模型都已接好，但沙箱中只用极小随机模型验证了代码路径（多种架构的训练与合并、打包与导入），**没有在任何真实模型上跑通**。仅训练目录的 Qwen2.5 32B 与 Yi 1.5 34B 只有估算的显存数值，没有 WebLLM 记录可核对，也需要本机编译。训练 70B 模型需要远超消费级显卡的显存，本流程不适用于它们。第一次使用某个模型时，请先按第 5 节“需要核对的部分”检查。
+**验证范围**：流程对下拉框中的 27 个模型都已接好，但沙箱中只用极小随机模型验证了代码路径（多种架构的训练与合并、打包与导入），**没有在任何真实模型上跑通**。仅训练目录的 Qwen2.5 32B 与 Yi 1.5 34B 只有估算的显存数值，没有 WebLLM 记录可核对，也需要本机编译。训练 70B 模型需要远超消费级显卡的显存，本流程不适用于它们。第一次使用某个模型时，请先按第 5 节“需要核对的部分”检查。
 
-运行库只与架构和量化有关，与权重无关。例如 Qwen2.5-Coder-3B 与 Qwen2.5-3B 共用一个 wasm，Hermes-3-Llama-3.2-3B 与 Llama-3.2-3B 共用一个 wasm。
+运行库只与架构和量化有关，与权重无关。例如 Qwen2.5-7B 与 Qwen2.5-Coder-7B 共用一个 wasm（均使用 Qwen2-7B 的库）。
 
 ## 1. 第一次准备
 
 ```bash
 python3 training/ojtrain.py models                                  # 列出可训练的模型
-python3 training/ojtrain.py init --model Qwen2.5-Coder-1.5B-Instruct-q4f16_1-MLC   # 从清单生成配置
+python3 training/ojtrain.py init --model Qwen2.5-3B-Instruct-q4f16_1-MLC   # 从清单生成配置
 python3 training/ojtrain.py setup                                   # 创建 training/.venv 并安装依赖
 training/.venv/bin/python training/ojtrain.py doctor                # 检查环境
 ```
@@ -56,7 +56,7 @@ python3 training/ojtrain.py import-model /path/to/模型目录
 
 模型目录需要包含 `config.json`、`*.safetensors` 权重，以及 `tokenizer.json` 或 `tokenizer.model`。
 
-**注意**：本机的基础模型必须与配置对应的原始仓库是同一个模型（同架构、同尺寸）。例如清单中的 Qwen2.5-Coder-1.5B 对应 `Qwen/Qwen2.5-Coder-1.5B-Instruct`，不能换成 7B 的目录，否则运行库与权重对不上，网页端会加载失败。
+**注意**：本机的基础模型必须与配置对应的原始仓库是同一个模型（同架构、同尺寸）。例如清单中的 Qwen2.5-3B 对应 `Qwen/Qwen2.5-Coder-1.5B-Instruct`，不能换成 7B 的目录，否则运行库与权重对不上，网页端会加载失败。
 
 gated 模型（Llama、Gemma 等）需要在 Hugging Face 上同意许可协议，并在本机设置环境变量 `HF_TOKEN`。不要把 token 写进文件或发给别人。清单中标记 `gated` 的模型会在 `models` 输出中提示。
 
@@ -93,7 +93,7 @@ python3 training/ojtrain.py import-data 我的数据.csv
 
 | 字段 | 说明 | 默认值 |
 | --- | --- | --- |
-| `name` | 本次训练的名称，决定工作目录 `training/work/<name>/` | 由模型 id 推导，如 `Qwen2.5-Coder-1.5B-Instruct-tuned` |
+| `name` | 本次训练的名称，决定工作目录 `training/work/<name>/` | 由模型 id 推导，如 `Qwen2.5-3B-Instruct-tuned` |
 | `catalog_id` | 来自清单的模型 id（自定义模型为 null） | — |
 | `base.hf_repo` | 基础模型的 Hugging Face 仓库 | 由清单或 `--hf-repo` 决定 |
 | `base.local_dir` | 本机模型目录；设置后优先使用它 | `null` |
@@ -240,7 +240,7 @@ node training/build_catalog.mjs --check  # 只检查是否同步
 | 文件 | 作用 |
 | --- | --- |
 | `ojtrain.py` | 一站式命令行入口 |
-| `catalog.json` / `build_catalog.mjs` | 网页下拉框中 36 个模型，加上仅训练目录的 2 个超大模型的训练信息；生成脚本从 web-llm 记录读取事实字段 |
+| `catalog.json` / `build_catalog.mjs` | 网页下拉框中 27 个模型，加上仅训练目录的 2 个超大模型的训练信息；生成脚本从 web-llm 记录读取事实字段 |
 | `catalog.py` | 把清单模型或自定义模型写入配置 |
 | `config.py` / `config.example.json` | 配置的读取、校验、路径解析与模板 |
 | `doctor.py` | 环境检查 |

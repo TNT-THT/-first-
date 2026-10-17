@@ -23,8 +23,8 @@ The first repository of me,and first of "炸药工厂"
 - **下载失败提示**：出错时会显示失败时的下载进度，并提示可以改用“导入模型”。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 36 个可选：非推理 30 个、推理 6 个。每个标签末尾都标注了推理所需的显存（WebLLM 记录值，或注明为估算）。标签中带“纯文本”的模型（Hermes 3 8B、Qwen2 7B、Mistral 7B v0.2、Llama 3 8B）为纯文本语言模型，不接受图片输入。
-  - 厂商：Qwen（阿里）、Meta Llama、Google Gemma、Mistral、Microsoft Phi、Hugging Face SmolLM2、AI2 OLMo、TinyLlama、Stability StableLM、Nous Hermes、DeepSeek（仅 R1 蒸馏版，均为推理模型）。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 27 个可选：非推理 22 个、推理 5 个。默认模型为 Qwen2.5 3B。下拉框中的模型全部为纯文本语言模型，不接受图片输入，标签中均标注“纯文本”。每个标签末尾都标注了推理所需的显存（WebLLM 记录值，或注明为估算）。极小模型保留 2 个（不同厂商）；小模型保留 9 个，其中 Qwen 系列 4 个（Qwen2.5 3B、Qwen2.5-Coder 3B、Qwen3 4B、Qwen3 1.7B），因为它们在这一级别中文能力与性能较强，其余 5 个尽量来自不同厂商。同级别的其他模型已移出下拉框，训练清单中也不再列出。
+  - 厂商：Qwen（阿里）、Meta Llama、Google Gemma、Mistral、Microsoft Phi、Hugging Face SmolLM2、AI2 OLMo、TinyLlama、Stability StableLM、Nous Hermes（含 OpenHermes）、DeepSeek（仅 R1 蒸馏版，均为推理模型）。
   - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）。
   - 超大：Llama 3.1 70B、Llama 3 70B（均为 q3f16 量化，需约 30.4 GB 显存）。**8 GB 显存的 RTX 4060 无法加载这两个模型，即使是 16 GB 的 4060 Ti 也无法加载**，选中时会显示警告。这两个模型不能满足“4060 上 1 分钟内回复”的要求，也没有在任何真实硬件上测过速度。
   - 仅训练目录（不在下拉框中）的超大模型：Qwen2.5 32B、Yi 1.5 34B。WebLLM 没有它们的预编译运行库，需要在本机用训练流程编译后才能用，见 [`training/README.md`](training/README.md)。
