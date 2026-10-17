@@ -24,10 +24,12 @@ const WEBLLM_PATH = join(root, 'node_modules', '@mlc-ai', 'web-llm', 'lib', 'ind
 // 对话模板名必须与 MLC-LLM 版本中的模板名一致，训练前请对照官方 mlc-chat-config.json。
 const UPSTREAM = {
   'Qwen2.5-3B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-3B-Instruct', 'qwen2', 3.1],
+  'Qwen2.5-3B-Instruct-q4f32_1-MLC': ['Qwen/Qwen2.5-3B-Instruct', 'qwen2', 3.1],
   'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-Coder-3B-Instruct', 'qwen2', 3.1],
   'Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC': ['mistralai/Ministral-3-3B-Instruct-2512', 'mistral_default', 3.4],
   'Qwen3-1.7B-q4f16_1-MLC': ['Qwen/Qwen3-1.7B', 'chatml', 2.0],
   'Qwen3-4B-q4f16_1-MLC': ['Qwen/Qwen3-4B', 'chatml', 4.0],
+  'Qwen3-4B-q4f32_1-MLC': ['Qwen/Qwen3-4B', 'chatml', 4.0],
   'Qwen3-0.6B-q4f16_1-MLC': ['Qwen/Qwen3-0.6B', 'chatml', 0.6],
   'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-Coder-7B-Instruct', 'qwen2', 7.6],
   'Qwen2.5-Coder-7B-Instruct-q4f32_1-MLC': ['Qwen/Qwen2.5-Coder-7B-Instruct', 'qwen2', 7.6],

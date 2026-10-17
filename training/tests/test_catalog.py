@@ -20,8 +20,8 @@ class CatalogDataTest(unittest.TestCase):
         ids = [m["id"] for m in cfg["webllm"]["models"]]
         in_dd = [m["id"] for m in self.models if m.get("in_dropdown", True)]
         self.assertEqual(sorted(ids), sorted(in_dd))
-        self.assertEqual(len(in_dd), 27)
-        self.assertEqual(len(self.models), 29)  # 另有 2 个仅训练目录的超大模型
+        self.assertEqual(len(in_dd), 29)
+        self.assertEqual(len(self.models), 31)  # 另有 2 个仅训练目录的超大模型
 
     def test_catalog_only_models_are_not_in_dropdown(self):
         only = [m for m in self.models if not m.get("in_dropdown", True)]
