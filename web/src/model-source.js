@@ -43,3 +43,46 @@ export function buildModelList(builtinList, extraRecords = [], mirrorOwner = '')
       : { ...record, model: `https://huggingface.co/${owner}/${record.model_id}` }
   );
 }
+
+/** 默认上下文窗口（token）。可在 config.json 的 webllm.contextWindowTokens 中修改。 */
+export const DEFAULT_CONTEXT_WINDOW = 65536;
+
+/** 显存不足时依次尝试的更小窗口（token）。 */
+export const CONTEXT_WINDOW_LADDER = [65536, 32768, 16384, 8192, 4096];
+
+/**
+ * 加载时尝试的窗口序列：先请求的窗口，再依次更小的窗口（只取比它小的档位）。
+ * 非法或缺省的请求值使用默认窗口。
+ */
+export function contextWindowLadder(target) {
+  const t = Number(target);
+  const top = Number.isFinite(t) && t > 0 ? Math.floor(t) : DEFAULT_CONTEXT_WINDOW;
+  return [...new Set([top, ...CONTEXT_WINDOW_LADDER.filter((w) => w < top)])];
+}
+
+/**
+ * 为每条模型记录设置运行时的 context_window_size（WebLLM 会把 overrides 合并进模型配置，
+ * 并据此分配 KV 缓存）。不修改原记录；带有滑动窗口的记录保持不变。
+ */
+export function applyContextWindow(records, tokens) {
+  const n = Number(tokens);
+  if (!Number.isFinite(n) || n <= 0) return records;
+  return records.map((r) => {
+    if (Number(r.overrides?.sliding_window_size) > 0) return r;
+    return { ...r, overrides: { ...(r.overrides || {}), context_window_size: Math.floor(n) } };
+  });
+}
+
+/**
+ * 是否为显存不足一类的加载错误（此时换用更小的窗口重试可能成功）。
+ * 其他错误（如 WebGPU 不可用、shader-f16 不支持、网络错误）直接报告，不重试。
+ */
+export function isMemoryError(err) {
+  const name = String(err?.name || '');
+  const msg = String(err?.message || err || '');
+  return (
+    name === 'DeviceLostError' ||
+    name === 'GPUOutOfMemoryError' ||
+    /out of memory|\bOOM\b|device was lost|createBuffer|maxBufferSize/i.test(msg)
+  );
+}
