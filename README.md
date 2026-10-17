@@ -23,11 +23,14 @@ The first repository of me,and first of "炸药工厂"
 - **下载失败提示**：出错时会显示失败时的下载进度，并提示可以改用“导入模型”。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 27 个可选：非推理 22 个、推理 5 个。默认模型为 Qwen2.5 3B。下拉框中的模型全部为纯文本语言模型，不接受图片输入，标签中均标注“纯文本”。每个标签末尾都标注了推理所需的显存（WebLLM 记录值，或注明为估算）。极小模型保留 2 个（不同厂商）；小模型保留 9 个，其中 Qwen 系列 4 个（Qwen2.5 3B、Qwen2.5-Coder 3B、Qwen3 4B、Qwen3 1.7B），因为它们在这一级别中文能力与性能较强，其余 5 个尽量来自不同厂商。同级别的其他模型已移出下拉框，训练清单中也不再列出。
-  - 厂商：Qwen（阿里）、Meta Llama、Google Gemma、Mistral、Microsoft Phi、Hugging Face SmolLM2、AI2 OLMo、TinyLlama、Stability StableLM、Nous Hermes（含 OpenHermes）、DeepSeek（仅 R1 蒸馏版，均为推理模型）。
-  - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 27 个可选：非推理 16 个、推理 11 个。默认模型为 Qwen2.5 3B。下拉框中的模型全部为纯文本语言模型，不接受图片输入，标签中均标注“纯文本”。每个标签末尾都标注了推理所需的显存（WebLLM 记录的 `vram_required_MB` ÷ 1024，取一位小数）。按尺寸：极小 2 个（Gemma 3 1B、Qwen2.5 0.5B）；小 9 个；中 12 个；大 2 个；超大 2 个。
+  - 厂商：Qwen（阿里）、Google Gemma、Microsoft Phi（Phi-4 mini 的官方语言列表含中文）、Mistral（Ministral 3 3B，官方列表含中文）、DeepSeek（仅 R1 蒸馏版，均为推理模型）、Meta Llama（仅用于大级与超大级，见下）。
+  - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）、Gemma 2 9B q4f32（需约 8.2 GB 显存）。
   - 超大：Llama 3.1 70B、Llama 3 70B（均为 q3f16 量化，需约 30.4 GB 显存）。**8 GB 显存的 RTX 4060 无法加载这两个模型，即使是 16 GB 的 4060 Ti 也无法加载**，选中时会显示警告。这两个模型不能满足“4060 上 1 分钟内回复”的要求，也没有在任何真实硬件上测过速度。
   - 仅训练目录（不在下拉框中）的超大模型：Qwen2.5 32B、Yi 1.5 34B。WebLLM 没有它们的预编译运行库，需要在本机用训练流程编译后才能用，见 [`training/README.md`](training/README.md)。
+  - **本次调整（按“不支持中文则移除、同级别补充”）**：移除 Llama 3.2 3B、Llama 3.1 8B、Llama 3 8B、Hermes 3 8B、Mistral 7B v0.2/v0.3、OpenHermes 2.5、OLMo 2 1B/7B、SmolLM2 1.7B、TinyLlama 1.1B、StableLM 2 1.6B，依据各模型官方公布的语言列表。大级与超大级没有支持中文的同级预编译模型，因此按要求保留了之前的 Llama 2 13B、Llama 3.1 70B、Llama 3 70B。
+  - **新增**：Qwen2.5 7B q4f32、Qwen2.5-Coder 7B q4f32、Phi-4 mini q4f32、Qwen3 8B q4f32、Gemma 2 9B q4f32（q4f32 用 fp32 计算，数值更稳定，显存更高）；Ministral 3 3B Instruct（非推理，小）；Qwen2.5 0.5B、Qwen3 0.6B、Qwen3.5 0.8B/2B/4B/9B 用于补充较小的级别。Qwen3.5 小模型的思考模式标为推理，尚未在本机实测。
+  - **未补齐的空缺**：非推理模型目前为 16 个，原先为 22 个，还差 6 个。原因是 WebLLM 0.2.86 内置列表中，支持中文的非推理模型已用完。Qwen2.5 1.5B 与 Qwen2 1.5B 借用的是 Qwen2-1.5B 运行库，WebLLM 官方注释标注其存在 correctness issue，因此没有加入。
   - DeepSeek 的小型非推理模型（如 deepseek-coder-1.3b-instruct）不在 WebLLM 内置列表中，无法直接使用。
 - **DeepSeek-R1 1.5B 暂时隐藏**：该模型在下拉框中已移除，记录仍保留在 `webllm.extraRecords` 中。原因：它借用的 wasm 库（Qwen2-1.5B，与 Qwen2.5-Coder 1.5B 等共用）是按 `rope_theta: 1000000`、`tie_word_embeddings: true` 编译的，而 DeepSeek-R1 1.5B 的权重配置是 `rope_theta: 10000`、`tie_word_embeddings: false`。这两个参数编译进 wasm，运行时无法通过配置修改，因此输出会乱码（已有用户实测复现）。WebLLM 官方注释也写明 “Qwen2-1.5B is experiencing correctness issue”。要恢复该模型，需要为它单独编译匹配参数的 wasm，然后把 `extraRecords` 中的 `model_lib` 指向新文件，并在 `webllm.models` 中加回条目。
 - **Qwen2.5-Math 1.5B 已从下拉框移除**：它同样借用 Qwen2-1.5B wasm，但权重配置为 `rope_theta: 10000`，与 wasm 不一致，原因与上面相同。

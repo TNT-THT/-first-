@@ -40,7 +40,7 @@ class CatalogDataTest(unittest.TestCase):
                 if m.get("in_dropdown", True):
                     self.assertTrue(m["model_lib_url"].startswith("https://"))
                     self.assertTrue(m["wasm_file"].endswith(".wasm"))
-                self.assertRegex(m["quantization"], r"^q[34]f16")  # 70B 使用 q3f16 以适应显存
+                self.assertRegex(m["quantization"], r"^q[34]f(16|32)|^q3f16")  # 70B 使用 q3f16 以适应显存
                 self.assertTrue(m["conv_template"])
                 self.assertFalse(m["verified"])  # 原始仓库与模板名尚未核对
 
@@ -49,13 +49,17 @@ class CatalogDataTest(unittest.TestCase):
         self.assertTrue(by_id["Qwen3-8B-q4f16_1-MLC"]["reasoning"])
         self.assertFalse(by_id["Qwen2.5-3B-Instruct-q4f16_1-MLC"]["reasoning"])
         self.assertEqual(by_id["Llama-2-13b-chat-hf-q4f16_1-MLC"]["size_class"], "大")
-        self.assertEqual(by_id["OLMo-2-0425-1B-Instruct-q4f16_1-MLC"]["size_class"], "极小")
+        self.assertEqual(by_id["gemma-2-9b-it-q4f32_1-MLC"]["size_class"], "大")
         self.assertEqual(by_id["Llama-3.1-70B-Instruct-q3f16_1-MLC"]["size_class"], "超大")
         self.assertEqual(by_id["Llama-3.1-70B-Instruct-q3f16_1-MLC"]["inference_vram_gb"], 30.4)
+        self.assertEqual(by_id["Qwen2.5-0.5B-Instruct-q4f16_1-MLC"]["size_class"], "极小")
+        self.assertTrue(by_id["Qwen3.5-9B-q4f16_1-MLC"]["reasoning"])
+        self.assertEqual(by_id["Qwen3-8B-q4f32_1-MLC"]["quantization"], "q4f32_1")
+        self.assertEqual(len([m for m in self.models if m.get("in_dropdown", True) and m["size_class"] == "超大"]), 2)
 
     def test_gated_models_are_flagged(self):
         by_id = {m["id"]: m for m in self.models}
-        self.assertTrue(by_id["Llama-3.2-3B-Instruct-q4f16_1-MLC"]["hf_gated"])
+        self.assertTrue(by_id["gemma-2-9b-it-q4f16_1-MLC"]["hf_gated"])
         self.assertTrue(by_id["gemma3-1b-it-q4f16_1-MLC"]["hf_gated"])
         self.assertFalse(by_id["Qwen2.5-3B-Instruct-q4f16_1-MLC"]["hf_gated"])
 
