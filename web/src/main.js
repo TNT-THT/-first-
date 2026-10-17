@@ -22,8 +22,10 @@ import {
   clearModelAdaptation,
   getModelParams,
   listAdaptation,
+  listKnowledge,
   listParamLog,
   recordFeedback,
+  removeKnowledge,
   removeNote,
   resetAllParams,
   resetParam,
@@ -833,9 +835,16 @@ function deleteAdaptNote(modelId, noteId) {
   renderAdaptList();
 }
 
+/** 删除本地知识库中的一条管理员信息（仅本机）。 */
+function deleteKnowledgeEntry(modelId, entryId) {
+  if (!requireAdmin('删除本地知识库条目')) return;
+  removeKnowledge(modelId, entryId);
+  renderAdaptList();
+}
+
 function clearAdaptation(modelId) {
   if (!requireAdmin('清空 AI 适应记录')) return;
-  if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录（包括说明、参数与参数变更记录）？`)) return;
+  if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录（包括说明、本地知识库、参数与参数变更记录）？`)) return;
   clearModelAdaptation(modelId);
   dropPendingSuggestions(modelId);
   renderAdaptList();
@@ -972,7 +981,8 @@ function renderAdaptList() {
   }
   els.adaptHint.textContent =
     '管理员在 AI 回复之后发送的消息会记为该 AI 的反馈（仅本机，不上传）；' +
-    '以“参数：temperature=0.2, maxTokens=800”开头的一行可调整该 AI 的参数。';
+    '以“参数：temperature=0.2, maxTokens=800”开头的一行可调整该 AI 的参数；' +
+    '反馈同时写入该 AI 的本地知识库（最高优先级，仅本机，不上传，不随导出文件保存）。';
   const ids = adaptedModelIds();
   if (!ids.length) {
     const p = document.createElement('p');
@@ -983,11 +993,12 @@ function renderAdaptList() {
   }
   for (const id of ids) {
     const { notes, params } = listAdaptation(id);
+    const kb = listKnowledge(id);
     const head = document.createElement('div');
     head.className = 'local-row';
     const name = document.createElement('div');
     name.className = 'local-name';
-    name.textContent = `${modelDisplayName(id)}（${notes.length} 条${Object.keys(params).length ? '，有参数' : ''}）`;
+    name.textContent = `${modelDisplayName(id)}（${notes.length} 条${kb.length ? `，知识库 ${kb.length} 条` : ''}${Object.keys(params).length ? '，有参数' : ''}）`;
     const clear = document.createElement('button');
     clear.type = 'button';
     clear.className = 'btn ghost small';
@@ -1011,6 +1022,28 @@ function renderAdaptList() {
       del.textContent = '删除';
       row.append(t, del);
       list.append(row);
+    }
+    if (kb.length) {
+      const title = document.createElement('div');
+      title.className = 'muted small local-meta';
+      title.textContent = '本地知识库（最高优先级，仅本机）：';
+      list.append(title);
+      for (const k of kb) {
+        const row = document.createElement('div');
+        row.className = 'local-row';
+        const t = document.createElement('div');
+        t.className = 'muted small local-meta';
+        t.textContent = k.text;
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'btn ghost small';
+        del.dataset.action = 'kb-delete';
+        del.dataset.id = id;
+        del.dataset.entry = k.id;
+        del.textContent = '删除';
+        row.append(t, del);
+        list.append(row);
+      }
     }
     renderParamDetails(list, id, params);
   }
@@ -1292,6 +1325,7 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
   if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
   if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
+  if (btn && btn.dataset.action === 'kb-delete') return deleteKnowledgeEntry(btn.dataset.id, btn.dataset.entry);
   if (btn && btn.dataset.action === 'adapt-reset') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert-all') return revertAllParams(btn.dataset.id);
