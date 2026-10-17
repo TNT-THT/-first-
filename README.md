@@ -30,7 +30,7 @@ The first repository of me,and first of "炸药工厂"
   - 仅训练目录（不在下拉框中）的超大模型：Qwen2.5 32B、Yi 1.5 34B。WebLLM 没有它们的预编译运行库，需要在本机用训练流程编译后才能用，见 [`training/README.md`](training/README.md)。
   - **本次调整（按“不支持中文则移除、同级别补充”）**：移除 Llama 3.2 3B、Llama 3.1 8B、Llama 3 8B、Hermes 3 8B、Mistral 7B v0.2/v0.3、OpenHermes 2.5、OLMo 2 1B/7B、SmolLM2 1.7B、TinyLlama 1.1B、StableLM 2 1.6B，依据各模型官方公布的语言列表。大级与超大级没有支持中文的同级预编译模型，因此按要求保留了之前的 Llama 2 13B、Llama 3.1 70B、Llama 3 70B。
   - **新增**：Qwen2.5 7B q4f32、Qwen2.5-Coder 7B q4f32、Phi-4 mini q4f32、Qwen3 8B q4f32、Gemma 2 9B q4f32（q4f32 用 fp32 计算，数值更稳定，显存更高）；Ministral 3 3B Instruct（非推理，小）；Qwen2.5 0.5B、Qwen3 0.6B、Qwen3.5 0.8B/2B/4B/9B 用于补充较小的级别。Qwen3.5 小模型的思考模式标为推理，尚未在本机实测。
-  - **未补齐的空缺**：非推理模型目前为 16 个，原先为 22 个，还差 6 个。原因是 WebLLM 0.2.86 内置列表中，支持中文的非推理模型已用完。Qwen2.5 1.5B 与 Qwen2 1.5B 借用的是 Qwen2-1.5B 运行库，WebLLM 官方注释标注其存在 correctness issue，因此没有加入。
+  - **非推理模型**：目前为 17 个，没有数量上限。WebLLM 0.2.86 内置列表中支持中文的非推理模型，目前已全部列入下拉框。Qwen2.5 1.5B 与 Qwen2 1.5B 借用的是 Qwen2-1.5B 运行库，WebLLM 官方注释标注其存在 correctness issue，因此没有加入。
   - DeepSeek 的小型非推理模型（如 deepseek-coder-1.3b-instruct）不在 WebLLM 内置列表中，无法直接使用。
 - **DeepSeek-R1 1.5B 暂时隐藏**：该模型在下拉框中已移除，记录仍保留在 `webllm.extraRecords` 中。原因：它借用的 wasm 库（Qwen2-1.5B，与 Qwen2.5-Coder 1.5B 等共用）是按 `rope_theta: 1000000`、`tie_word_embeddings: true` 编译的，而 DeepSeek-R1 1.5B 的权重配置是 `rope_theta: 10000`、`tie_word_embeddings: false`。这两个参数编译进 wasm，运行时无法通过配置修改，因此输出会乱码（已有用户实测复现）。WebLLM 官方注释也写明 “Qwen2-1.5B is experiencing correctness issue”。要恢复该模型，需要为它单独编译匹配参数的 wasm，然后把 `extraRecords` 中的 `model_lib` 指向新文件，并在 `webllm.models` 中加回条目。
 - **Qwen2.5-Math 1.5B 已从下拉框移除**：它同样借用 Qwen2-1.5B wasm，但权重配置为 `rope_theta: 10000`，与 wasm 不一致，原因与上面相同。
