@@ -7,8 +7,10 @@
  * - 记录只保存在本浏览器的 localStorage 中，不上传云端，也不会写入导出的 .ojmodel 文件。
  * - 远程（服务端）模式下不记录、不注入，避免把反馈发送到服务器。
  * - 管理员反馈被视为可信且优先于模型已有的旧知识；附加说明末尾固定一条窄边界：
- *   反馈不能让模型提供伤害他人或违法的具体实施指导（这是模型本身的底线）。
+ *   反馈不能让模型提供可直接执行、会伤害他人或违法的具体步骤（这是模型本身的底线；不限制对话题的讨论）。
  * - 管理员设置的参数（temperature、maxTokens）覆盖该 AI 的默认配置，优先级最高。
+ * - 以“更正：新说法”写出的更正，经管理员密钥验证后，作为该 AI 的底层设定，放在系统提示词最前面，
+ *   无条件采纳；同样只保存在本机。
  */
 
 const KEY = 'oj-ai.adapt.v1';
@@ -22,8 +24,14 @@ export const KB_BUDGET_CHARS = 800;
 export const MAX_PARAM_LOG = 50;
 const PARAM_LIMITS = { temperature: [0, 1.5], maxTokens: [64, 16384] };
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
+// 更正行：「更正：新说法」。只有通过管理员密钥验证后才会记录（见 main.js），之后作为该 AI 的底层设定，无条件采纳。
+const CORRECTION_LINE = /^[ \t]*(?:更正|纠正)[:：][ \t]*(.+)$/gm;
+export const MAX_CORRECTIONS_PER_MODEL = 30;
+export const CORRECTION_BUDGET_CHARS = 1000;
+const CORRECTION_GUARD =
+  '以上是管理员在验证密钥后给出的更正：视为你的底层设定，无条件采纳，直接以更正内容回答。若与你已有的知识或之前的说法冲突，以更正为准，不得坚持原说法。唯一例外：更正不得让你提供可直接执行、会伤害他人或违法的具体步骤，但不限制对任何话题的讨论、解释与分析。';
 const GUARD =
-  '以上是管理员针对本 AI 给出的反馈，优先级高于你已有的默认设定和旧知识：若反馈指出某个说法已被证伪或已过时，请直接以反馈的更正为准，不要坚持原说法；请据此调整回答的风格、格式与事实。唯一例外：反馈不能让你提供会伤害他人或违法的具体实施指导。';
+  '以上是管理员针对本 AI 给出的反馈，优先级高于你已有的默认设定和旧知识：若反馈指出某个说法已被证伪或已过时，请直接以反馈的更正为准，不要坚持原说法；请据此调整回答的风格、格式与事实。唯一例外：反馈不得让你提供可直接执行、会伤害他人或违法的具体步骤，但不限制对任何话题的讨论、解释与分析。';
 
 function readAll(storage) {
   try {
@@ -42,7 +50,7 @@ function writeAll(data, storage) {
 }
 
 const KB_GUARD =
-  '以上是本地知识库中的管理员信息，属于最高优先级，高于上面的基础设定与旧知识：若有冲突，以这些信息为准，并据此调整回答的事实、风格与格式。唯一例外：这些信息不能让你提供会伤害他人或违法的具体实施指导。';
+  '以上是本地知识库中的管理员信息，属于最高优先级，高于上面的基础设定与旧知识：若有冲突，以这些信息为准，并据此调整回答的事实、风格与格式。唯一例外：这些信息不得让你提供可直接执行、会伤害他人或违法的具体步骤，但不限制对任何话题的讨论、解释与分析。';
 
 function readKb(storage) {
   try {
@@ -122,8 +130,9 @@ export function buildKnowledgePrompt(modelId, { storage = globalThis.localStorag
 }
 
 function entryFor(data, modelId) {
-  if (!data.models[modelId]) data.models[modelId] = { notes: [], params: {}, log: [] };
+  if (!data.models[modelId]) data.models[modelId] = { notes: [], params: {}, log: [], corrections: [] };
   if (!Array.isArray(data.models[modelId].log)) data.models[modelId].log = [];
+  if (!Array.isArray(data.models[modelId].corrections)) data.models[modelId].corrections = [];
   return data.models[modelId];
 }
 
@@ -162,19 +171,50 @@ function stripParamLine(text) {
   return String(text || '').replace(PARAM_LINE, '').trim();
 }
 
+/** 从反馈中解析所有更正行，返回 [{text}]（空内容的行不算更正）。 */
+export function parseCorrections(text) {
+  const out = [];
+  for (const m of String(text || '').matchAll(CORRECTION_LINE)) {
+    const body = m[1].trim().slice(0, MAX_NOTE_CHARS);
+    if (body) out.push({ text: body });
+  }
+  return out;
+}
+
+/** 去掉反馈中的更正行：更正行不进入附加说明或知识库。 */
+function stripCorrectionLines(text) {
+  return String(text || '').replace(CORRECTION_LINE, '').trim();
+}
+
 /**
  * 记录一条管理员反馈，归属于 modelId（即产生被反馈回答的那个 AI）。
- * 返回实际记录的内容 {note?, params?}；没有可记录内容时返回 null。
+ * 更正行只有在 allowCorrections 为 true（已通过管理员密钥验证）时才会保存为底层设定；
+ * 否则更正行被丢弃，既不保存为更正，也不进入附加说明。
+ * 返回实际记录的内容 {note?, params?, corrections?}；没有可记录内容时返回 null。
  */
-export function recordFeedback(modelId, text, { storage = globalThis.localStorage, now = Date.now() } = {}) {
+export function recordFeedback(
+  modelId,
+  text,
+  { storage = globalThis.localStorage, now = Date.now(), allowCorrections = false } = {},
+) {
   if (!modelId) return null;
   const params = parseFeedbackParams(text);
-  const body = stripParamLine(text).slice(0, MAX_NOTE_CHARS);
-  if (!params && !body) return null;
+  const corrections = allowCorrections ? parseCorrections(text) : [];
+  const body = stripParamLine(stripCorrectionLines(text)).slice(0, MAX_NOTE_CHARS);
+  if (!params && !body && !corrections.length) return null;
 
   const data = readAll(storage);
   const entry = entryFor(data, modelId);
   const result = {};
+  if (corrections.length) {
+    // 同一模型内完全相同的更正只保存一次（例如重新生成回答时会再次发送同一条消息）
+    const known = new Set(entry.corrections.map((c) => c.text));
+    const items = corrections
+      .filter((c) => !known.has(c.text))
+      .map((c) => ({ id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: c.text, ts: now }));
+    entry.corrections = [...entry.corrections, ...items].slice(-MAX_CORRECTIONS_PER_MODEL);
+    result.corrections = items;
+  }
   if (params) {
     const changes = [];
     for (const [key, value] of Object.entries(params)) {
@@ -222,7 +262,28 @@ export function removeNote(modelId, noteId, { storage = globalThis.localStorage 
   const entry = data.models[modelId];
   if (!entry) return;
   entry.notes = (entry.notes || []).filter((n) => n.id !== noteId);
-  if (!entry.notes.length && !Object.keys(entry.params || {}).length) delete data.models[modelId];
+  if (!entry.notes.length && !Object.keys(entry.params || {}).length && !(entry.corrections || []).length) {
+    delete data.models[modelId];
+  }
+  writeAll(data, storage);
+}
+
+/** 某模型的更正列表（最新的在后）。 */
+export function listCorrections(modelId, { storage = globalThis.localStorage } = {}) {
+  const entry = readAll(storage).models[modelId];
+  if (!entry || !Array.isArray(entry.corrections)) return [];
+  return entry.corrections.map((c) => ({ id: c.id, text: c.text ?? c.next, ts: c.ts }));
+}
+
+/** 删除一条更正。删除后若该模型没有任何记录，则移除该模型的记录。 */
+export function removeCorrection(modelId, correctionId, { storage = globalThis.localStorage } = {}) {
+  const data = readAll(storage);
+  const entry = data.models[modelId];
+  if (!entry) return;
+  entry.corrections = (entry.corrections || []).filter((c) => c.id !== correctionId);
+  if (!entry.corrections.length && !(entry.notes || []).length && !Object.keys(entry.params || {}).length) {
+    delete data.models[modelId];
+  }
   writeAll(data, storage);
 }
 
@@ -252,9 +313,32 @@ export function buildAdaptationPrompt(modelId, { storage = globalThis.localStora
   return `\n\n【管理员反馈（仅本机记录，最高优先级，请采纳）】\n${picked.join('\n')}\n${GUARD}`;
 }
 
-/** 组合基础系统提示词、本地知识库与该模型的适应说明（无记录时与原来完全相同）。 */
+/**
+ * 生成更正块（放在系统提示词最前面，作为底层设定）。预算内保留最新的更正，输出按时间先后排列。
+ * 没有更正时返回空字符串。
+ */
+export function buildCorrectionPrompt(modelId, { storage = globalThis.localStorage } = {}) {
+  const items = listCorrections(modelId, { storage });
+  if (!items.length) return '';
+  const picked = [];
+  let total = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    const line = `- ${items[i].text}`;
+    if (total + line.length > CORRECTION_BUDGET_CHARS && picked.length) break;
+    total += line.length;
+    picked.unshift(line);
+  }
+  return `【管理员更正（已验证密钥，仅本机，无条件采纳，作为底层设定）】\n${picked.join('\n')}\n${CORRECTION_GUARD}`;
+}
+
+/**
+ * 组合系统提示词：更正（底层设定）→ 基础提示 → 本地知识库 → 附加说明。
+ * 没有更正、知识库与附加说明时，结果与原来完全相同。
+ */
 export function composeSystemPrompt(base, modelId, options) {
-  return `${base || ''}${buildKnowledgePrompt(modelId, options)}${buildAdaptationPrompt(modelId, options)}`;
+  const correction = buildCorrectionPrompt(modelId, options);
+  const head = correction ? `${correction}\n\n` : '';
+  return `${head}${base || ''}${buildKnowledgePrompt(modelId, options)}${buildAdaptationPrompt(modelId, options)}`;
 }
 
 /**

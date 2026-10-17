@@ -16,6 +16,12 @@ import {
   applyParamSuggestion,
   listParamLog,
   MAX_PARAM_LOG,
+  parseCorrections,
+  listCorrections,
+  removeCorrection,
+  buildCorrectionPrompt,
+  MAX_CORRECTIONS_PER_MODEL,
+  CORRECTION_BUDGET_CHARS,
   resetAllParams,
   resetParam,
   sanitizeParams,
@@ -281,7 +287,7 @@ test('系统提示词顺序：基础提示 → 本地知识库（最高优先级
   assert.ok(iBase === 0 && iKb > iBase && iNote > iKb);
   assert.match(text, /- 最新法规：条款A已修订/);
   assert.match(text, /以这些信息为准/);
-  assert.match(text, /唯一例外：这些信息不能让你提供会伤害他人或违法的具体实施指导/);
+  assert.match(text, /唯一例外：这些信息不得让你提供可直接执行、会伤害他人或违法的具体步骤，但不限制对任何话题的讨论、解释与分析/);
 });
 
 test('本地知识库：预算内保留最新条目，且输出仍按时间先后排列', () => {
@@ -322,4 +328,103 @@ test('本地知识库：与附加说明、参数分开存放，不改变原有�
   assert.ok(s.raw.has('oj-ai.adapt.v1'));
   assert.ok(s.raw.has('oj-ai.kb.v1'));
   assert.deepEqual(JSON.parse(s.raw.get('oj-ai.adapt.v1')).models.m.params, {});
+});
+
+test('更正：解析“更正：新说法”，空内容不算更正，可多行', () => {
+  assert.deepEqual(parseCorrections('更正：条款A现行有效'), [{ text: '条款A现行有效' }]);
+  assert.deepEqual(parseCorrections('纠正：X\n更正：Y'), [{ text: 'X' }, { text: 'Y' }]);
+  assert.deepEqual(parseCorrections('更正：'), []);
+  assert.deepEqual(parseCorrections('更正：   '), []);
+  assert.deepEqual(parseCorrections('普通的一句话 更正：不在行首'), []);
+});
+
+test('更正：未通过验证（allowCorrections 为 false）时不保存，也不进入附加说明或知识库', () => {
+  const s = memoryStorage();
+  const rec = recordFeedback('m', '更正：条款A现行有效', { storage: s, now: 1 });
+  assert.equal(rec, null);
+  assert.equal(listCorrections('m', { storage: s }).length, 0);
+  assert.equal(listAdaptation('m', { storage: s }).notes.length, 0);
+  assert.equal(listKnowledge('m', { storage: s }).length, 0);
+});
+
+test('更正：通过验证（allowCorrections）后记录到更正列表，不写入附加说明或知识库', () => {
+  const s = memoryStorage();
+  const rec = recordFeedback('m', '更正：条款A现行有效', { storage: s, now: 1, allowCorrections: true });
+  assert.equal(rec.corrections.length, 1);
+  assert.equal(rec.note, undefined);
+  assert.equal(rec.kb, undefined);
+  assert.equal(listAdaptation('m', { storage: s }).notes.length, 0);
+  assert.equal(listKnowledge('m', { storage: s }).length, 0);
+  assert.equal(listCorrections('m', { storage: s })[0].text, '条款A现行有效');
+});
+
+test('更正：同一条消息中，更正行不进入附加说明，其余文字仍照常记录', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：新结论\n另外请先给结论', { storage: s, now: 1, allowCorrections: true });
+  assert.deepEqual(listAdaptation('m', { storage: s }).notes.map((n) => n.text), ['另外请先给结论']);
+  assert.deepEqual(listCorrections('m', { storage: s }).map((c) => c.text), ['新结论']);
+});
+
+test('更正：同一模型内完全相同的更正只保存一次（重新生成回答时会再次发送）', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：同一结论', { storage: s, now: 1, allowCorrections: true });
+  const again = recordFeedback('m', '更正：同一结论', { storage: s, now: 2, allowCorrections: true });
+  assert.equal(again.corrections.length, 0);
+  assert.equal(listCorrections('m', { storage: s }).length, 1);
+});
+
+test('更正：位于系统提示词最前面，无条件采纳；没有更正时提示词不变', () => {
+  const s = memoryStorage();
+  assert.equal(composeSystemPrompt('基础提示', 'm', { storage: s }), '基础提示');
+  recordFeedback('m', '更正：新结论', { storage: s, now: 1, allowCorrections: true });
+  recordFeedback('m', '普通反馈', { storage: s, now: 2 });
+  const text = composeSystemPrompt('基础提示', 'm', { storage: s });
+  assert.ok(text.startsWith('【管理员更正（已验证密钥，仅本机，无条件采纳，作为底层设定）】'));
+  assert.ok(text.indexOf('- 新结论') < text.indexOf('基础提示'));
+  assert.ok(text.indexOf('基础提示') < text.indexOf('【本地知识库'));
+  assert.match(text, /无条件采纳/);
+  assert.match(text, /唯一例外：更正不得让你提供可直接执行、会伤害他人或违法的具体步骤，但不限制对任何话题的讨论、解释与分析/);
+  assert.equal(composeSystemPrompt('基础提示', 'other', { storage: s }), '基础提示');
+});
+
+test('更正：超过预算时保留最新的更正，输出仍按时间先后排列；超过上限丢弃最旧的', () => {
+  const s = memoryStorage();
+  const long = '长'.repeat(200);
+  for (let i = 0; i < 8; i++) recordFeedback('m', `更正：${i}-${long}`, { storage: s, now: i + 1, allowCorrections: true });
+  const prompt = buildCorrectionPrompt('m', { storage: s });
+  assert.ok(!prompt.includes('- 0-' + long));
+  assert.ok(prompt.includes('- 7-' + long));
+  assert.ok(prompt.indexOf('- 2-') < prompt.indexOf('- 7-'));
+  const bulletChars = prompt.split('\n').filter((l) => l.startsWith('- ')).join('').length;
+  assert.ok(bulletChars <= CORRECTION_BUDGET_CHARS + 2 + long.length);
+  for (let i = 0; i < MAX_CORRECTIONS_PER_MODEL + 5; i++) {
+    recordFeedback('m', `更正：A${i}`, { storage: s, now: 100 + i, allowCorrections: true });
+  }
+  assert.equal(listCorrections('m', { storage: s }).length, MAX_CORRECTIONS_PER_MODEL);
+});
+
+test('更正：删除后若无其他记录则移除该模型；清空模型记录时一并清除', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：结论', { storage: s, now: 1, allowCorrections: true });
+  const id = listCorrections('m', { storage: s })[0].id;
+  removeCorrection('m', id, { storage: s });
+  assert.equal(listCorrections('m', { storage: s }).length, 0);
+  assert.equal(JSON.parse(s.raw.get('oj-ai.adapt.v1')).models.m, undefined);
+  recordFeedback('m', '更正：结论2', { storage: s, now: 2, allowCorrections: true });
+  clearModelAdaptation('m', { storage: s });
+  assert.equal(listCorrections('m', { storage: s }).length, 0);
+});
+
+test('更正：仅保存在本机适应记录中，不改变采样参数，也不属于模型文件的内容', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：结论', { storage: s, now: 1, allowCorrections: true });
+  assert.deepEqual(getModelParams('m', { storage: s }), {});
+  assert.deepEqual(JSON.parse(s.raw.get('oj-ai.adapt.v1')).models.m.corrections.map((c) => c.text), ['结论']);
+});
+
+test('更正：旧版本保存的记录（含 old/next 字段）仍可读取，提示词中显示更正内容', () => {
+  const s = memoryStorage();
+  s.setItem('oj-ai.adapt.v1', JSON.stringify({ models: { m: { notes: [], params: {}, log: [], corrections: [{ id: 'x', old: '旧', next: '新', ts: 1 }] } } }));
+  assert.deepEqual(listCorrections('m', { storage: s }).map((c) => c.text), ['新']);
+  assert.match(buildCorrectionPrompt('m', { storage: s }), /- 新\n/);
 });
