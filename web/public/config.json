@@ -17,8 +17,16 @@
         "label": "Qwen2.5 3B（非推理·小·纯文本·默认·需约 2.4 GB 显存）"
       },
       {
+        "id": "Qwen2.5-3B-Instruct-q4f32_1-MLC",
+        "label": "Qwen2.5 3B q4f32（非推理·小·纯文本·高精度·需约 2.8 GB 显存）"
+      },
+      {
         "id": "Qwen3-4B-q4f16_1-MLC",
         "label": "Qwen3 4B（推理·小·纯文本·需约 3.4 GB 显存）"
+      },
+      {
+        "id": "Qwen3-4B-q4f32_1-MLC",
+        "label": "Qwen3 4B q4f32（推理·小·纯文本·高精度·需约 4.2 GB 显存）"
       },
       {
         "id": "Qwen3-1.7B-q4f16_1-MLC",

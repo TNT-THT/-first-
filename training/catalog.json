@@ -27,6 +27,30 @@
       "verified": false
     },
     {
+      "id": "Qwen2.5-3B-Instruct-q4f32_1-MLC",
+      "label": "Qwen2.5 3B q4f32（非推理·小·纯文本·高精度·需约 2.8 GB 显存）",
+      "size_class": "小",
+      "reasoning": false,
+      "in_dropdown": true,
+      "hf_repo": "Qwen/Qwen2.5-3B-Instruct",
+      "hf_gated": false,
+      "params_b": 3.1,
+      "train_vram_gb_min": 10,
+      "quantization": "q4f32_1",
+      "conv_template": "qwen2",
+      "context_window_size": 4096,
+      "overrides": {
+        "context_window_size": 4096
+      },
+      "vram_required_MB": 2893.64,
+      "inference_vram_gb": 2.8,
+      "inference_vram_source": "webllm",
+      "source_model": "https://huggingface.co/mlc-ai/Qwen2.5-3B-Instruct-q4f32_1-MLC",
+      "model_lib_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen2.5-3B-Instruct-q4f32_1_cs1k-webgpu.wasm",
+      "wasm_file": "Qwen2.5-3B-Instruct-q4f32_1_cs1k-webgpu.wasm",
+      "verified": false
+    },
+    {
       "id": "Qwen3-4B-q4f16_1-MLC",
       "label": "Qwen3 4B（推理·小·纯文本·需约 3.4 GB 显存）",
       "size_class": "小",
@@ -48,6 +72,30 @@
       "source_model": "https://huggingface.co/mlc-ai/Qwen3-4B-q4f16_1-MLC",
       "model_lib_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3-4B-q4f16_1_cs1k-webgpu.wasm",
       "wasm_file": "Qwen3-4B-q4f16_1_cs1k-webgpu.wasm",
+      "verified": false
+    },
+    {
+      "id": "Qwen3-4B-q4f32_1-MLC",
+      "label": "Qwen3 4B q4f32（推理·小·纯文本·高精度·需约 4.2 GB 显存）",
+      "size_class": "小",
+      "reasoning": true,
+      "in_dropdown": true,
+      "hf_repo": "Qwen/Qwen3-4B",
+      "hf_gated": false,
+      "params_b": 4,
+      "train_vram_gb_min": 12,
+      "quantization": "q4f32_1",
+      "conv_template": "chatml",
+      "context_window_size": 4096,
+      "overrides": {
+        "context_window_size": 4096
+      },
+      "vram_required_MB": 4327.71,
+      "inference_vram_gb": 4.2,
+      "inference_vram_source": "webllm",
+      "source_model": "https://huggingface.co/mlc-ai/Qwen3-4B-q4f32_1-MLC",
+      "model_lib_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3-4B-q4f32_1_cs1k-webgpu.wasm",
+      "wasm_file": "Qwen3-4B-q4f32_1_cs1k-webgpu.wasm",
       "verified": false
     },
     {
