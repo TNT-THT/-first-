@@ -29,12 +29,24 @@
         "label": "Qwen2.5-Coder 3B（非推理·小·纯文本·需约 2.4 GB 显存）"
       },
       {
+        "id": "Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC",
+        "label": "Ministral 3 3B Instruct（非推理·小·纯文本·需约 2.8 GB 显存）"
+      },
+      {
         "id": "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
         "label": "Qwen2.5-Coder 7B（非推理·中·纯文本·需约 5.0 GB 显存）"
       },
       {
+        "id": "Qwen2.5-Coder-7B-Instruct-q4f32_1-MLC",
+        "label": "Qwen2.5-Coder 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）"
+      },
+      {
         "id": "Qwen2.5-7B-Instruct-q4f16_1-MLC",
         "label": "Qwen2.5 7B（非推理·中·纯文本·需约 5.0 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-7B-Instruct-q4f32_1-MLC",
+        "label": "Qwen2.5 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）"
       },
       {
         "id": "Qwen3-8B-q4f16_1-MLC",
@@ -43,6 +55,14 @@
       {
         "id": "Qwen3-8B-q4f32_1-MLC",
         "label": "Qwen3 8B q4f32（推理·中·纯文本·高精度·需约 6.7 GB 显存）"
+      },
+      {
+        "id": "Phi-4-mini-instruct-q4f16_1-MLC",
+        "label": "Phi-4 mini 3.8B（非推理·小·纯文本·需约 3.4 GB 显存）"
+      },
+      {
+        "id": "Phi-4-mini-instruct-q4f32_1-MLC",
+        "label": "Phi-4 mini 3.8B q4f32（非推理·中·纯文本·高精度·需约 4.1 GB 显存）"
       },
       {
         "id": "gemma3-1b-it-q4f16_1-MLC",
@@ -55,10 +75,6 @@
       {
         "id": "Qwen3-0.6B-q4f16_1-MLC",
         "label": "Qwen3 0.6B（推理·小·纯文本·需约 1.4 GB 显存）"
-      },
-      {
-        "id": "Phi-4-mini-instruct-q4f16_1-MLC",
-        "label": "Phi-4 mini 3.8B（非推理·小·纯文本·需约 3.4 GB 显存）"
       },
       {
         "id": "Qwen3.5-0.8B-q4f16_1-MLC",
@@ -91,6 +107,18 @@
       {
         "id": "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC",
         "label": "DeepSeek-R1 7B（推理·中·纯文本·需约 5.0 GB 显存）"
+      },
+      {
+        "id": "Llama-2-13b-chat-hf-q4f16_1-MLC",
+        "label": "Llama 2 13B（非推理·大·纯文本·需约 11.5 GB 显存）"
+      },
+      {
+        "id": "Llama-3.1-70B-Instruct-q3f16_1-MLC",
+        "label": "Llama 3.1 70B（非推理·超大·纯文本·需约 30.4 GB 显存）"
+      },
+      {
+        "id": "Llama-3-70B-Instruct-q3f16_1-MLC",
+        "label": "Llama 3 70B（非推理·超大·纯文本·需约 30.4 GB 显存）"
       }
     ],
     "temperature": 0.3,

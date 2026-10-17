@@ -25,11 +25,14 @@ const WEBLLM_PATH = join(root, 'node_modules', '@mlc-ai', 'web-llm', 'lib', 'ind
 const UPSTREAM = {
   'Qwen2.5-3B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-3B-Instruct', 'qwen2', 3.1],
   'Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-Coder-3B-Instruct', 'qwen2', 3.1],
+  'Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC': ['mistralai/Ministral-3-3B-Instruct-2512', 'mistral_default', 3.4],
   'Qwen3-1.7B-q4f16_1-MLC': ['Qwen/Qwen3-1.7B', 'chatml', 2.0],
   'Qwen3-4B-q4f16_1-MLC': ['Qwen/Qwen3-4B', 'chatml', 4.0],
   'Qwen3-0.6B-q4f16_1-MLC': ['Qwen/Qwen3-0.6B', 'chatml', 0.6],
   'Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-Coder-7B-Instruct', 'qwen2', 7.6],
+  'Qwen2.5-Coder-7B-Instruct-q4f32_1-MLC': ['Qwen/Qwen2.5-Coder-7B-Instruct', 'qwen2', 7.6],
   'Qwen2.5-7B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-7B-Instruct', 'qwen2', 7.6],
+  'Qwen2.5-7B-Instruct-q4f32_1-MLC': ['Qwen/Qwen2.5-7B-Instruct', 'qwen2', 7.6],
   'Qwen2.5-0.5B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-0.5B-Instruct', 'qwen2', 0.5],
   'Qwen3-8B-q4f16_1-MLC': ['Qwen/Qwen3-8B', 'chatml', 8.2],
   'Qwen3-8B-q4f32_1-MLC': ['Qwen/Qwen3-8B', 'chatml', 8.2],
@@ -41,8 +44,12 @@ const UPSTREAM = {
   'gemma-2-9b-it-q4f16_1-MLC': ['google/gemma-2-9b-it', 'gemma_instruction', 9.2],
   'gemma-2-9b-it-q4f32_1-MLC': ['google/gemma-2-9b-it', 'gemma_instruction', 9.2],
   'Phi-4-mini-instruct-q4f16_1-MLC': ['microsoft/Phi-4-mini-instruct', 'phi-3', 3.8],
+  'Phi-4-mini-instruct-q4f32_1-MLC': ['microsoft/Phi-4-mini-instruct', 'phi-3', 3.8],
   'DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC': ['deepseek-ai/DeepSeek-R1-Distill-Llama-8B', 'llama-3', 8.0],
   'DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC': ['deepseek-ai/DeepSeek-R1-Distill-Qwen-7B', 'deepseek_r1_qwen', 7.6],
+  'Llama-2-13b-chat-hf-q4f16_1-MLC': ['meta-llama/Llama-2-13b-chat-hf', 'llama-2', 13.0],
+  'Llama-3.1-70B-Instruct-q3f16_1-MLC': ['meta-llama/Llama-3.1-70B-Instruct', 'llama-3', 70.6],
+  'Llama-3-70B-Instruct-q3f16_1-MLC': ['meta-llama/Meta-Llama-3-70B-Instruct', 'llama-3', 70.6],
 };
 
 // 仅训练目录（不在网页下拉框中）的超大模型：WebLLM 0.2.86 没有预编译的运行库，

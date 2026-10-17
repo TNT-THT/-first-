@@ -38,12 +38,13 @@ test('仅训练目录的超大模型不在下拉框中，且没有官方运行�
   }
 });
 
-test('下拉框标签都写明了推理显存需求，且下拉框中没有超大模型', () => {
+test('下拉框标签都写明了推理显存需求，超大模型的显存不低于 30 GB', () => {
   for (const m of webConfig.webllm.models) {
     assert.match(m.label, /需约 [\d.]+ GB 显存/, m.id);
   }
   const big = catalog.models.filter((m) => m.size_class === '超大' && m.in_dropdown);
-  assert.equal(big.length, 0, '下拉框中暂无可用的同级中文模型（70B 已移除）');
+  assert.equal(big.length, 2);
+  for (const m of big) assert.ok(m.inference_vram_gb >= 30, m.id);
 });
 
 test('每个条目的运行库、覆盖项与原始地址与 web-llm 记录一致', () => {
