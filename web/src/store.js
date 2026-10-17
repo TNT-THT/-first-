@@ -67,71 +67,22 @@ export function attributeContent(m, currentModel = null) {
   return `【以下回复由其他AI「${name}」给出】\n${m.content}`;
 }
 
-/** 每条消息的固定开销（角色标记等），用于 token 预算。 */
-const MESSAGE_OVERHEAD_TOKENS = 4;
-const CJK_RE = /[\u2e80-\u9fff\uac00-\ud7af\u3000-\u303f\uff00-\uffef]/g;
-
-/**
- * 粗略估算文本的 token 数（不依赖具体分词器，偏保守，宁可多估）：
- * 中日韩字符按约 1.5 token 计，其余约 3 个字符计 1 token。
- * 估算只用于预算，不影响模型实际的分词结果。
- */
-export function estimateTokens(text) {
-  const s = String(text || '');
-  const cjk = (s.match(CJK_RE) || []).length;
-  return Math.ceil(cjk * 1.5) + Math.ceil((s.length - cjk) / 3);
-}
-
-/** 预留给分词误差与模板标记的余量。 */
-export const CONTEXT_SAFETY_TOKENS = 512;
-
-/**
- * 历史消息可用的 token 预算 = 窗口 − 输出预留 − 系统提示词 − 余量。
- * 输出预留取 maxOutputTokens，但不超过窗口的一半，保证小窗口（显存不足降级后）仍有可用空间。
- */
-export function historyTokenBudget({ windowTokens, maxOutputTokens = 0, reservedTokens = 0 }) {
-  const reserve = Math.min(Math.max(0, maxOutputTokens), Math.floor(windowTokens / 2));
-  return Math.max(256, windowTokens - reserve - reservedTokens - CONTEXT_SAFETY_TOKENS);
-}
-
 /**
  * 构造发送给模型的上下文（多轮记忆）。
- * 从最新消息往前取，直到超过条数或预算；保证第一条一定是用户消息，且最新一条一定保留。
- * - 按字符预算（maxChars，默认）：与原来的行为完全一致，用于远程模式。
- * - 按 token 预算（tokenBudget）：用于本机模型。起点按 stableBlock 条对齐，
- *   使历史前缀在多轮对话中保持不变，WebLLM 即可复用已有的 KV 缓存，只预填新消息；
- *   只有超出预算时起点才会前移。
+ * 从最新消息往前取，直到超过条数或字符预算；保证第一条一定是用户消息。
  * currentModel：本次回答所用的模型 id，用于判断历史回复是否来自其他 AI。
  */
-export function buildContext(
-  messages,
-  { maxMessages = 20, maxChars = 40000, tokenBudget = null, stableBlock = 1, currentModel = null } = {},
-) {
-  const useTokens = Number.isFinite(tokenBudget) && tokenBudget > 0;
-  const budget = useTokens ? tokenBudget : maxChars;
-  const eligible = [];
-  for (const m of messages) {
+export function buildContext(messages, { maxMessages = 20, maxChars = 40000, currentModel = null } = {}) {
+  const picked = [];
+  let total = 0;
+  for (let i = messages.length - 1; i >= 0 && picked.length < maxMessages; i--) {
+    const m = messages[i];
     if (m.error || !m.content) continue;
     const content = attributeContent(m, currentModel);
-    const cost = useTokens ? estimateTokens(content) + MESSAGE_OVERHEAD_TOKENS : content.length;
-    eligible.push({ role: m.role, content, cost });
+    if (total + content.length > maxChars && picked.length > 0) break;
+    total += content.length;
+    picked.unshift({ role: m.role, content });
   }
-
-  // 1. 从最新往前取，直到超过条数或预算（至少保留最新一条）
-  let start = eligible.length;
-  let total = 0;
-  for (let i = eligible.length - 1; i >= 0 && eligible.length - i <= maxMessages; i--) {
-    if (total + eligible[i].cost > budget && start < eligible.length) break;
-    total += eligible[i].cost;
-    start = i;
-  }
-
-  // 2. token 模式：起点向后对齐到 stableBlock 的倍数，保证历史前缀稳定（不超过最新一条）
-  if (useTokens && stableBlock > 1 && start > 0 && start < eligible.length) {
-    start = Math.min(eligible.length - 1, Math.ceil(start / stableBlock) * stableBlock);
-  }
-
-  // 3. 第一条必须是用户消息
-  while (start < eligible.length && eligible[start].role !== 'user') start++;
-  return eligible.slice(start).map(({ role, content }) => ({ role, content }));
+  while (picked.length && picked[0].role !== 'user') picked.shift();
+  return picked;
 }

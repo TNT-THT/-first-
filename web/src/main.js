@@ -545,20 +545,13 @@ async function send(rawText) {
   try {
     if (!state.backend.isReady()) {
       paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在加载模型…' });
-      const loaded = await state.backend.ensureReady(({ progress, text: t }) => {
+      await state.backend.ensureReady(({ progress, text: t }) => {
         if (t) progressText = t;
         const pct = Math.round(progress * 100);
         showStatus(`正在加载模型 ${pct}%${t ? `：${t}` : ''}`, { progress });
       });
       refreshIdleStatus();
       refreshModelCacheStatus();
-      if (loaded?.reduced) {
-        // 显存不足时自动改用更小的上下文窗口；只影响本次加载，之后的回答按此窗口计算历史预算
-        showStatus(
-          `显存不足，已将上下文窗口从 ${loaded.requestedTokens.toLocaleString('en-US')} 降为 ${loaded.contextWindowTokens.toLocaleString('en-US')} tokens。`,
-          { error: true },
-        );
-      }
     }
 
     for await (const delta of state.backend.stream({ messages: context, signal: controller.signal })) {
