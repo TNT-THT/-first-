@@ -545,13 +545,15 @@ async function send(rawText) {
   try {
     if (!state.backend.isReady()) {
       paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在加载模型…' });
-      await state.backend.ensureReady(({ progress, text: t }) => {
+      const loaded = await state.backend.ensureReady(({ progress, text: t }) => {
         if (t) progressText = t;
         const pct = Math.round(progress * 100);
         showStatus(`正在加载模型 ${pct}%${t ? `：${t}` : ''}`, { progress });
       });
-      refreshIdleStatus();
+      await refreshIdleStatus();
       refreshModelCacheStatus();
+      // 输出自检的结果（异常、已切换到 fp32 等）
+      if (loaded?.note) showStatus(loaded.note, { error: loaded.healthy === false });
     }
 
     for await (const delta of state.backend.stream({ messages: context, signal: controller.signal })) {
