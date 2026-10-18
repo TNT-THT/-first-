@@ -3,7 +3,30 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { inflateRawSync } from 'node:zlib';
 import { buildZip, crc32 } from '../scripts/lib/zip.mjs';
-import { exclusionReason, selectSiteFiles, MAX_SITE_FILE_BYTES } from '../scripts/site-files.mjs';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { exclusionReason, selectSiteFiles, MAX_SITE_FILE_BYTES, LAUNCHER_DIR, LAUNCHER_FILES } from '../scripts/site-files.mjs';
+
+// 读回中央目录中每个条目的 Unix 权限位（外部属性高 16 位）
+function unixModes(buf) {
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= 0; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  const count = buf.readUInt16LE(eocd + 10);
+  let p = buf.readUInt32LE(eocd + 16);
+  const modes = {};
+  for (let n = 0; n < count; n++) {
+    const nameLen = buf.readUInt16LE(p + 28);
+    const ext = buf.readUInt32LE(p + 38);
+    modes[buf.toString('utf8', p + 46, p + 46 + nameLen)] = ext >>> 16;
+    p += 46 + nameLen;
+  }
+  return modes;
+}
 
 // 读回 zip（只支持本生成器写出的归档），返回 {name: Buffer}
 function readZip(buf) {
@@ -86,4 +109,17 @@ test('排除：环境变量、模型与权重、依赖目录、网站包本身�
   ]);
   assert.deepEqual(included, []);
   assert.equal(excluded.length, 3);
+});
+
+test('启动文件：源文件存在，且中文文件名与权限位正确写入 zip', () => {
+  for (const f of LAUNCHER_FILES) {
+    assert.ok(existsSync(join(LAUNCHER_DIR, f.from)), `缺少启动文件：${f.from}`);
+  }
+  const zip = buildZip(LAUNCHER_FILES.map((f) => ({ name: f.to, data: 'x', mode: f.mode })));
+  const modes = unixModes(zip);
+  assert.equal(modes['使用说明.txt'], 0o100644);
+  assert.equal(modes['start-mac.command'], 0o100755);
+  assert.equal(modes['serve-site.py'], 0o100755);
+  assert.equal(modes['start-windows.bat'], 0o100644);
+  assert.equal(readZip(zip)['使用说明.txt'].toString('utf8'), 'x');
 });
