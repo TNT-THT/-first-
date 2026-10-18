@@ -16,6 +16,7 @@ import {
 } from './model-file.js';
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
+import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
   adaptedModelIds,
   applyParamSuggestion,
@@ -79,6 +80,9 @@ const els = {
   statusProgress: $('#statusProgress'),
   statusBarFill: $('#statusBarFill'),
   exportModelBtn: $('#exportModelBtn'),
+  downloadSiteBtn: $('#downloadSiteBtn'),
+  exportDataBtn: $('#exportDataBtn'),
+  dataSectionList: $('#dataSectionList'),
   importModelBtn: $('#importModelBtn'),
   importModelInput: $('#importModelInput'),
   importTrainBtn: $('#importTrainBtn'),
@@ -839,6 +843,40 @@ function requireAdmin(action) {
   return false;
 }
 
+/** 下载网站包（静态版，构建时生成的 site.zip）。仅管理员。不包含任何 AI 模型。 */
+async function downloadSitePackage() {
+  if (!requireAdmin('下载网站包')) return;
+  els.downloadSiteBtn.disabled = true;
+  try {
+    const res = await fetch('site.zip', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`找不到网站包（HTTP ${res.status}）。请先运行 npm run build 生成。`);
+    const blob = await res.blob();
+    downloadBlob(blob, 'oj-ai-site.zip');
+    showStatus(`已下载网站包（${formatBytes(blob.size)}）。网站包不包含任何 AI 模型。`);
+  } catch (err) {
+    showStatus(`下载网站包失败：${err.message}`, { error: true });
+  } finally {
+    els.downloadSiteBtn.disabled = !isAdmin();
+  }
+}
+
+/** 选择性导出本机数据（会话、管理员说明/参数/更正、知识库、新建AI清单）。仅管理员。 */
+function exportLocalData() {
+  if (!requireAdmin('导出本机数据')) return;
+  const ids = [...els.dataSectionList.querySelectorAll('input.data-section:checked')].map((i) => i.value);
+  if (!ids.length) return showStatus('请至少选择一项要导出的数据。', { error: true });
+  const now = new Date();
+  const data = buildDataExport(localStorage, ids, { now });
+  const exported = Object.keys(data.sections);
+  if (!exported.length) {
+    return showStatus('所选数据在本机没有内容，未生成文件。', { error: true });
+  }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  downloadBlob(blob, dataExportFilename(now));
+  const missingNote = data.missing.length ? `（本机没有：${data.missing.join('、')}）` : '';
+  showStatus(`已导出 ${exported.length} 项本机数据${missingNote}。文件只保存在本机，请妥善保管。`);
+}
+
 async function exportCurrentModel() {
   if (!requireAdmin('导出模型')) return;
   if (state.streaming) return showStatus('请等待当前回复结束后再导出模型。');
@@ -967,6 +1005,22 @@ async function deleteLocalModel(id) {
 }
 
 els.exportModelBtn.addEventListener('click', exportCurrentModel);
+els.downloadSiteBtn.addEventListener('click', downloadSitePackage);
+els.exportDataBtn.addEventListener('click', exportLocalData);
+// 数据分区的复选框（默认全部勾选，管理员可取消）
+els.dataSectionList.replaceChildren(
+  ...DATA_SECTIONS.map((sec) => {
+    const label = document.createElement('label');
+    label.className = 'export-params';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = true;
+    input.value = sec.id;
+    input.className = 'data-section';
+    label.append(input, ` ${sec.label}`);
+    return label;
+  }),
+);
 els.importModelBtn.addEventListener('click', () => {
   if (requireAdmin('导入模型')) els.importModelInput.click();
 });
@@ -1053,6 +1107,11 @@ function refreshRoleUI() {
     els.roleStatus.textContent = '未配置管理员密钥，无法升级权限。';
   }
   els.exportModelBtn.disabled = !admin;
+  els.downloadSiteBtn.disabled = !admin;
+  els.exportDataBtn.disabled = !admin;
+  // 网站包与本机数据导出只用于静态版（远程模式的数据在服务端）
+  els.dataSectionList.closest('.data-export').hidden = MODE !== 'webllm';
+  els.downloadSiteBtn.closest('.site-tools').hidden = MODE !== 'webllm';
   setImportButtons(admin);
   els.modelAdminHint.textContent = admin
     ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'

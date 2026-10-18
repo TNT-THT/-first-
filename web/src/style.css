@@ -573,3 +573,15 @@ body.embed .role-section { display: none !important; }
 }
 .correction-dialog input { width: 100%; box-sizing: border-box; margin-top: 10px; }
 .correction-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+/* 管理员：网站包与本机数据导出 */
+.site-tools,
+.data-export {
+  margin-top: 8px;
+}
+.data-section-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
