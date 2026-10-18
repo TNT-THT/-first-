@@ -60,7 +60,10 @@ The first repository of me,and first of "炸药工厂"
 
 ## 网站包与本机数据导出（仅管理员，静态版）
 
-- **下载网站包**：管理员在“更改权限”面板点“下载网站包”，得到 `oj-ai-site.zip`。内容是网站源码（`web/`）、构建产物（`web/dist/`）、`package.json`、`package-lock.json` 和本 README。**不包含任何 AI 模型**、`.ojmodel` 文件、`training/` 目录、`.env` 或任何密钥。解压后可用任意静态服务器打开 `web/dist/`，或用 `npm ci && npm run build` 重新构建。网站包在 `npm run build` 时自动生成，文件为 `web/dist/site.zip`。
+- **下载网站包**：管理员在“更改权限”面板点“下载网站包”，得到 `oj-ai-site.zip`。内容是网站源码（`web/`）、构建产物（`web/dist/`）、`package.json`、`package-lock.json`、本 README，以及根目录的本机启动文件。**不包含任何 AI 模型**、`.ojmodel` 文件、`training/` 目录、`.env` 或任何密钥。网站包在 `npm run build` 时自动生成，文件为 `web/dist/site.zip`。
+  - **双击打开**：解压后，Windows 双击 `start-windows.bat`（使用系统自带的 PowerShell，无需安装）；macOS 先 `chmod +x start-mac.command` 再双击；Linux 运行 `python3 serve-site.py`。程序只在 127.0.0.1 上启动一个本机服务器并自动打开浏览器，关闭窗口即停止。详见包内的 `使用说明.txt`。
+  - 直接双击 `index.html` 不可行：浏览器会阻止模块脚本和 Worker，必须通过本机服务器打开。
+  - 启动文件的源码在 `scripts/launcher/`。
 - **导出本机数据**：管理员勾选要导出的分区（会话记录、管理员说明/参数/更正、本地知识库、新建AI清单），点“导出所选数据”，得到 `oj-ai-data-日期.json`。文件只保存在你的电脑上，不会上传；它可能包含对话内容，请妥善保管。
   - 永远不导出：管理员标记（`oj-ai.admin`）、服务端令牌（`oj-ai.token`）。
   - 模型权重不属于本机数据。需要模型时，使用上面的“导出当前模型”，一次只导出一个模型。

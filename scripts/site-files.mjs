@@ -12,6 +12,19 @@ export const SITE_DIRS = ['web/'];
 export const SITE_ZIP_NAME = 'web/dist/site.zip';
 export const MAX_SITE_FILE_BYTES = 20 * 1024 * 1024;
 
+/**
+ * 网站包根目录的本机启动文件（双击即可运行）。来源：scripts/launcher/。
+ * mode 为 Unix 权限位，macOS / Linux 的启动脚本需要可执行权限。
+ */
+export const LAUNCHER_DIR = 'scripts/launcher';
+export const LAUNCHER_FILES = [
+  { from: 'start-windows.bat', to: 'start-windows.bat', mode: 0o644 },
+  { from: 'serve-site.ps1', to: 'serve-site.ps1', mode: 0o644 },
+  { from: 'start-mac.command', to: 'start-mac.command', mode: 0o755 },
+  { from: 'serve-site.py', to: 'serve-site.py', mode: 0o755 },
+  { from: '使用说明.txt', to: '使用说明.txt', mode: 0o644 },
+];
+
 const EXCLUDED_SEGMENTS = new Set(['node_modules', '.git']);
 const EXCLUDED_EXTENSIONS = [
   '.ojmodel',

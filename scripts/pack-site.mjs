@@ -2,14 +2,15 @@
 /**
  * 生成网站包 web/dist/site.zip（静态版）。通常在 `npm run build` 之后自动执行。
  *
- * 包含：网站源码（web/）、构建产物（web/dist/）、package.json、package-lock.json、README.md。
+ * 包含：网站源码（web/）、构建产物（web/dist/）、package.json、package-lock.json、README.md，
+ * 以及根目录的本机启动文件（start-windows.bat、start-mac.command 等）。
  * 不包含：任何 AI 模型、.ojmodel、训练数据、.env 与密钥。见 scripts/site-files.mjs。
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildZip } from './lib/zip.mjs';
-import { SITE_ROOT_FILES, SITE_ZIP_NAME, selectSiteFiles } from './site-files.mjs';
+import { LAUNCHER_DIR, LAUNCHER_FILES, SITE_ROOT_FILES, SITE_ZIP_NAME, selectSiteFiles } from './site-files.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,11 +42,15 @@ export function packSite({ projectRoot = root } = {}) {
   }));
   const { included, excluded } = selectSiteFiles(entries);
   const files = included.map((path) => ({ name: path, data: readFileSync(join(projectRoot, path)) }));
+  // 本机启动文件放在包的根目录，双击即可运行（见 scripts/launcher/）
+  for (const f of LAUNCHER_FILES) {
+    files.push({ name: f.to, data: readFileSync(join(projectRoot, LAUNCHER_DIR, f.from)), mode: f.mode });
+  }
   const zip = buildZip(files);
   const outPath = join(projectRoot, SITE_ZIP_NAME);
   mkdirSync(dirname(outPath), { recursive: true });
   writeFileSync(outPath, zip);
-  return { outPath, fileCount: included.length, size: zip.length, excluded };
+  return { outPath, fileCount: files.length, size: zip.length, excluded };
 }
 
 const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];

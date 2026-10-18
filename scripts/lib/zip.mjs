@@ -26,7 +26,7 @@ const DOS_TIME = 0;
 const DOS_DATE = (0 << 9) | (1 << 5) | 1;
 
 /**
- * @param {Array<{name: string, data: Buffer|Uint8Array|string}>} files 相对路径使用 / 分隔
+ * @param {Array<{name: string, data: Buffer|Uint8Array|string, mode?: number}>} files 相对路径使用 / 分隔；mode 为 Unix 权限位（默认 0o644，启动脚本用 0o755）
  * @returns {Buffer}
  */
 export function buildZip(files) {
@@ -36,6 +36,7 @@ export function buildZip(files) {
 
   for (const file of files) {
     const name = Buffer.from(file.name.replace(/\\/g, '/'), 'utf8');
+    const mode = file.mode ?? 0o644;
     const raw = typeof file.data === 'string' ? Buffer.from(file.data, 'utf8') : Buffer.from(file.data);
     const compressed = deflateRawSync(raw, { level: 9 });
     const crc = crc32(raw);
@@ -57,7 +58,7 @@ export function buildZip(files) {
 
     const central = Buffer.alloc(46);
     central.writeUInt32LE(0x02014b50, 0); // 中央目录签名
-    central.writeUInt16LE(20, 4); // 制作版本
+    central.writeUInt16LE(0x031e, 4); // 制作版本：Unix 3.0（以便保存权限位）
     central.writeUInt16LE(20, 6); // 解压所需版本
     central.writeUInt16LE(0x0800, 8);
     central.writeUInt16LE(8, 10);
@@ -71,7 +72,7 @@ export function buildZip(files) {
     central.writeUInt16LE(0, 32); // 注释长度
     central.writeUInt16LE(0, 34); // 磁盘编号
     central.writeUInt16LE(0, 36); // 内部属性
-    central.writeUInt32LE(0, 38); // 外部属性
+    central.writeUInt32LE((0o100000 | mode) * 0x10000 >>> 0, 38); // 外部属性：Unix 权限位在高 16 位
     central.writeUInt32LE(offset, 42); // 本地头的偏移
     centrals.push(Buffer.concat([central, name]));
 
