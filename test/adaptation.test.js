@@ -2,6 +2,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildSolidifyRecords,
+  solidifyJsonl,
   adaptedModelIds,
   buildAdaptationPrompt,
   clearModelAdaptation,
@@ -427,4 +429,42 @@ test('更正：旧版本保存的记录（含 old/next 字段）仍可读取，�
   s.setItem('oj-ai.adapt.v1', JSON.stringify({ models: { m: { notes: [], params: {}, log: [], corrections: [{ id: 'x', old: '旧', next: '新', ts: 1 }] } } }));
   assert.deepEqual(listCorrections('m', { storage: s }).map((c) => c.text), ['新']);
   assert.match(buildCorrectionPrompt('m', { storage: s }), /- 新\n/);
+});
+
+test('固化数据：更正与知识库条目带上触发它的问题后，生成 问题→内容 样本', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：长城建于明朝末年', { allowCorrections: true, question: '长城什么时候建的？', now: 1, storage: s });
+  recordFeedback('m', '回答要包含年份', { question: '长城什么时候建的？', now: 2, storage: s });
+  const { samples, counts } = buildSolidifyRecords('m', { storage: s });
+  assert.deepEqual(samples, [
+    { messages: [{ role: 'user', content: '长城什么时候建的？' }, { role: 'assistant', content: '长城建于明朝末年' }] },
+    { messages: [{ role: 'user', content: '长城什么时候建的？' }, { role: 'assistant', content: '回答要包含年份' }] },
+  ]);
+  assert.deepEqual(counts, { correction: 1, knowledge: 1, skipped: 0, duplicate: 0 });
+});
+
+test('固化数据：没有问题的早期记录计入 skipped，不生成样本', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：甲', { allowCorrections: true, now: 1, storage: s });
+  addKnowledge('m', '乙', { now: 2, storage: s });
+  const { samples, counts } = buildSolidifyRecords('m', { storage: s });
+  assert.equal(samples.length, 0);
+  assert.equal(counts.skipped, 2);
+});
+
+test('固化数据：完全相同的样本只保留一条；JSONL 每行一个样本', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：答案是 42', { allowCorrections: true, question: '生命的意义？', now: 1, storage: s });
+  addKnowledge('m', '答案是 42', { question: '生命的意义？', now: 2, storage: s });
+  const { text, counts } = solidifyJsonl('m', { storage: s });
+  const lines = text.trimEnd().split('\n');
+  assert.equal(lines.length, 1);
+  assert.equal(counts.duplicate, 1);
+  assert.deepEqual(JSON.parse(lines[0]).messages[1], { role: 'assistant', content: '答案是 42' });
+});
+
+test('固化数据：其他模型的记录不混入；没有记录时返回空文本', () => {
+  const s = memoryStorage();
+  recordFeedback('other', '更正：别的', { allowCorrections: true, question: 'q', now: 1, storage: s });
+  assert.equal(solidifyJsonl('m', { storage: s }).text, '');
 });

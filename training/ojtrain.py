@@ -10,6 +10,7 @@
   python3 training/ojtrain.py import-model 本地模型目录    # 或者让流水线自动下载基础模型
   python3 training/ojtrain.py run                        # 一键执行：获取模型 → 整理数据 → 训练 → 转换 → 打包
   python3 training/ojtrain.py status                     # 查看每一步的状态
+  python3 training/ojtrain.py solidify 固化数据.jsonl     # （可选）把网页导出的知识库与更正训练进权重
 
 中断后可以继续：run --from train；重新执行某一步：run --from train --force。
 """
@@ -89,21 +90,80 @@ def cmd_doctor(args):
     return 1 if doctor.has_failure(checks) else 0
 
 
-def cmd_import_data(args):
-    cfg = _load(args)
-    if not os.path.isfile(args.file):
-        raise ValueError(f"找不到文件：{args.file}")
-    ext = os.path.splitext(args.file)[1].lower()
+def _import_data(cfg, src):
+    """把数据文件复制到 training/data/ 并设为 data.raw（会写回配置文件）。"""
+    if not os.path.isfile(src):
+        raise ValueError(f"找不到文件：{src}")
+    ext = os.path.splitext(src)[1].lower()
     if ext not in (".jsonl", ".json", ".csv"):
         raise ValueError("只支持 .jsonl、.json、.csv 文件")
     dest_dir = os.path.join(cfg["_root"], "data")
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, os.path.basename(args.file))
-    if os.path.abspath(args.file) != os.path.abspath(dest):
-        shutil.copyfile(args.file, dest)
+    dest = os.path.join(dest_dir, os.path.basename(src))
+    if os.path.abspath(src) != os.path.abspath(dest):
+        shutil.copyfile(src, dest)
     cfg["data"]["raw"] = os.path.relpath(dest, cfg["_root"]).replace(os.sep, "/")
     cfgmod.write_config(cfg["_path"], cfg)
+    return dest
+
+
+def cmd_import_data(args):
+    cfg = _load(args)
+    dest = _import_data(cfg, args.file)
     print(f"已导入 {dest}，并把 data.raw 设置为 {cfg['data']['raw']}")
+    return 0
+
+
+def check_solidify_file(path):
+    """检查固化数据：每行一个 {"messages": [...]}，以 assistant 结尾，至少有一条样本。返回样本数。"""
+    count = 0
+    with open(path, encoding="utf-8") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as err:
+                raise ValueError(f"第 {lineno} 行不是合法的 JSON：{err}") from err
+            msgs = obj.get("messages") if isinstance(obj, dict) else None
+            if not isinstance(msgs, list) or len(msgs) < 2:
+                raise ValueError(f"第 {lineno} 行缺少 messages（至少一问一答）")
+            if msgs[-1].get("role") != "assistant" or not str(msgs[-1].get("content", "")).strip():
+                raise ValueError(f"第 {lineno} 行必须以非空的 assistant 回答结尾")
+            count += 1
+    if not count:
+        raise ValueError("文件中没有可用的固化样本")
+    return count
+
+
+def cmd_solidify(args):
+    """固化（可选）：把网页导出的知识库与更正训练进权重，生成新的 .ojmodel。
+
+    会重新执行 数据 → 训练 → 转换 → 打包（即使之前已完成），因为数据已经改变。
+    """
+    cfg = _load(args)
+    src = os.path.abspath(args.file)
+    if os.path.splitext(src)[1].lower() != ".jsonl":
+        raise ValueError("固化数据必须是 .jsonl 文件（网页“导出固化数据”生成的文件）")
+    count = check_solidify_file(src)
+    print(f"固化样本 {count} 条，开始训练（需要 GPU，耗时取决于机器）。")
+    _import_data(cfg, src)
+    p = pl.Pipeline(cfg)
+    results = p.run(steps=["fetch"])
+    if results.get("fetch") == "failed":
+        return 1
+    results = p.run(steps=p.plan("data"), force=True)
+    print("\n状态汇总：")
+    for step in pl.STEPS:
+        if step in results:
+            print(f"  {step.ljust(8)} {results[step]}")
+    if "failed" in results.values():
+        return 1
+    if "waiting" in results.values():
+        print("\n流程已暂停。完成上面提示的手动步骤后，运行：python3 training/ojtrain.py run --from " + [s for s, v in results.items() if v == "waiting"][0])
+        return 0
+    print(f"\n固化完成。在网页“导入训练结果”中导入：{p.p['ojmodel']}")
     return 0
 
 
@@ -188,6 +248,8 @@ def build_parser():
     sp.add_argument("file")
     sp = add("import-model", cmd_import_model, "使用本机已有的基础模型目录（不下载）")
     sp.add_argument("dir")
+    sp = add("solidify", cmd_solidify, "（可选）固化：把网页导出的知识库与更正训练进权重，生成新的 .ojmodel")
+    sp.add_argument("file", help="网页“导出固化数据”生成的 .jsonl 文件")
 
     add("fetch", _single("fetch"), "下载或确认基础模型").add_argument("--force", action="store_true")
     add("data", _single("data"), "整理数据，切分训练集和验证集").add_argument("--force", action="store_true")
