@@ -36,6 +36,7 @@ import {
   resetParam,
   sanitizeParams,
   setModelParams,
+  solidifyJsonl,
   suggestParams,
 } from './adaptation.js';
 import {
@@ -448,11 +449,21 @@ function feedbackTarget(session) {
   return last;
 }
 
+/** 某条回复之前最近的用户消息（即它所回答的问题），用于固化训练数据。 */
+function questionBefore(session, target) {
+  const msgs = session?.messages || [];
+  for (let j = msgs.indexOf(target) - 1; j >= 0; j -= 1) {
+    if (msgs[j].role === 'user' && msgs[j].content) return msgs[j].content;
+  }
+  return '';
+}
+
 function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
   if (MODE !== 'webllm' || !isAdmin()) return;
   const last = feedbackTarget(session);
   if (!last) return;
-  const rec = recordFeedback(last.model, text, { allowCorrections });
+  const question = questionBefore(session, last);
+  const rec = recordFeedback(last.model, text, { allowCorrections, question });
   if (!rec) return;
   const parts = [];
   if (rec.note) parts.push('已记录反馈');
@@ -1114,6 +1125,22 @@ function deleteKnowledgeEntry(modelId, entryId) {
   renderAdaptList();
 }
 
+function exportSolidifyData(modelId) {
+  if (!requireAdmin('导出固化数据')) return;
+  const { text, counts } = solidifyJsonl(modelId);
+  const total = counts.correction + counts.knowledge;
+  const summary = `更正 ${counts.correction} 条，知识库 ${counts.knowledge} 条，跳过 ${counts.skipped} 条（无对应问题）`;
+  if (!total) {
+    showStatus(`没有可导出的固化样本：${summary}。`, { error: true });
+    return;
+  }
+  const safe = String(modelId).replace(/[^\w.-]+/g, '_');
+  downloadBlob(new Blob([text], { type: 'application/x-ndjson' }), `solidify-${safe}.jsonl`);
+  showStatus(
+    `已导出 ${total} 条固化样本（${summary}）。在本机运行：python3 training/ojtrain.py solidify <文件>（需要 GPU）。`,
+  );
+}
+
 function clearAdaptation(modelId) {
   if (!requireAdmin('清空 AI 适应记录')) return;
   if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录（包括说明、本地知识库、参数与参数变更记录）？`)) return;
@@ -1276,7 +1303,8 @@ function renderAdaptList() {
     '管理员在 AI 回复之后发送的消息会记为该 AI 的反馈（仅本机，不上传）；' +
     '以“参数：temperature=0.2, maxTokens=800”开头的一行可调整该 AI 的参数；' +
     '反馈同时写入该 AI 的本地知识库（最高优先级，仅本机，不上传，不随导出文件保存）；' +
-    '以“更正：”开头的一行需输入管理员密钥验证后，才会作为该 AI 的底层设定，无条件采纳（仅本机）。';
+    '以“更正：”开头的一行需输入管理员密钥验证后，才会作为该 AI 的底层设定，无条件采纳（仅本机）；' +
+    '“导出固化数据”可把本 AI 的更正与知识库导出为训练文件（可选，需在本机用 training/ojtrain.py solidify 训练，需要 GPU；只包含记录了对应问题的条目）。';
   const ids = adaptedModelIds();
   if (!ids.length) {
     const p = document.createElement('p');
@@ -1300,7 +1328,13 @@ function renderAdaptList() {
     clear.dataset.action = 'adapt-clear';
     clear.dataset.id = id;
     clear.textContent = '清空';
-    head.append(name, clear);
+    const solidify = document.createElement('button');
+    solidify.type = 'button';
+    solidify.className = 'btn ghost small';
+    solidify.dataset.action = 'adapt-solidify';
+    solidify.dataset.id = id;
+    solidify.textContent = '导出固化数据';
+    head.append(name, solidify, clear);
     list.append(head);
     for (const n of notes) {
       const row = document.createElement('div');
@@ -1654,6 +1688,7 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
   if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
   if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
+  if (btn && btn.dataset.action === 'adapt-solidify') return exportSolidifyData(btn.dataset.id);
   if (btn && btn.dataset.action === 'kb-delete') return deleteKnowledgeEntry(btn.dataset.id, btn.dataset.entry);
   if (btn && btn.dataset.action === 'correction-delete') return deleteCorrection(btn.dataset.id, btn.dataset.entry);
   if (btn && btn.dataset.action === 'adapt-reset') return revertParam(btn.dataset.id, btn.dataset.key);

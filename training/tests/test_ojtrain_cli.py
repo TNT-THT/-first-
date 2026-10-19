@@ -141,3 +141,59 @@ class CliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SolidifyTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+        self.cfg = os.path.join(self.root, "config.json")
+        run(["init", "--config", self.cfg, "--name", "solid"])
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, name, text):
+        path = os.path.join(self.root, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+
+    def test_check_accepts_valid_samples_and_counts_them(self):
+        good = json.dumps({"messages": [{"role": "user", "content": "问"}, {"role": "assistant", "content": "答"}]}, ensure_ascii=False)
+        path = self._write("ok.jsonl", good + "\n\n" + good + "\n")
+        self.assertEqual(ojtrain.check_solidify_file(path), 2)
+
+    def test_check_rejects_bad_files(self):
+        cases = {
+            "notjson.jsonl": "not json\n",
+            "noassistant.jsonl": json.dumps({"messages": [{"role": "user", "content": "问"}]}) + "\n",
+            "endsuser.jsonl": json.dumps({"messages": [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]}) + "\n",
+            "empty.jsonl": "\n",
+        }
+        for name, text in cases.items():
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    ojtrain.check_solidify_file(self._write(name, text))
+
+    def test_solidify_refuses_non_jsonl_before_touching_anything(self):
+        path = self._write("data.csv", "a,b\n")
+        code, _ = run(["solidify", path, "--config", self.cfg])
+        self.assertEqual(code, 1)
+        before = ojtrain.cfgmod.load_config(self.cfg)["data"]["raw"]
+        self.assertEqual(before, "data/raw.jsonl")
+        self.assertEqual(ojtrain.cfgmod.load_config(self.cfg)["data"]["raw"], before, "非 .jsonl 时配置不应被修改")
+
+    def test_import_data_sets_raw_for_solidify(self):
+        good = json.dumps({"messages": [{"role": "user", "content": "问"}, {"role": "assistant", "content": "答"}]}, ensure_ascii=False)
+        path = self._write("solidify-x.jsonl", good + "\n")
+        cfg = ojtrain.cfgmod.load_config(self.cfg)
+        dest = ojtrain._import_data(cfg, path)
+        self.assertTrue(os.path.isfile(dest))
+        reloaded = ojtrain.cfgmod.load_config(self.cfg)
+        self.assertEqual(reloaded["data"]["raw"], "data/solidify-x.jsonl")
+
+
+if __name__ == "__main__":
+    unittest.main()
+

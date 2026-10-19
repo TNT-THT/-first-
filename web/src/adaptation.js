@@ -81,7 +81,11 @@ function writeKb(data, storage) {
  * 把一条管理员信息写入某个模型的本地知识库（同步自管理员反馈）。
  * 同一模型内完全相同的文字只保存一次；超过上限时丢弃最旧的。返回新条目，未写入时返回 null。
  */
-export function addKnowledge(modelId, text, { storage = globalThis.localStorage, now = Date.now() } = {}) {
+export function addKnowledge(
+  modelId,
+  text,
+  { storage = globalThis.localStorage, now = Date.now(), question = '' } = {},
+) {
   const body = String(text || '').trim().slice(0, MAX_NOTE_CHARS);
   if (!modelId || !body) return null;
   const data = readKb(storage);
@@ -89,7 +93,7 @@ export function addKnowledge(modelId, text, { storage = globalThis.localStorage,
     ? data.models[modelId]
     : { entries: [] };
   if (entry.entries.some((e) => e.text === body)) return null;
-  const item = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now };
+  const item = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now, ...questionField(question) };
   entry.entries = [...entry.entries, item].slice(-MAX_KB_ENTRIES);
   data.models[modelId] = entry;
   writeKb(data, storage);
@@ -204,7 +208,7 @@ function stripCorrectionLines(text) {
 export function recordFeedback(
   modelId,
   text,
-  { storage = globalThis.localStorage, now = Date.now(), allowCorrections = false } = {},
+  { storage = globalThis.localStorage, now = Date.now(), allowCorrections = false, question = '' } = {},
 ) {
   if (!modelId) return null;
   const params = parseFeedbackParams(text);
@@ -220,7 +224,12 @@ export function recordFeedback(
     const known = new Set(entry.corrections.map((c) => c.text));
     const items = corrections
       .filter((c) => !known.has(c.text))
-      .map((c) => ({ id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: c.text, ts: now }));
+      .map((c) => ({
+        id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+        text: c.text,
+        ts: now,
+        ...questionField(question),
+      }));
     entry.corrections = [...entry.corrections, ...items].slice(-MAX_CORRECTIONS_PER_MODEL);
     result.corrections = items;
   }
@@ -239,7 +248,7 @@ export function recordFeedback(
     entry.notes = [...entry.notes, note].slice(-MAX_NOTES_PER_MODEL);
     result.note = note;
     // 同步纳入本地知识库（最高优先级）；附加说明本身保持不变
-    result.kb = addKnowledge(modelId, body, { storage, now });
+    result.kb = addKnowledge(modelId, body, { storage, now, question });
   }
   writeAll(data, storage);
   return result;
@@ -281,7 +290,7 @@ export function removeNote(modelId, noteId, { storage = globalThis.localStorage 
 export function listCorrections(modelId, { storage = globalThis.localStorage } = {}) {
   const entry = readAll(storage).models[modelId];
   if (!entry || !Array.isArray(entry.corrections)) return [];
-  return entry.corrections.map((c) => ({ id: c.id, text: c.text ?? c.next, ts: c.ts }));
+  return entry.corrections.map((c) => ({ id: c.id, text: c.text ?? c.next, ts: c.ts, question: c.question || '' }));
 }
 
 /** 删除一条更正。删除后若该模型没有任何记录，则移除该模型的记录。 */
@@ -320,6 +329,52 @@ export function buildAdaptationPrompt(modelId, { storage = globalThis.localStora
     picked.unshift(line);
   }
   return `\n\n【管理员反馈（仅本机记录，最高优先级，请采纳）】\n${picked.join('\n')}\n${GUARD}`;
+}
+
+/** 只有非空问题才写入记录（旧记录没有该字段）。 */
+function questionField(question) {
+  const q = String(question || '').trim().slice(0, MAX_NOTE_CHARS);
+  return q ? { question: q } : {};
+}
+
+/**
+ * 固化训练数据（可选，仅本机，供 training/ojtrain.py solidify 使用）。
+ * 每条知识库条目与每条更正，若记录了触发它的用户问题，则生成一条样本：问题 → 内容。
+ * 没有问题的早期记录无法构成样本，计入 skipped。完全相同的样本只保留一条。
+ * 返回 {samples, counts}；counts = {correction, knowledge, skipped, duplicate}。
+ */
+export function buildSolidifyRecords(modelId, { storage = globalThis.localStorage } = {}) {
+  const items = [
+    ...listCorrections(modelId, { storage }).map((c) => ({ kind: 'correction', ...c })),
+    ...listKnowledge(modelId, { storage }).map((k) => ({ kind: 'knowledge', ...k })),
+  ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  const counts = { correction: 0, knowledge: 0, skipped: 0, duplicate: 0 };
+  const seen = new Set();
+  const samples = [];
+  for (const it of items) {
+    const q = String(it.question || '').trim();
+    const a = String(it.text || '').trim();
+    if (!q || !a) {
+      counts.skipped += 1;
+      continue;
+    }
+    const key = `${q}\u0000${a}`;
+    if (seen.has(key)) {
+      counts.duplicate += 1;
+      continue;
+    }
+    seen.add(key);
+    samples.push({ messages: [{ role: 'user', content: q }, { role: 'assistant', content: a }] });
+    counts[it.kind] += 1;
+  }
+  return { samples, counts };
+}
+
+/** 固化训练数据的 JSONL 文本（每行一个 {messages} 样本）。 */
+export function solidifyJsonl(modelId, { storage = globalThis.localStorage } = {}) {
+  const { samples, counts } = buildSolidifyRecords(modelId, { storage });
+  const text = samples.map((s) => JSON.stringify(s)).join('\n') + (samples.length ? '\n' : '');
+  return { text, counts };
 }
 
 /**
