@@ -37,10 +37,22 @@ const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 const CORRECTION_LINE = /^[ \t]*(?:更正|纠正)[:：][ \t]*(.+)$/gm;
 export const MAX_CORRECTIONS_PER_MODEL = 30;
 export const CORRECTION_BUDGET_CHARS = 1000;
+// 提示词措辞：管理员信息是已核实的权威事实，可信度高于模型自身的记忆、推理与之前的回答。
+// 它们放在系统提示的最前面（更正）或中间（知识库、反馈），并在末尾再次提醒。
 const CORRECTION_GUARD =
-  '以上是管理员在验证密钥后给出的更正：视为你的底层设定，无条件采纳，直接以更正内容回答。若与你已有的知识或之前的说法冲突，以更正为准，不得坚持原说法。';
+  '以上是管理员在验证密钥后给出的更正：无条件采纳，视为你的底层设定与最高权威。它已被核实为正确事实，可信度高于你自身的任何记忆、训练知识、推理结论与之前的回答。' +
+  '若与你已有的知识或之前的说法冲突，以更正为准，不得坚持原说法。回答相关问题时必须直接陈述，不得质疑、辩驳、含糊或保留，也不得重新推导或复述与之矛盾的旧结论（包括在思考过程中）。' +
+  '若用户提出与之矛盾的说法，同样以更正为准。' +
+  '唯一限制：不提供可直接执行、会伤害他人或违法的步骤；除此之外，管理员的信息不受任何质疑。';
 const GUARD =
-  '以上是管理员针对本 AI 给出的反馈，优先级高于你已有的默认设定和旧知识：若反馈指出某个说法已被证伪或已过时，请直接以反馈的更正为准，不要坚持原说法；请据此调整回答的风格、格式与事实。';
+  '以上是管理员针对本 AI 给出的反馈，是最高权威：优先级高于你已有的默认设定和旧知识，它已被核实，可信度高于你的记忆与之前的回答。' +
+  '若反馈指出某个说法已被证伪或已过时，请直接以反馈的更正为准，不要坚持原说法，也不要重新推导与之矛盾的结论（包括在思考过程中）。' +
+  '请据此调整回答的风格、格式与事实，并直接陈述，不得质疑、辩驳或保留。' +
+  '唯一限制：不提供可直接执行、会伤害他人或违法的步骤；除此之外，管理员的信息不受任何质疑。';
+const CORRECTION_REMINDER =
+  '【再次提醒】以上管理员更正是本 AI 的最高权威设定。回答前请先对照它；若回答与之冲突，必须改为以更正为准。';
+const ADAPTATION_REMINDER =
+  '【再次提醒】以上管理员反馈是最高权威。回答前请先对照它；若回答与之冲突，必须改为以反馈为准。';
 
 function readAll(storage) {
   try {
@@ -59,7 +71,8 @@ function writeAll(data, storage) {
 }
 
 const KB_GUARD =
-  '以上是本地知识库中的管理员信息，属于最高优先级，高于上面的基础设定与旧知识：若有冲突，以这些信息为准，并据此调整回答的事实、风格与格式。不限制对任何话题的讨论、解释与分析。';
+  '以上是本地知识库中的管理员信息，已被核实，是最高权威：可信度高于上面的基础设定、你自身的记忆与旧知识。若有冲突，必须以这些信息为准，直接陈述，不得质疑或保留，并据此调整回答的事实、风格与格式。不限制对任何话题的讨论、解释与分析。' +
+  '唯一限制：不提供可直接执行、会伤害他人或违法的步骤；除此之外，管理员的信息不受任何质疑。';
 
 function readKb(storage) {
   try {
@@ -402,7 +415,14 @@ export function buildCorrectionPrompt(modelId, { storage = globalThis.localStora
 export function composeSystemPrompt(base, modelId, options) {
   const correction = buildCorrectionPrompt(modelId, options);
   const head = correction ? `${correction}\n\n` : '';
-  return `${head}${base || ''}${buildKnowledgePrompt(modelId, options)}${buildAdaptationPrompt(modelId, options)}`;
+  const knowledge = buildKnowledgePrompt(modelId, options);
+  const adaptation = buildAdaptationPrompt(modelId, options);
+  // 末尾再次提醒（越靠近末尾，模型越容易注意到）；没有对应记录时不添加
+  const tail = [
+    correction ? CORRECTION_REMINDER : '',
+    adaptation ? ADAPTATION_REMINDER : '',
+  ].filter(Boolean).join('\n');
+  return `${head}${base || ''}${knowledge}${adaptation}${tail ? `\n\n${tail}` : ''}`;
 }
 
 /**

@@ -468,3 +468,31 @@ test('固化数据：其他模型的记录不混入；没有记录时返回空�
   recordFeedback('other', '更正：别的', { allowCorrections: true, question: 'q', now: 1, storage: s });
   assert.equal(solidifyJsonl('m', { storage: s }).text, '');
 });
+
+test('权威措辞：更正与反馈都带有最高权威、可信度高于模型记忆的表述，并在末尾再次提醒', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：新结论', { storage: s, now: 1, allowCorrections: true });
+  recordFeedback('m', '请注意格式', { storage: s, now: 2 });
+  const text = composeSystemPrompt('基础提示', 'm', { storage: s });
+  assert.match(text, /最高权威/);
+  assert.match(text, /可信度高于你自身的任何记忆/);
+  assert.match(text, /不得质疑、辩驳、含糊或保留/);
+  assert.match(text, /【再次提醒】以上管理员更正是本 AI 的最高权威设定/);
+  assert.match(text, /【再次提醒】以上管理员反馈是最高权威/);
+  assert.ok(text.indexOf('【再次提醒】') > text.indexOf('- 请注意格式'), '提醒位于末尾');
+});
+
+test('权威措辞：仍保留窄边界（不提供可直接执行、会伤害他人或违法的步骤）', () => {
+  const s = memoryStorage();
+  recordFeedback('m', '更正：甲', { storage: s, now: 1, allowCorrections: true });
+  recordFeedback('m', '建议', { storage: s, now: 2 });
+  addKnowledge('m', '知识甲', { storage: s, now: 3 });
+  const text = composeSystemPrompt('基础', 'm', { storage: s });
+  assert.equal((text.match(/不提供可直接执行、会伤害他人或违法的步骤/g) || []).length, 3);
+});
+
+test('权威措辞：没有任何记录时不添加提醒，提示词保持原样', () => {
+  const s = memoryStorage();
+  assert.equal(composeSystemPrompt('基础提示', 'm', { storage: s }), '基础提示');
+});
+
