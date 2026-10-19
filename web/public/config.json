@@ -143,8 +143,10 @@
     ],
     "temperature": 0.3,
     "maxTokens": 16384,
-    "contextChars": 5000,
-    "maxMessages": 10,
+    "contextWindowTokens": 16384,
+    "thinkingWindowTokens": 4096,
+    "contextChars": 8000,
+    "maxMessages": 15,
     "extraRecords": [
       {
         "model": "https://huggingface.co/mlc-ai/DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",

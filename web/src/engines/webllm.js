@@ -6,6 +6,7 @@ import { buildModelList } from '../model-source.js';
 import { decideVariant, diagnoseOutput, fp32VariantOf, HEALTH_MAX_TOKENS, HEALTH_PROMPT } from './health.js';
 import { createSerialQueue, gpuResetError, isGpuResetError } from './lifecycle.js';
 import { thinkingRequestOptions } from '../reasoning.js';
+import { THINK_CLOSE_TEXT, thinkingMeter } from '../budget.js';
 
 export const WEBGPU_MISSING =
   '当前浏览器不支持 WebGPU，无法运行本地模型。请使用最新版 Chrome 或 Edge（桌面端），并确认显卡驱动正常。';
@@ -13,6 +14,8 @@ export const WEBGPU_MISSING =
 let engine = null;
 let worker = null;
 let loadedId = null;
+// 当前引擎的 context_window_size（上下文窗口 + 推理模型的思考窗口）；窗口变化需要重新加载
+let loadedCtx = null;
 // 当前进行中的生成（流式输出结束时才 resolve）。加载模型前必须等待它结束，否则 GPU 资源可能被提前销毁。
 let inflight = null;
 // 所有加载请求排队执行，避免两次 reload 交错。
@@ -42,6 +45,10 @@ export function getLoadedModelId() {
   return loadedId;
 }
 
+export function getLoadedContextWindow() {
+  return loadedCtx;
+}
+
 /**
  * 当前生效的完整模型记录（内置列表 + 自定义记录 + 镜像设置），用于导出 / 导入 / 缓存状态检查。
  * 动态导入推理库，避免首屏变重。
@@ -57,6 +64,7 @@ function resetEngine() {
   worker = null;
   engine = null;
   loadedId = null;
+  loadedCtx = null;
   try {
     w?.terminate();
   } catch {
@@ -69,7 +77,7 @@ export function loadWebLLMEngine(modelId, onProgress, opts = {}) {
   return enqueueLoad(() => doLoadWebLLMEngine(modelId, onProgress, opts));
 }
 
-async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecords } = {}) {
+async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecords, contextWindowSize } = {}) {
   // 先等待进行中的生成结束（如有），再重新加载，避免 unload 时销毁仍在读回的 GPU 缓冲区
   if (inflight) {
     engine?.interruptGenerate().catch(() => {});
@@ -88,14 +96,17 @@ async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecor
   };
 
   loadedId = null;
+  loadedCtx = null;
+  // 运行时覆盖上下文窗口（KV 缓存大小）；会覆盖模型自带的 context_window_size
+  const chatOpts = contextWindowSize ? { context_window_size: contextWindowSize } : undefined;
   try {
     if (!engine) {
       worker = new Worker(new URL('../llm-worker.js', import.meta.url), { type: 'module' });
-      engine = await CreateWebWorkerMLCEngine(worker, modelId, { initProgressCallback: progress, appConfig });
+      engine = await CreateWebWorkerMLCEngine(worker, modelId, { initProgressCallback: progress, appConfig }, chatOpts);
     } else {
       engine.setInitProgressCallback(progress);
       engine.setAppConfig(appConfig);
-      await engine.reload(modelId);
+      await engine.reload(modelId, chatOpts);
     }
   } catch (err) {
     if (isGpuResetError(err)) {
@@ -105,6 +116,7 @@ async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecor
     throw err;
   }
   loadedId = modelId;
+  loadedCtx = contextWindowSize ?? null;
 }
 
 /** 用固定提示词做一次确定性短输出，返回 {sample, reason}；reason 为 null 表示正常。 */
@@ -159,6 +171,7 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
 
   await loadWebLLMEngine(decision.to, onProgress, opts);
   loadedId = modelId; // 对外仍是用户选中的模型
+  loadedCtx = opts.contextWindowSize ?? null;
   let second;
   try {
     second = await runHealthCheck();
@@ -174,7 +187,19 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
 /**
  * 流式生成。supportsThinking / thinkingEnabled 决定是否关闭推理模型的思考（见 reasoning.js）。
  */
-export async function* streamWebLLM({ messages, signal, temperature, maxTokens, supportsThinking = false, thinkingEnabled = true }) {
+/**
+ * 流式生成。thinkingBudget 为思考预算（块数，近似 token）：思考超过预算仍未结束时，中断生成，
+ * 补上思考结束标记，并返回 {forced: true, thinking, thinkingTokens}，由调用方直接发起回答请求。
+ */
+export async function* streamWebLLM({
+  messages,
+  signal,
+  temperature,
+  maxTokens,
+  supportsThinking = false,
+  thinkingEnabled = true,
+  thinkingBudget = null,
+}) {
   if (!engine || !loadedId) throw new Error('模型尚未加载');
   if (signal?.aborted) return;
   const current = engine;
@@ -197,11 +222,18 @@ export async function* streamWebLLM({ messages, signal, temperature, maxTokens, 
     });
     // 用户停止后仍把剩余的流读完（不再输出）：引擎会在下一个 token 前停止，
     // 读完才表示本次生成的 GPU 工作已经结束，之后才允许重新加载模型。
+    const meter = thinkingMeter(thinkingBudget);
     for await (const chunk of stream) {
-      if (signal?.aborted) continue;
+      if (meter.cut || signal?.aborted) continue;
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) yield delta;
+      if (meter.step(delta)) {
+        // 思考预算用完：中断生成（之后仍读完剩余的流），并补上思考结束标记
+        current.interruptGenerate().catch(() => {});
+        yield THINK_CLOSE_TEXT;
+      }
     }
+    return { forced: meter.cut, thinking: meter.thinking(), thinkingTokens: meter.tokens };
   } catch (err) {
     if (isGpuResetError(err)) {
       resetEngine();
