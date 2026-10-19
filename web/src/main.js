@@ -1525,7 +1525,11 @@ function renderAdaptList() {
     solidify.dataset.action = 'adapt-solidify';
     solidify.dataset.id = id;
     solidify.textContent = '导出固化数据';
-    head.append(name, solidify, clear);
+    // 多个按钮放进同一个容器，避免它们在网格的同一单元格中重叠
+    const actions = document.createElement('div');
+    actions.className = 'local-actions';
+    actions.append(solidify, clear);
+    head.append(name, actions);
     list.append(head);
     for (const n of notes) {
       const row = document.createElement('div');
