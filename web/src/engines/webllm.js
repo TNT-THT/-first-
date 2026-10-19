@@ -5,6 +5,7 @@
 import { buildModelList } from '../model-source.js';
 import { decideVariant, diagnoseOutput, fp32VariantOf, HEALTH_MAX_TOKENS, HEALTH_PROMPT } from './health.js';
 import { createSerialQueue, gpuResetError, isGpuResetError } from './lifecycle.js';
+import { thinkingRequestOptions } from '../reasoning.js';
 
 export const WEBGPU_MISSING =
   '当前浏览器不支持 WebGPU，无法运行本地模型。请使用最新版 Chrome 或 Edge（桌面端），并确认显卡驱动正常。';
@@ -170,7 +171,10 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
     : { variant: 'fp32', healthy: true, note: '检测到 fp16 输出异常，已自动切换到 fp32 版本' };
 }
 
-export async function* streamWebLLM({ messages, signal, temperature, maxTokens }) {
+/**
+ * 流式生成。supportsThinking / thinkingEnabled 决定是否关闭推理模型的思考（见 reasoning.js）。
+ */
+export async function* streamWebLLM({ messages, signal, temperature, maxTokens, supportsThinking = false, thinkingEnabled = true }) {
   if (!engine || !loadedId) throw new Error('模型尚未加载');
   if (signal?.aborted) return;
   const current = engine;
@@ -189,6 +193,7 @@ export async function* streamWebLLM({ messages, signal, temperature, maxTokens }
       stream: true,
       temperature,
       max_tokens: maxTokens,
+      ...thinkingRequestOptions({ supportsThinking, enabled: thinkingEnabled }),
     });
     // 用户停止后仍把剩余的流读完（不再输出）：引擎会在下一个 token 前停止，
     // 读完才表示本次生成的 GPU 工作已经结束，之后才允许重新加载模型。

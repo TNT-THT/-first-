@@ -2,7 +2,8 @@ import 'katex/dist/katex.min.css';
 import './style.css';
 import DOMPurify from 'dompurify';
 import { renderMarkdown } from './markdown.js';
-import { hasThinking, stripThinking } from './think.js';
+import { hasThinking, splitThinking } from './think.js';
+import { truncateThinking } from './reasoning.js';
 import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
@@ -41,11 +42,14 @@ import {
   buildContext,
   createSession,
   deleteSession,
+  expandVisibleStart,
   getSession,
+  initialVisibleStart,
   loadStore,
   MAX_MESSAGES_PER_SESSION,
   saveStore,
   titleFrom,
+  UNFOLD_STEP,
 } from './store.js';
 
 // 构建模式：默认 'webllm'（纯静态，浏览器内推理）；VITE_ENGINE=remote 时使用自托管服务端
@@ -75,6 +79,8 @@ const els = {
   input: $('#input'),
   sendBtn: $('#sendBtn'),
   stopBtn: $('#stopBtn'),
+  thinkToggleLabel: $('#thinkToggleLabel'),
+  thinkToggle: $('#thinkToggle'),
   statusBar: $('#statusBar'),
   statusText: $('#statusText'),
   statusProgress: $('#statusProgress'),
@@ -128,6 +134,8 @@ const state = {
   backend: null,
   streaming: null, // { controller, session, assistant }
   clearArmed: false,
+  foldSessionId: null, // 当前折叠状态对应的会话
+  visibleStart: 0, // 历史会话中第一条已渲染消息的下标（之前的消息折叠）
 };
 
 // ---------- 工具函数 ----------
@@ -206,18 +214,67 @@ function typingHtml(label) {
   return `<span class="typing" aria-label="正在生成"><i></i><i></i><i></i></span><span class="typing-text">${label}</span>`;
 }
 
+/**
+ * 思考过程（推理模型）：可折叠的小节，位于回答之上。
+ * 思考进行中默认展开，回答开始后自动收起；用户手动点开或收起后不再自动变化。
+ * 同一个节点在流式输出中反复复用，所以用户的展开状态不会被重绘打断。
+ */
+function paintThinking(bubble, thinking, { live = false } = {}) {
+  let box = bubble.querySelector(':scope > details.thinking');
+  if (!thinking) {
+    box?.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement('details');
+    box.className = 'thinking';
+    const summary = document.createElement('summary');
+    const body = document.createElement('div');
+    body.className = 'thinking-body';
+    box.append(summary, body);
+    box.addEventListener('click', (e) => {
+      if (e.target.closest('summary')) box.dataset.manual = '1';
+    });
+    bubble.prepend(box);
+  }
+  box.querySelector('.thinking-body').textContent = thinking;
+  box.querySelector('summary').textContent = live
+    ? `思考中…（已写 ${thinking.length} 字）`
+    : `思考过程（${thinking.length} 字，点击展开或收起）`;
+  box.classList.toggle('live', live);
+  if (!box.dataset.manual) box.open = live;
+}
+
 function paintAssistant(bubble, msg, { streaming = false, label = '正在思考…' } = {}) {
   bubble.classList.toggle('error', !!msg.error);
   bubble.classList.toggle('streaming', streaming);
-  // 推理模型的思考过程不展示，只显示最终回答
-  const visible = stripThinking(msg.content);
-  if (!visible && streaming) {
-    bubble.innerHTML = typingHtml(label);
+  // 推理模型：思考过程单独展示（可折叠），回答正常渲染。思考过程不作为上下文发送给模型。
+  const parts = splitThinking(msg.content);
+  const thinking = parts.thinking || msg.thinking || '';
+  const thinkingLive = streaming && parts.thinkingOpen;
+  paintThinking(bubble, thinking, { live: thinkingLive });
+
+  let answerEl = bubble.querySelector(':scope > .answer');
+  if (!answerEl) {
+    answerEl = document.createElement('div');
+    answerEl.className = 'answer';
+    bubble.appendChild(answerEl);
+  }
+  if (!parts.answer && streaming) {
+    const hint = thinkingLive ? '正在思考…' : thinking ? '正在回答…' : label;
+    answerEl.innerHTML = typingHtml(hint);
     return;
   }
-  let html = sanitize(renderMarkdown(visible));
+  let html = sanitize(renderMarkdown(parts.answer));
   if (msg.stopped) html += '<p class="note">（已停止生成）</p>';
-  bubble.innerHTML = html;
+  answerEl.innerHTML = html;
+}
+
+/** 回复结束：拆分思考过程与回答。历史记录只保存回答，以及（截断后的）思考过程用于回看。 */
+function finalizeAssistant(msg) {
+  const parts = splitThinking(msg.content);
+  msg.content = parts.answer;
+  if (parts.thinking) msg.thinking = truncateThinking(parts.thinking);
 }
 
 function createMessageEl(msg, { streaming = false } = {}) {
@@ -249,10 +306,57 @@ function attachRegen(afterEl) {
   afterEl.after(bar);
 }
 
+/** 历史会话的折叠条：较早的消息未渲染，点击再展开（分批渲染，避免一次性加载很慢）。 */
+function buildFoldBar() {
+  const bar = document.createElement('div');
+  bar.className = 'fold-bar';
+  bar.innerHTML =
+    '<span class="fold-text"></span>' +
+    '<button type="button" class="btn ghost small" data-fold="more"></button>' +
+    '<button type="button" class="btn ghost small" data-fold="all">全部展开</button>';
+  bar.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-fold]');
+    if (!btn) return;
+    unfoldHistory(btn.dataset.fold === 'all' ? Infinity : UNFOLD_STEP);
+  });
+  return bar;
+}
+
+function updateFoldBar() {
+  const bar = els.messages.querySelector('.fold-bar');
+  if (!bar) return;
+  const hidden = state.visibleStart;
+  if (hidden <= 0) {
+    bar.remove();
+    return;
+  }
+  bar.querySelector('.fold-text').textContent = `较早的 ${hidden} 条消息已折叠，以加快加载。`;
+  bar.querySelector('[data-fold="more"]').textContent = `展开更早的 ${Math.min(UNFOLD_STEP, hidden)} 条`;
+  bar.querySelector('[data-fold="all"]').hidden = hidden <= UNFOLD_STEP;
+}
+
+/** 展开更早的消息：只插入新增的节点，并保持当前阅读位置不变。 */
+function unfoldHistory(step) {
+  const session = activeSession();
+  const bar = els.messages.querySelector('.fold-bar');
+  if (!session || !bar || state.visibleStart <= 0) return;
+  const oldStart = state.visibleStart;
+  const newStart = expandVisibleStart(oldStart, step);
+  const heightBefore = els.messages.scrollHeight;
+  const frag = document.createDocumentFragment();
+  for (let i = newStart; i < oldStart; i++) frag.appendChild(createMessageEl(session.messages[i]).wrap);
+  bar.after(frag);
+  state.visibleStart = newStart;
+  updateFoldBar();
+  els.messages.scrollTop += els.messages.scrollHeight - heightBefore;
+}
+
 function renderMessages() {
   const session = activeSession();
   els.messages.replaceChildren();
   if (!session || session.messages.length === 0) {
+    state.foldSessionId = null;
+    state.visibleStart = 0;
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.innerHTML =
@@ -260,7 +364,17 @@ function renderMessages() {
       '<p class="muted">可以粘贴题面、报错信息或你的代码，我会给出思路、复杂度分析和示例代码。</p>';
     els.messages.appendChild(empty);
   } else {
-    for (const m of session.messages) els.messages.appendChild(createMessageEl(m).wrap);
+    const total = session.messages.length;
+    // 切换到另一个会话时，重新只渲染最近的消息；同一会话内保留用户已展开的范围
+    if (state.foldSessionId !== session.id || state.visibleStart > total) {
+      state.foldSessionId = session.id;
+      state.visibleStart = initialVisibleStart(total);
+    }
+    if (state.visibleStart > 0) els.messages.appendChild(buildFoldBar());
+    for (let i = state.visibleStart; i < total; i++) {
+      els.messages.appendChild(createMessageEl(session.messages[i]).wrap);
+    }
+    updateFoldBar();
   }
   scrollToBottom(true);
 }
@@ -567,7 +681,7 @@ async function send(rawText) {
     if (frame) cancelAnimationFrame(frame);
     if (controller.signal.aborted) assistantMsg.stopped = true;
     const raw = assistantMsg.content;
-    assistantMsg.content = stripThinking(raw);
+    finalizeAssistant(assistantMsg);
     if (!assistantMsg.content && !assistantMsg.stopped) {
       assistantMsg.content = hasThinking(raw)
         ? '（模型只输出了思考过程，没有给出答案。可以重试，或换一个模型。）'
@@ -592,13 +706,14 @@ async function send(rawText) {
       return;
     } else {
       assistantMsg.content = friendlyError(err, progressText);
+      assistantMsg.thinking = '';
       assistantMsg.error = true;
       paintAssistant(bubble, assistantMsg);
       if (state.backend.mode === 'webllm') refreshIdleStatus();
     }
   } finally {
-    // 历史记录只保存最终回答，不保存思考过程
-    assistantMsg.content = stripThinking(assistantMsg.content);
+    // 历史记录只保存最终回答（思考过程另存，供回看，不发送给模型）
+    finalizeAssistant(assistantMsg);
     state.streaming = null;
     setBusy(false);
     session.updatedAt = Date.now();
@@ -807,6 +922,13 @@ function makeOption(value, label) {
 }
 
 /** 重建下拉框：官方模型在前，“新建AI”分组在后（仅本浏览器可用，不上传云端）。 */
+/** 思考模式开关：仅推理模型显示；偏好在本浏览器中保存（默认开启）。 */
+function refreshThinkToggle() {
+  const show = MODE === 'webllm' && !!state.backend?.supportsThinking();
+  els.thinkToggleLabel.hidden = !show;
+  els.thinkToggle.checked = state.backend?.thinkingEnabled() ?? true;
+}
+
 function renderModelOptions(selectId = state.backend.modelId) {
   const children = state.backend.models.map((m) => makeOption(m.id, m.label));
   const locals = loadLocalModels();
@@ -820,6 +942,7 @@ function renderModelOptions(selectId = state.backend.modelId) {
   if ([...els.modelSelect.options].some((o) => o.value === selectId)) {
     els.modelSelect.value = selectId;
   }
+  refreshThinkToggle();
 }
 
 /** 在下拉框中给已下载到本机的模型加上 ✓。 */
@@ -938,6 +1061,7 @@ async function importModelFromFile(file, kind = 'import') {
     });
     renderModelOptions(record.model_id);
     state.backend.setModel(record.model_id);
+    refreshThinkToggle();
     await refreshModelCacheStatus();
     renderLocalList();
     const carriedNote = carried ? `，并带入自定义参数（${paramSummary(carried)}）` : '';
@@ -1478,8 +1602,18 @@ els.historyBtn.addEventListener('click', () => {
   toggleHistory();
 });
 
+els.thinkToggle.addEventListener('change', () => {
+  state.backend.setThinking(els.thinkToggle.checked);
+  flashStatus(
+    els.thinkToggle.checked
+      ? '已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。'
+      : '已关闭思考模式：推理模型直接给出回答，速度更快。',
+  );
+});
+
 els.modelSelect.addEventListener('change', () => {
   state.backend.setModel(els.modelSelect.value);
+  refreshThinkToggle();
   renderParamOverrides();
   renderExportParamsOption();
   const label = els.modelSelect.selectedOptions[0]?.textContent || els.modelSelect.value;

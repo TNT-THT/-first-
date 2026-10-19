@@ -2,6 +2,7 @@ import { streamChat } from '../api.js';
 import { checkWebGPU, getLoadedModelId, loadVerifiedWebLLMEngine, streamWebLLM, WEBGPU_MISSING } from './webllm.js';
 import { loadLocalModels, localRecords } from '../local-models.js';
 import { composeSystemPrompt, getModelParams } from '../adaptation.js';
+import { getThinkingPref, isReasoningModel, setThinkingPref } from '../reasoning.js';
 
 /**
  * 统一的推理后端接口：
@@ -10,6 +11,8 @@ import { composeSystemPrompt, getModelParams } from '../adaptation.js';
  *   isReady()       模型是否已就绪
  *   ensureReady(cb) 必要时加载模型，cb 接收 {progress, text}
  *   stream({messages, signal}) 异步生成器，逐段产出文本
+ *   supportsThinking() 当前模型是否为推理模型（可切换思考模式）
+ *   thinkingEnabled() / setThinking(on) 思考模式开关（仅推理模型生效，默认开启）
  */
 export function createBackend({ mode, appConfig }) {
   return mode === 'remote' ? createRemoteBackend() : createWebLLMBackend(appConfig.webllm);
@@ -25,6 +28,9 @@ function createRemoteBackend() {
     },
     isReady: () => true,
     setModel() {},
+    supportsThinking: () => false,
+    thinkingEnabled: () => true,
+    setThinking() {},
     async ensureReady() {},
     async *stream({ messages, signal }) {
       yield* streamChat({ messages, signal });
@@ -46,6 +52,12 @@ function createWebLLMBackend(cfg) {
     setModel(id) {
       modelId = id;
     },
+    supportsThinking: () =>
+      isReasoningModel(modelId, { models: cfg.models, localEntries: loadLocalModels() }),
+    thinkingEnabled: () => getThinkingPref(),
+    setThinking(on) {
+      setThinkingPref(on);
+    },
     async ensureReady(onProgress) {
       if (getLoadedModelId() === modelId) return;
       if (!(await checkWebGPU())) throw new Error(WEBGPU_MISSING);
@@ -63,6 +75,8 @@ function createWebLLMBackend(cfg) {
         signal,
         temperature: params.temperature ?? cfg.temperature,
         maxTokens: params.maxTokens ?? cfg.maxTokens,
+        supportsThinking: isReasoningModel(modelId, { models: cfg.models, localEntries: loadLocalModels() }),
+        thinkingEnabled: getThinkingPref(),
       });
     },
   };

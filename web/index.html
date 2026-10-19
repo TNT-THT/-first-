@@ -96,6 +96,10 @@
           <div id="adaptSuggest" class="adapt-suggest" hidden></div>
           <form id="composer" class="composer">
             <textarea id="input" rows="1" placeholder="描述题目或粘贴代码。Enter 发送，Shift+Enter 换行"></textarea>
+            <label id="thinkToggleLabel" class="think-toggle" title="仅推理模型：开启后先展示思考过程（可折叠）；关闭后直接给出回答，速度更快" hidden>
+              <input id="thinkToggle" type="checkbox" checked />
+              <span>思考模式</span>
+            </label>
             <button id="sendBtn" type="submit" class="btn primary">发送</button>
             <button id="stopBtn" type="button" class="btn danger" hidden>停止</button>
           </form>
