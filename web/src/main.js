@@ -17,6 +17,7 @@ import {
 } from './model-file.js';
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
+import { pendingModels } from './pending-models.js';
 import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
   adaptedModelIds,
@@ -27,6 +28,7 @@ import {
   listCorrections,
   listKnowledge,
   listParamLog,
+  migrateAdaptation,
   parseCorrections,
   recordFeedback,
   removeCorrection,
@@ -105,6 +107,7 @@ const els = {
   correctionDialog: $('#correctionDialog'),
   correctionForm: $('#correctionForm'),
   correctionPreview: $('#correctionPreview'),
+  correctionDesc: $('#correctionDesc'),
   correctionKey: $('#correctionKey'),
   correctionError: $('#correctionError'),
   correctionCancel: $('#correctionCancel'),
@@ -119,6 +122,7 @@ const els = {
   exportParamsText: $('#exportParamsText'),
   exportParamsLabel: $('#exportParamsLabel'),
   adaptList: $('#adaptList'),
+  migrateBox: $('#migrateBox'),
 };
 
 // ---------- 运行参数 ----------
@@ -575,7 +579,7 @@ function dismissSuggestion(id) {
 /**
  * 管理员密钥验证（用于更正）。返回 Promise<boolean>：验证通过为 true；取消或密钥错误则不发送，文字保留在输入框中。
  */
-function verifyCorrectionKey(text) {
+function verifyCorrectionKey(text, desc = '') {
   return new Promise((resolve) => {
     if (!hasAccessGate(state.appConfig.access)) {
       showStatus('未配置管理员密钥，无法记录更正，消息未发送。', { error: true });
@@ -614,6 +618,7 @@ function verifyCorrectionKey(text) {
     els.correctionCancel.addEventListener('click', onCancel);
     dlg.addEventListener('close', onCancel);
     els.correctionPreview.textContent = text;
+    els.correctionDesc.textContent = desc || '这条消息包含更正。输入管理员密钥验证后，才会作为该 AI 的底层设定记录（仅本机）；取消则不发送。';
     els.correctionError.textContent = '';
     els.correctionKey.value = '';
     dlg.showModal();
@@ -956,6 +961,19 @@ function refreshThinkToggle() {
 
 function renderModelOptions(selectId = state.backend.modelId) {
   const children = state.backend.models.map((m) => makeOption(m.id, m.label));
+  // 待转换的第三方模型：禁用（尚不能运行），与官方模型分组显示，备注放在悬停提示中
+  const pending = pendingModels(state.appConfig?.webllm);
+  if (pending.length) {
+    const group = document.createElement('optgroup');
+    group.label = '待转换（暂不可用）';
+    for (const p of pending) {
+      const opt = makeOption(p.id, p.label);
+      opt.disabled = true;
+      opt.title = p.note || p.label;
+      group.append(opt);
+    }
+    children.push(group);
+  }
   const locals = loadLocalModels();
   if (locals.length) {
     const group = document.createElement('optgroup');
@@ -1288,10 +1306,183 @@ function refreshRoleUI() {
   renderParamOverrides();
 }
 
+/** 跨模型迁移的选择状态（仅本页面会话有效，不保存）。 */
+const migrateState = { source: '', target: '' };
+
+function migrateEl(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/** 下拉框中的全部 AI（官方、待转换、新建AI），都可以作为迁移目标。 */
+function allModelOptions() {
+  return [...els.modelSelect.options].map((o) => ({ id: o.value, label: o.dataset.label || o.value }));
+}
+
+function makeMigrateSelect(items, value, onChange) {
+  const sel = document.createElement('select');
+  sel.className = 'migrate-select';
+  for (const it of items) {
+    const opt = document.createElement('option');
+    opt.value = it.id;
+    opt.textContent = it.label;
+    sel.append(opt);
+  }
+  sel.value = value;
+  sel.addEventListener('change', () => onChange(sel.value));
+  return sel;
+}
+
+function migrateItemRow({ kind, id, text, question, from }) {
+  const row = migrateEl('label', 'local-row migrate-item');
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = true;
+  box.dataset.kind = kind;
+  box.dataset.id = id;
+  const label = migrateEl('div', 'muted small local-meta', `${kind === 'correction' ? '更正' : '知识库'}：${text}`);
+  const tags = [question ? '含训练样本' : '', from ? `迁入自 ${modelDisplayName(from)}` : ''].filter(Boolean);
+  if (tags.length) label.textContent += `（${tags.join('，')}）`;
+  row.append(box, label);
+  return row;
+}
+
+/**
+ * 跨模型迁移（仅管理员、仅本机）：选择源 AI 与目标 AI，勾选要迁移的更正与知识库条目。
+ * 复制而非移动；迁移更正需要管理员密钥验证（更正会成为目标 AI 的底层设定）。
+ */
+function renderMigrateBox() {
+  const box = els.migrateBox;
+  if (!box) return;
+  box.replaceChildren();
+  const show = MODE === 'webllm' && isAdmin();
+  box.hidden = !show;
+  if (!show) return;
+
+  const sources = adaptedModelIds();
+  const options = allModelOptions();
+  if (!sources.includes(migrateState.source)) migrateState.source = sources[0] || '';
+  if (!options.some((o) => o.id === migrateState.target && o.id !== migrateState.source)) {
+    migrateState.target = options.find((o) => o.id !== migrateState.source)?.id || '';
+  }
+
+  box.append(
+    migrateEl(
+      'p',
+      'muted small local-meta',
+      '跨模型迁移（仅本机，不上传）：把源 AI 中勾选的更正与知识库条目复制到目标 AI。复制而非移动，源 AI 的记录保持不变。迁移更正需输入管理员密钥验证。',
+    ),
+  );
+  if (!sources.length) {
+    box.append(migrateEl('p', 'muted small', '暂无可迁移的适应记录。'));
+    return;
+  }
+
+  const onSource = (v) => {
+    migrateState.source = v;
+    renderMigrateBox();
+  };
+  const onTarget = (v) => {
+    migrateState.target = v;
+    renderMigrateBox();
+  };
+  const srcRow = migrateEl('div', 'migrate-row');
+  srcRow.append(
+    migrateEl('span', 'muted small', '源 AI：'),
+    makeMigrateSelect(
+      sources.map((id) => ({ id, label: modelDisplayName(id) })),
+      migrateState.source,
+      onSource,
+    ),
+  );
+  const tgtRow = migrateEl('div', 'migrate-row');
+  tgtRow.append(
+    migrateEl('span', 'muted small', '目标 AI：'),
+    makeMigrateSelect(
+      options.filter((o) => o.id !== migrateState.source),
+      migrateState.target,
+      onTarget,
+    ),
+  );
+  box.append(srcRow, tgtRow);
+
+  const list = migrateEl('div', 'local-list');
+  const corr = listCorrections(migrateState.source);
+  const kb = listKnowledge(migrateState.source);
+  for (const c of corr) list.append(migrateItemRow({ kind: 'correction', id: c.id, text: c.text, question: c.question, from: c.from }));
+  for (const k of kb) list.append(migrateItemRow({ kind: 'knowledge', id: k.id, text: k.text, question: k.question, from: k.from }));
+  if (!corr.length && !kb.length) list.append(migrateEl('p', 'muted small', '该 AI 没有可迁移的更正或知识库条目。'));
+  box.append(list);
+
+  const training = document.createElement('label');
+  training.className = 'migrate-training';
+  const trainBox = document.createElement('input');
+  trainBox.type = 'checkbox';
+  trainBox.id = 'migrateTraining';
+  trainBox.checked = true;
+  training.append(trainBox, document.createTextNode(' 同时迁移对话训练样本（问题→回答，之后可在目标 AI 导出固化数据；取消则只作为提示词内容）'));
+  box.append(training);
+
+  const go = document.createElement('button');
+  go.type = 'button';
+  go.className = 'btn ghost small';
+  go.dataset.action = 'migrate-run';
+  go.textContent = '迁移所选到目标 AI';
+  go.disabled = !migrateState.target;
+  go.addEventListener('click', () => runMigration());
+  box.append(go);
+}
+
+/** 执行迁移：勾选了更正时先做管理员密钥验证。 */
+async function runMigration() {
+  if (!requireAdmin('跨模型迁移')) return;
+  const { source, target } = migrateState;
+  if (!source || !target || source === target) {
+    showStatus('请选择不同的源 AI 与目标 AI。', { error: true });
+    return;
+  }
+  const checked = [...els.migrateBox.querySelectorAll('input[data-kind]:checked')];
+  const corrections = checked.filter((i) => i.dataset.kind === 'correction').map((i) => i.dataset.id);
+  const knowledge = checked.filter((i) => i.dataset.kind === 'knowledge').map((i) => i.dataset.id);
+  if (!corrections.length && !knowledge.length) {
+    showStatus('请先勾选要迁移的条目。', { error: true });
+    return;
+  }
+  const includeTraining = !!els.migrateBox.querySelector('#migrateTraining')?.checked;
+  const from = modelDisplayName(source);
+  const to = modelDisplayName(target);
+  if (corrections.length) {
+    const texts = listCorrections(source).filter((c) => corrections.includes(c.id)).map((c) => `- ${c.text}`);
+    const ok = await verifyCorrectionKey(
+      `迁移 ${corrections.length} 条更正（${from} → ${to}）：\n${texts.join('\n')}`,
+      `这些更正将成为「${to}」的底层设定（无条件采纳）。输入管理员密钥验证后执行；取消则不迁移。`,
+    );
+    if (!ok) return;
+  }
+  let result;
+  try {
+    result = migrateAdaptation(source, target, { corrections, knowledge }, {
+      includeTraining,
+      allowCorrections: corrections.length > 0,
+    });
+  } catch (err) {
+    showStatus(`迁移失败：${err.message}`, { error: true });
+    return;
+  }
+  const missing = result.missing ? `，源中已不存在 ${result.missing} 条` : '';
+  showStatus(
+    `已从「${from}」迁移到「${to}」：更正 ${result.corrections} 条，知识库 ${result.knowledge} 条，重复跳过 ${result.duplicate} 条${missing}。`,
+  );
+  renderAdaptList();
+}
+
 /** AI 适应记录：管理员可查看、删除（仅本机）。 */
 function renderAdaptList() {
   const admin = isAdmin();
   renderExportParamsOption();
+  renderMigrateBox();
   const list = els.adaptList;
   if (!list) return;
   list.replaceChildren();
@@ -1362,7 +1553,7 @@ function renderAdaptList() {
         row.className = 'local-row';
         const t = document.createElement('div');
         t.className = 'muted small local-meta';
-        t.textContent = `更正：${c.text}`;
+        t.textContent = `更正：${c.text}${c.from ? `（迁入自 ${modelDisplayName(c.from)}）` : ''}`;
         const del = document.createElement('button');
         del.type = 'button';
         del.className = 'btn ghost small';
@@ -1384,7 +1575,7 @@ function renderAdaptList() {
         row.className = 'local-row';
         const t = document.createElement('div');
         t.className = 'muted small local-meta';
-        t.textContent = k.text;
+        t.textContent = `${k.text}${k.from ? `（迁入自 ${modelDisplayName(k.from)}）` : ''}`;
         const del = document.createElement('button');
         del.type = 'button';
         del.className = 'btn ghost small';

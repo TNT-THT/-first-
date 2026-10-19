@@ -303,7 +303,13 @@ export function removeNote(modelId, noteId, { storage = globalThis.localStorage 
 export function listCorrections(modelId, { storage = globalThis.localStorage } = {}) {
   const entry = readAll(storage).models[modelId];
   if (!entry || !Array.isArray(entry.corrections)) return [];
-  return entry.corrections.map((c) => ({ id: c.id, text: c.text ?? c.next, ts: c.ts, question: c.question || '' }));
+  return entry.corrections.map((c) => ({
+    id: c.id,
+    text: c.text ?? c.next,
+    ts: c.ts,
+    question: c.question || '',
+    from: c.from || '',
+  }));
 }
 
 /** 删除一条更正。删除后若该模型没有任何记录，则移除该模型的记录。 */
@@ -559,4 +565,97 @@ export function resetAllParams(modelId, { storage = globalThis.localStorage, now
   appendParamLog(entry, changes, { ts: now, source: 'reset', reason: '恢复全部默认' });
   writeAll(data, storage);
   return changes.length;
+}
+
+function newId(now) {
+  return `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/**
+ * 跨模型迁移（仅本机）：把源 AI 中所选的更正与知识库条目复制到目标 AI。
+ *
+ * - 复制而非移动：源 AI 的记录保持不变，目标 AI 的条目带有 from 字段（来源 AI 的 id）。
+ * - 选择性：selection = {corrections: [id], knowledge: [id]}，只迁移列出的条目；未列出的不动。
+ * - 对话训练信息：includeTraining 为 false 时，迁移的条目去掉“问题”字段，因此不会成为目标 AI 的训练样本，
+ *   只作为提示词内容使用；为 true 时保留问题，之后可在目标 AI 中导出固化数据。
+ * - 更正会成为目标 AI 的底层设定（无条件采纳），因此迁移更正必须 allowCorrections: true，
+ *   调用方需先通过管理员密钥验证。
+ * - 目标 AI 中已存在完全相同文字的条目会跳过；超过上限时丢弃最旧的。
+ *
+ * 返回 {corrections, knowledge, duplicate, missing}：实际新增条数、重复跳过条数、源中已不存在的条数。
+ */
+export function migrateAdaptation(
+  sourceId,
+  targetId,
+  { corrections = [], knowledge = [] } = {},
+  { storage = globalThis.localStorage, now = Date.now(), includeTraining = true, allowCorrections = false } = {},
+) {
+  if (!sourceId || !targetId) throw new Error('请选择源 AI 与目标 AI');
+  if (sourceId === targetId) throw new Error('源 AI 与目标 AI 不能相同');
+  const wantCorr = new Set(corrections);
+  const wantKb = new Set(knowledge);
+  if (wantCorr.size && !allowCorrections) throw new Error('迁移更正需要先通过管理员密钥验证');
+
+  const srcEntry = readAll(storage).models[sourceId];
+  const srcCorr = srcEntry && Array.isArray(srcEntry.corrections) ? srcEntry.corrections : [];
+  const srcKb = readKb(storage).models[sourceId]?.entries || [];
+  const pickedCorr = srcCorr.filter((c) => wantCorr.has(c.id));
+  const pickedKb = srcKb.filter((k) => wantKb.has(k.id));
+  const counts = { corrections: 0, knowledge: 0, duplicate: 0, missing: 0 };
+  counts.missing = wantCorr.size - pickedCorr.length + (wantKb.size - pickedKb.length);
+
+  const make = (src) => {
+    const text = String(src.text ?? src.next ?? '').trim().slice(0, MAX_NOTE_CHARS);
+    const question = includeTraining ? questionField(src.question) : {};
+    return { id: newId(now), text, ts: now, from: sourceId, ...question };
+  };
+
+  // 更正
+  if (pickedCorr.length) {
+    const data = readAll(storage);
+    const existing = data.models[targetId]?.corrections || [];
+    const known = new Set(existing.map((c) => c.text ?? c.next));
+    const added = [];
+    for (const src of pickedCorr) {
+      const item = make(src);
+      if (!item.text) continue;
+      if (known.has(item.text)) {
+        counts.duplicate += 1;
+        continue;
+      }
+      known.add(item.text);
+      added.push(item);
+    }
+    if (added.length) {
+      const entry = entryFor(data, targetId);
+      entry.corrections = [...entry.corrections, ...added].slice(-MAX_CORRECTIONS_PER_MODEL);
+      writeAll(data, storage);
+      counts.corrections = added.length;
+    }
+  }
+
+  // 知识库
+  if (pickedKb.length) {
+    const kbData = readKb(storage);
+    const existing = kbData.models[targetId]?.entries || [];
+    const known = new Set(existing.map((e) => e.text));
+    const added = [];
+    for (const src of pickedKb) {
+      const item = make(src);
+      if (!item.text) continue;
+      if (known.has(item.text)) {
+        counts.duplicate += 1;
+        continue;
+      }
+      known.add(item.text);
+      added.push(item);
+    }
+    if (added.length) {
+      kbData.models[targetId] = { entries: [...existing, ...added].slice(-MAX_KB_ENTRIES) };
+      writeKb(kbData, storage);
+      counts.knowledge = added.length;
+    }
+  }
+
+  return counts;
 }

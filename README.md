@@ -74,6 +74,32 @@ The first repository of me,and first of "炸药工厂"
 - **仅静态版**：服务端模式（`VITE_ENGINE=remote`）下这两个按钮隐藏。
 - **安全说明**：这两个功能同样只在浏览器中校验管理员身份。网站源码本身已在公开仓库中，网站包不包含额外的秘密。
 
+## 待转换模型与跨模型迁移（仅管理员）
+
+### 待转换模型（下拉框中的“待转换（暂不可用）”分组）
+
+`web/public/config.json` 的 `webllm.pendingModels` 登记了尚未转换的第三方模型，它们显示在下拉框中，但处于禁用状态，附带备注（悬停可见）：
+
+- `Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-q4f16_1-MLC`：HauhauCS 的第三方无审查微调（基于 Qwen3.5-4B）。
+- `Qwen3.5-9B-Defiant-Fable-Uncensored-Heretic-q4f16_1-MLC`：DavidAU 的第三方融合微调（基于 Qwen3.5-9B）。
+
+这两个仓库只提供 GGUF 格式，WebLLM 无法加载，因此暂时不能选用。它们**不放进 `webllm.models`**，以免破坏与 `training/catalog.json` 的一致性检查。
+
+- 每个待转换模型都有独立的 model_id，适应记录（更正、知识库、参数）按 model_id 分开保存，与官方原版互不影响。
+- 备注中的基准数据与“无拒绝”等说法均为作者自述，未经独立验证。
+- 启用方法：先在本机把权重转换为 MLC 格式并编译 WebGPU 运行库，上传到自己的 Hugging Face 仓库；然后把该条目从 `pendingModels` 移到 `webllm.models`，并在 `webllm.extraRecords` 中补充 `model` / `model_lib` 记录，`status` 字段删除。
+
+### 跨模型迁移（管理员，仅本机）
+
+在“更改权限”面板的“AI 适应记录”区域，可以把一个 AI 的管理员更正与本地知识库条目复制到另一个 AI：
+
+- **源 AI / 目标 AI**：源 AI 只能选择有适应记录的模型；目标 AI 可以是任何下拉框中的模型（包括待转换和“新建AI”）。
+- **选择性**：逐条勾选要迁移的更正或知识库条目，未勾选的不迁移。
+- **复制而非移动**：源 AI 的记录保持不变；迁入的条目带有“迁入自 …”标记。相同文字在目标 AI 中已存在时跳过。
+- **对话训练信息**：默认连同“问题→回答”一起迁移，因此目标 AI 之后可以导出固化数据；取消勾选“同时迁移对话训练样本”则只作为提示词内容使用。
+- **更正需要验证**：迁移更正会成为目标 AI 的底层设定，必须输入管理员密钥验证；只迁移知识库条目则不需要。
+- 迁移只写入浏览器本地的 localStorage，不上传，也不写入 `.ojmodel` 导出文件。
+
 ## 硬件与浏览器要求
 
 - 需要 **WebGPU**：桌面端最新版 Chrome 或 Edge。
