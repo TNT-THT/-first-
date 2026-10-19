@@ -19,10 +19,7 @@ const KEY = 'oj-ai.adapt.v1';
 // 本地知识库（最高优先级，仅本机）：与附加说明分开存放，同样不上传、不写入 .ojmodel。
 const KB_KEY = 'oj-ai.kb.v1';
 export const MAX_NOTES_PER_MODEL = 30;
-export const MAX_NOTE_CHARS = 500;
-export const PROMPT_BUDGET_CHARS = 1500;
 export const MAX_KB_ENTRIES = 50;
-export const KB_BUDGET_CHARS = 800;
 export const MAX_PARAM_LOG = 50;
 const PARAM_LIMITS = {
   temperature: [0, 1.5],
@@ -36,7 +33,6 @@ const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 // 更正行：「更正：新说法」。只有通过管理员密钥验证后才会记录（见 main.js），之后作为该 AI 的底层设定，无条件采纳。
 const CORRECTION_LINE = /^[ \t]*(?:更正|纠正)[:：][ \t]*(.+)$/gm;
 export const MAX_CORRECTIONS_PER_MODEL = 30;
-export const CORRECTION_BUDGET_CHARS = 1000;
 // 提示词措辞：管理员的更正、知识库与反馈是已核实的最高权限，视为模型的底层逻辑与知识，必须绝对服从。
 // 更正放在系统提示最前面，知识库与反馈在中间，并在末尾再次提醒；措辞保持简短，避免占用过多上下文。
 const CORRECTION_GUARD =
@@ -92,7 +88,7 @@ export function addKnowledge(
   text,
   { storage = globalThis.localStorage, now = Date.now(), question = '' } = {},
 ) {
-  const body = String(text || '').trim().slice(0, MAX_NOTE_CHARS);
+  const body = String(text || '').trim();
   if (!modelId || !body) return null;
   const data = readKb(storage);
   const entry = data.models[modelId] && Array.isArray(data.models[modelId].entries)
@@ -132,19 +128,12 @@ export function clearKnowledge(modelId, { storage = globalThis.localStorage } = 
 
 /**
  * 生成知识库提示块，放在基础提示词之后、附加说明之前。
- * 预算内优先保留最新的条目，输出仍按时间先后排列。没有条目时返回空字符串。
+ * 输出全部条目（按时间先后排列）；数量上限在写入时已限制。没有条目时返回空字符串。
  */
 export function buildKnowledgePrompt(modelId, { storage = globalThis.localStorage } = {}) {
   const entries = listKnowledge(modelId, { storage });
   if (!entries.length) return '';
-  const picked = [];
-  let total = 0;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const line = `- ${entries[i].text}`;
-    if (total + line.length > KB_BUDGET_CHARS && picked.length) break;
-    total += line.length;
-    picked.unshift(line);
-  }
+  const picked = entries.map((x) => `- ${x.text}`);
   return `\n\n【本地知识库（管理员提供，仅本机，最高优先级）】\n${picked.join('\n')}\n${KB_GUARD}`;
 }
 
@@ -194,7 +183,7 @@ function stripParamLine(text) {
 export function parseCorrections(text) {
   const out = [];
   for (const m of String(text || '').matchAll(CORRECTION_LINE)) {
-    const body = m[1].trim().slice(0, MAX_NOTE_CHARS);
+    const body = m[1].trim();
     if (body) out.push({ text: body });
   }
   return out;
@@ -219,7 +208,7 @@ export function recordFeedback(
   if (!modelId) return null;
   const params = parseFeedbackParams(text);
   const corrections = allowCorrections ? parseCorrections(text) : [];
-  const body = stripParamLine(stripCorrectionLines(text)).slice(0, MAX_NOTE_CHARS);
+  const body = stripParamLine(stripCorrectionLines(text));
   if (!params && !body && !corrections.length) return null;
 
   const data = readAll(storage);
@@ -327,25 +316,18 @@ export function clearModelAdaptation(modelId, { storage = globalThis.localStorag
 
 /**
  * 生成附加到系统提示词末尾的说明。没有记录时返回空字符串。
- * 预算内优先保留最新的记录，输出仍按时间先后排列。
+ * 输出全部记录（按时间先后排列）；数量上限在写入时已限制。
  */
 export function buildAdaptationPrompt(modelId, { storage = globalThis.localStorage } = {}) {
   const { notes } = listAdaptation(modelId, { storage });
   if (!notes.length) return '';
-  const picked = [];
-  let total = 0;
-  for (let i = notes.length - 1; i >= 0; i--) {
-    const line = `- ${notes[i].text}`;
-    if (total + line.length > PROMPT_BUDGET_CHARS && picked.length) break;
-    total += line.length;
-    picked.unshift(line);
-  }
+  const picked = notes.map((x) => `- ${x.text}`);
   return `\n\n【管理员反馈（仅本机记录，最高优先级，请采纳）】\n${picked.join('\n')}\n${GUARD}`;
 }
 
 /** 只有非空问题才写入记录（旧记录没有该字段）。 */
 function questionField(question) {
-  const q = String(question || '').trim().slice(0, MAX_NOTE_CHARS);
+  const q = String(question || '').trim();
   return q ? { question: q } : {};
 }
 
@@ -390,20 +372,13 @@ export function solidifyJsonl(modelId, { storage = globalThis.localStorage } = {
 }
 
 /**
- * 生成更正块（放在系统提示词最前面，作为底层设定）。预算内保留最新的更正，输出按时间先后排列。
+ * 生成更正块（放在系统提示词最前面，作为底层设定）。输出全部更正（按时间先后排列）。
  * 没有更正时返回空字符串。
  */
 export function buildCorrectionPrompt(modelId, { storage = globalThis.localStorage } = {}) {
   const items = listCorrections(modelId, { storage });
   if (!items.length) return '';
-  const picked = [];
-  let total = 0;
-  for (let i = items.length - 1; i >= 0; i--) {
-    const line = `- ${items[i].text}`;
-    if (total + line.length > CORRECTION_BUDGET_CHARS && picked.length) break;
-    total += line.length;
-    picked.unshift(line);
-  }
+  const picked = items.map((x) => `- ${x.text}`);
   return `【管理员更正（已验证密钥，仅本机，底层逻辑与知识，必须绝对服从）】\n${picked.join('\n')}\n${CORRECTION_GUARD}`;
 }
 
@@ -598,7 +573,7 @@ export function migrateAdaptation(
   counts.missing = wantCorr.size - pickedCorr.length + (wantKb.size - pickedKb.length);
 
   const make = (src) => {
-    const text = String(src.text ?? src.next ?? '').trim().slice(0, MAX_NOTE_CHARS);
+    const text = String(src.text ?? src.next ?? '').trim();
     const question = includeTraining ? questionField(src.question) : {};
     return { id: newId(now), text, ts: now, from: sourceId, ...question };
   };

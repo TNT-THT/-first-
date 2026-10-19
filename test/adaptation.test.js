@@ -12,7 +12,6 @@ import {
   listAdaptation,
   MAX_NOTES_PER_MODEL,
   parseFeedbackParams,
-  PROMPT_BUDGET_CHARS,
   recordFeedback,
   removeNote,
   applyParamSuggestion,
@@ -23,7 +22,6 @@ import {
   removeCorrection,
   buildCorrectionPrompt,
   MAX_CORRECTIONS_PER_MODEL,
-  CORRECTION_BUDGET_CHARS,
   resetAllParams,
   resetParam,
   sanitizeParams,
@@ -32,7 +30,6 @@ import {
   addKnowledge,
   buildKnowledgePrompt,
   clearKnowledge,
-  KB_BUDGET_CHARS,
   listKnowledge,
   MAX_KB_ENTRIES,
   removeKnowledge,
@@ -106,16 +103,16 @@ test('系统提示词：无记录时原样返回；有记录时附加说明，�
   assert.match(text, /据此调整风格、格式与事实/);
 });
 
-test('提示词预算：超出时保留最新的记录，并保持时间顺序', () => {
+test('提示词：不截断长度，所有记录按时间顺序完整输出', () => {
   const s = memoryStorage();
   const long = '甲'.repeat(400);
   for (let i = 0; i < 10; i++) recordFeedback('m', `${i}-${long}`, { storage: s, now: i });
   const prompt = buildAdaptationPrompt('m', { storage: s });
   const lines = prompt.split('\n').filter((l) => l.startsWith('- '));
-  assert.ok(lines.length < 10);
+  assert.equal(lines.length, 10);
+  assert.ok(lines.every((l) => l.includes('甲'.repeat(400))));
   assert.ok(lines.at(-1).startsWith('- 9-'));
   assert.ok(lines.every((l, i) => i === 0 || Number(l.slice(2, 3)) > Number(lines[i - 1].slice(2, 3))));
-  assert.ok(lines.join('\n').length <= PROMPT_BUDGET_CHARS + 10);
 });
 
 test('删除单条说明与清空某个模型的记录', () => {
@@ -293,16 +290,14 @@ test('系统提示词顺序：基础提示 → 本地知识库（最高优先级
   assert.match(text, /不因话题而拒绝讨论、解释或分析/);
 });
 
-test('本地知识库：预算内保留最新条目，且输出仍按时间先后排列', () => {
+test('本地知识库：不截断长度，全部条目按时间先后排列', () => {
   const s = memoryStorage();
   const long = '长'.repeat(300);
   for (let i = 0; i < 6; i++) addKnowledge('m', `${i}-${long}`, { storage: s, now: i });
   const prompt = buildKnowledgePrompt('m', { storage: s });
-  assert.ok(!prompt.includes('0-' + long));
+  assert.ok(prompt.includes('0-' + long));
   assert.ok(prompt.includes('5-' + long));
   assert.ok(prompt.indexOf('2-' + long) < prompt.indexOf('5-' + long));
-  const bulletChars = prompt.split('\n').filter((l) => l.startsWith('- ')).join('').length;
-  assert.ok(bulletChars <= KB_BUDGET_CHARS + 2 + long.length);
 });
 
 test('本地知识库：删除、清空与模型列表', () => {
@@ -390,16 +385,14 @@ test('更正：位于系统提示词最前面，视为底层逻辑与知识、�
   assert.equal(composeSystemPrompt('基础提示', 'other', { storage: s }), '基础提示');
 });
 
-test('更正：超过预算时保留最新的更正，输出仍按时间先后排列；超过上限丢弃最旧的', () => {
+test('更正：不截断长度，输出全部更正并按时间先后排列；超过数量上限丢弃最旧的', () => {
   const s = memoryStorage();
   const long = '长'.repeat(200);
   for (let i = 0; i < 8; i++) recordFeedback('m', `更正：${i}-${long}`, { storage: s, now: i + 1, allowCorrections: true });
   const prompt = buildCorrectionPrompt('m', { storage: s });
-  assert.ok(!prompt.includes('- 0-' + long));
+  assert.ok(prompt.includes('- 0-' + long));
   assert.ok(prompt.includes('- 7-' + long));
   assert.ok(prompt.indexOf('- 2-') < prompt.indexOf('- 7-'));
-  const bulletChars = prompt.split('\n').filter((l) => l.startsWith('- ')).join('').length;
-  assert.ok(bulletChars <= CORRECTION_BUDGET_CHARS + 2 + long.length);
   for (let i = 0; i < MAX_CORRECTIONS_PER_MODEL + 5; i++) {
     recordFeedback('m', `更正：A${i}`, { storage: s, now: 100 + i, allowCorrections: true });
   }
@@ -619,4 +612,18 @@ test('迁移：目标 AI 的更正与知识库同样遵守数量上限（丢弃�
   assert.equal(texts.length, MAX_CORRECTIONS_PER_MODEL);
   assert.equal(texts.at(-1), '新');
   assert.equal(texts.includes('旧0'), false);
+});
+
+test('长度：更正、知识库、反馈与训练问题都完整保存，不再截断', () => {
+  const s = memoryStorage();
+  const long = '很长的内容'.repeat(1000); // 5000 字符
+  recordFeedback('m', `更正：${long}`, { storage: s, now: 1, allowCorrections: true, question: long });
+  addKnowledge('m', long, { storage: s, now: 2, question: long });
+  const [c] = listCorrections('m', { storage: s });
+  const [k] = listKnowledge('m', { storage: s });
+  assert.equal(c.text, long);
+  assert.equal(c.question, long);
+  assert.equal(k.text, long);
+  assert.equal(k.question, long);
+  assert.ok(composeSystemPrompt('基础', 'm', { storage: s }).includes(long));
 });
