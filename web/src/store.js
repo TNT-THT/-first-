@@ -86,3 +86,18 @@ export function buildContext(messages, { maxMessages = 20, maxChars = 40000, cur
   while (picked.length && picked[0].role !== 'user') picked.shift();
   return picked;
 }
+
+/** 打开历史会话时先渲染的最近消息条数（较早的消息折叠，点击再展开）。 */
+export const RECENT_RENDER_COUNT = 20;
+/** 每次展开较早消息的条数。 */
+export const UNFOLD_STEP = 20;
+
+/** 初始可见窗口的起点：只渲染最近 count 条。 */
+export function initialVisibleStart(total, count = RECENT_RENDER_COUNT) {
+  return Math.max(0, total - count);
+}
+
+/** 展开更早的消息后，可见窗口的新起点（不小于 0）。 */
+export function expandVisibleStart(start, step = UNFOLD_STEP) {
+  return Math.max(0, start - step);
+}
