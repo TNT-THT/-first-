@@ -482,8 +482,22 @@ let pendingSuggestions = [];
 /** 某模型当前生效的参数：本机覆盖优先，否则使用配置默认值。 */
 function effectiveParams(modelId) {
   const d = state.appConfig.webllm;
-  return { temperature: d.temperature, maxTokens: d.maxTokens, ...getModelParams(modelId) };
+  return {
+    temperature: d.temperature,
+    maxTokens: d.maxTokens,
+    contextWindow: d.contextWindowTokens,
+    thinkingWindow: d.thinkingWindowTokens,
+    ...getModelParams(modelId),
+  };
 }
+
+/** 参数在界面中的名称（管理员可见的建议卡片、参数详情共用）。 */
+const PARAM_NAMES = {
+  temperature: 'temperature（温度）',
+  maxTokens: 'maxTokens（最大输出长度）',
+  contextWindow: 'contextWindow（上下文窗口）',
+  thinkingWindow: 'thinkingWindow（思考窗口）',
+};
 
 function addSuggestions(modelId, modelLabel, found) {
   for (const f of found) {
@@ -511,7 +525,7 @@ function renderSuggestions() {
     const row = document.createElement('div');
     row.className = 'adapt-suggest-row';
     const text = document.createElement('span');
-    const name = s.key === 'maxTokens' ? 'maxTokens（最大输出长度）' : 'temperature（温度）';
+    const name = PARAM_NAMES[s.key] || s.key;
     text.textContent = `检测到你${s.reason}，是否将「${s.modelLabel}」的 ${name} 设为 ${s.value}？`;
     const ok = document.createElement('button');
     ok.type = 'button';
@@ -1365,7 +1379,7 @@ function renderParamDetails(list, modelId, overrides) {
   line.className = 'muted small local-meta';
   line.textContent =
     '当前生效：' +
-    ['temperature', 'maxTokens']
+    ['temperature', 'maxTokens', 'contextWindow', 'thinkingWindow']
       .map((k) => `${k} = ${eff[k]}（${k in overrides ? '本机覆盖' : '默认'}）`)
       .join('｜');
   list.append(line);
@@ -1604,10 +1618,12 @@ els.historyBtn.addEventListener('click', () => {
 
 els.thinkToggle.addEventListener('change', () => {
   state.backend.setThinking(els.thinkToggle.checked);
+  // 思考窗口在加载模型时确定：切换后下一次发送会按新窗口重新加载模型
+  const eff = effectiveParams(state.backend.modelId);
   flashStatus(
     els.thinkToggle.checked
-      ? '已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。'
-      : '已关闭思考模式：推理模型直接给出回答，速度更快。',
+      ? `已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。下次发送时将按 ${eff.contextWindow + eff.thinkingWindow} 窗口重新加载模型。`
+      : `已关闭思考模式：推理模型直接给出回答，速度更快。下次发送时将按 ${eff.contextWindow} 窗口重新加载模型。`,
   );
 });
 

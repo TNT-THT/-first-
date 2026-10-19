@@ -13,6 +13,8 @@
  *   无条件采纳；同样只保存在本机。
  */
 
+import { WINDOW_LIMITS } from './budget.js';
+
 const KEY = 'oj-ai.adapt.v1';
 // 本地知识库（最高优先级，仅本机）：与附加说明分开存放，同样不上传、不写入 .ojmodel。
 const KB_KEY = 'oj-ai.kb.v1';
@@ -22,7 +24,14 @@ export const PROMPT_BUDGET_CHARS = 1500;
 export const MAX_KB_ENTRIES = 50;
 export const KB_BUDGET_CHARS = 800;
 export const MAX_PARAM_LOG = 50;
-const PARAM_LIMITS = { temperature: [0, 1.5], maxTokens: [64, 16384] };
+const PARAM_LIMITS = {
+  temperature: [0, 1.5],
+  maxTokens: [64, 16384],
+  contextWindow: [WINDOW_LIMITS.contextWindow.min, WINDOW_LIMITS.contextWindow.max],
+  thinkingWindow: [WINDOW_LIMITS.thinkingWindow.min, WINDOW_LIMITS.thinkingWindow.max],
+};
+/** 需要取整的参数（其余为小数）。 */
+const INTEGER_PARAMS = new Set(['maxTokens', 'contextWindow', 'thinkingWindow']);
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 // 更正行：「更正：新说法」。只有通过管理员密钥验证后才会记录（见 main.js），之后作为该 AI 的底层设定，无条件采纳。
 const CORRECTION_LINE = /^[ \t]*(?:更正|纠正)[:：][ \t]*(.+)$/gm;
@@ -161,7 +170,7 @@ export function parseFeedbackParams(text) {
     if (!limits || raw === undefined || raw === '') continue;
     const value = Number(raw);
     if (!Number.isFinite(value)) continue;
-    out[key] = Math.min(limits[1], Math.max(limits[0], key === 'maxTokens' ? Math.round(value) : value));
+    out[key] = Math.min(limits[1], Math.max(limits[0], INTEGER_PARAMS.has(key) ? Math.round(value) : value));
   }
   return Object.keys(out).length ? out : null;
 }
@@ -388,7 +397,7 @@ export function suggestParams(text, current = {}) {
 
 /**
  * 管理员确认某条参数建议后，写入该模型的参数（同样受数值范围限制）。
- * 只接受 temperature 与 maxTokens；返回实际写入的值，无效时返回 null。
+ * 只接受 PARAM_LIMITS 中的参数；返回实际写入的值，无效时返回 null。
  */
 export function applyParamSuggestion(
   modelId,
@@ -398,7 +407,7 @@ export function applyParamSuggestion(
 ) {
   const limits = PARAM_LIMITS[key];
   if (!modelId || !limits || !Number.isFinite(Number(value))) return null;
-  const clamped = Math.min(limits[1], Math.max(limits[0], key === 'maxTokens' ? Math.round(Number(value)) : Number(value)));
+  const clamped = Math.min(limits[1], Math.max(limits[0], INTEGER_PARAMS.has(key) ? Math.round(Number(value)) : Number(value)));
   const data = readAll(storage);
   const entry = entryFor(data, modelId);
   const from = entry.params[key] ?? null;
@@ -411,7 +420,7 @@ export function applyParamSuggestion(
 }
 
 /**
- * 清洗参数对象：只保留 temperature / maxTokens，并夹到合法范围。
+ * 清洗参数对象：只保留 PARAM_LIMITS 中的参数，并夹到合法范围。
  * 没有任何有效项时返回 null。导出文件与导入文件都使用它，避免写入或信任非法值。
  */
 export function sanitizeParams(raw) {
@@ -421,7 +430,7 @@ export function sanitizeParams(raw) {
     const value = Number(raw[key]);
     if (raw[key] === undefined || raw[key] === null || raw[key] === '' || !Number.isFinite(value)) continue;
     const limits = PARAM_LIMITS[key];
-    out[key] = Math.min(limits[1], Math.max(limits[0], key === 'maxTokens' ? Math.round(value) : value));
+    out[key] = Math.min(limits[1], Math.max(limits[0], INTEGER_PARAMS.has(key) ? Math.round(value) : value));
   }
   return Object.keys(out).length ? out : null;
 }

@@ -1,8 +1,25 @@
 import { streamChat } from '../api.js';
-import { checkWebGPU, getLoadedModelId, loadVerifiedWebLLMEngine, streamWebLLM, WEBGPU_MISSING } from './webllm.js';
+import {
+  checkWebGPU,
+  getLoadedContextWindow,
+  getLoadedModelId,
+  loadVerifiedWebLLMEngine,
+  streamWebLLM,
+  WEBGPU_MISSING,
+} from './webllm.js';
 import { loadLocalModels, localRecords } from '../local-models.js';
 import { composeSystemPrompt, getModelParams } from '../adaptation.js';
 import { getThinkingPref, isReasoningModel, setThinkingPref } from '../reasoning.js';
+import {
+  FORCE_NOTE_RESERVE,
+  fitHistory,
+  forcedAnswerMessages,
+  forcedPromptTokens,
+  ANSWER_MIN_TOKENS,
+  estimatePromptTokens,
+  planGeneration,
+  resolveWindows,
+} from '../budget.js';
 
 /**
  * 统一的推理后端接口：
@@ -38,8 +55,31 @@ function createRemoteBackend() {
   };
 }
 
+/**
+ * 某个模型当前的窗口：管理员参数（本机）优先，否则使用配置默认值。
+ * 引擎窗口 = 上下文窗口；只有推理模型且开启思考时才加上思考窗口。
+ * 引擎窗口在加载时确定，所以切换思考开关后，下一次发送会按新窗口重新加载。
+ */
+function windowsFor(cfg, modelId, thinkingOn) {
+  const supportsThinking = isReasoningModel(modelId, { models: cfg.models, localEntries: loadLocalModels() });
+  const thinkingActive = supportsThinking && !!thinkingOn;
+  return {
+    supportsThinking,
+    thinkingActive,
+    ...resolveWindows({
+      defaults: { contextWindow: cfg.contextWindowTokens, thinkingWindow: cfg.thinkingWindowTokens },
+      overrides: getModelParams(modelId),
+      reserveThinking: thinkingActive,
+    }),
+  };
+}
+
 function createWebLLMBackend(cfg) {
   let modelId = cfg.defaultModel;
+  // 模型与窗口都与已加载引擎一致才算就绪
+  const loaded = () =>
+    getLoadedModelId() === modelId &&
+    getLoadedContextWindow() === windowsFor(cfg, modelId, getThinkingPref()).engineContextSize;
 
   return {
     mode: 'webllm',
@@ -48,7 +88,7 @@ function createWebLLMBackend(cfg) {
     get modelId() {
       return modelId;
     },
-    isReady: () => getLoadedModelId() === modelId,
+    isReady: loaded,
     setModel(id) {
       modelId = id;
     },
@@ -59,25 +99,72 @@ function createWebLLMBackend(cfg) {
       setThinkingPref(on);
     },
     async ensureReady(onProgress) {
-      if (getLoadedModelId() === modelId) return;
+      if (loaded()) return;
       if (!(await checkWebGPU())) throw new Error(WEBGPU_MISSING);
       // 自定义记录 + 本地“新建 AI”（仅存在于浏览器缓存中）
       const extraRecords = [...(cfg.extraRecords || []), ...localRecords(loadLocalModels())];
       // 加载后做输出自检；fp16 异常时自动切换到 fp32（见 health.js）
-      return loadVerifiedWebLLMEngine(modelId, onProgress, { mirrorOwner: cfg.mirrorOwner, extraRecords });
+      // 窗口与已加载引擎不一致时（例如管理员调整了窗口）会重新加载
+      const { engineContextSize } = windowsFor(cfg, modelId, getThinkingPref());
+      return loadVerifiedWebLLMEngine(modelId, onProgress, {
+        mirrorOwner: cfg.mirrorOwner,
+        extraRecords,
+        contextWindowSize: engineContextSize,
+      });
     },
     async *stream({ messages, signal }) {
       // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
       const system = { role: 'system', content: composeSystemPrompt(cfg.systemPrompt, modelId) };
       const params = getModelParams(modelId);
-      yield* streamWebLLM({
-        messages: [system, ...messages],
-        signal,
-        temperature: params.temperature ?? cfg.temperature,
-        maxTokens: params.maxTokens ?? cfg.maxTokens,
-        supportsThinking: isReasoningModel(modelId, { models: cfg.models, localEntries: loadLocalModels() }),
-        thinkingEnabled: getThinkingPref(),
+      const thinkingOn = getThinkingPref();
+      const w = windowsFor(cfg, modelId, thinkingOn);
+      const temperature = params.temperature ?? cfg.temperature;
+      const answerCap = params.maxTokens ?? cfg.maxTokens;
+      const overflowError = () =>
+        new Error('Prompt tokens exceed context window size：对话内容已占满上下文窗口，请新建对话或减少历史');
+      // 历史超出提示词空间时从最早的消息开始丢弃；若启用了思考预算，为强制输出说明预留空间
+      const reserve = w.thinkingActive ? FORCE_NOTE_RESERVE : 0;
+      const all = fitHistory([system, ...messages], w.contextWindow - ANSWER_MIN_TOKENS - reserve);
+      // 提示词估计 + 思考预算 + 回答长度，保证不超过引擎窗口
+      const plan = planGeneration({
+        promptTokens: estimatePromptTokens(all),
+        contextWindow: w.contextWindow,
+        thinkingWindow: w.thinkingWindow,
+        supportsThinking: w.supportsThinking,
+        thinkingOn,
+        answerCap,
       });
+      if (plan.overflow) throw overflowError();
+      const first = yield* streamWebLLM({
+        messages: all,
+        signal,
+        temperature,
+        maxTokens: plan.maxTokens,
+        supportsThinking: w.supportsThinking,
+        thinkingEnabled: thinkingOn,
+        thinkingBudget: plan.thinkingTokens || null,
+      });
+      // 思考预算用完仍未回答：直接发起回答请求（关闭思考，并附上已写出的部分思考）
+      if (first?.forced && !signal?.aborted) {
+        const forced = forcedAnswerMessages(all, first.thinking);
+        const direct = planGeneration({
+          promptTokens: forcedPromptTokens(all, first.thinkingTokens),
+          contextWindow: w.engineContextSize,
+          thinkingWindow: 0,
+          supportsThinking: false,
+          thinkingOn: false,
+          answerCap,
+        });
+        if (direct.overflow) throw overflowError();
+        yield* streamWebLLM({
+          messages: forced,
+          signal,
+          temperature,
+          maxTokens: direct.maxTokens,
+          supportsThinking: w.supportsThinking,
+          thinkingEnabled: false,
+        });
+      }
     },
   };
 }
