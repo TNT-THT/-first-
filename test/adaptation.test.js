@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildSolidifyRecords,
+  migrateAdaptation,
   solidifyJsonl,
   adaptedModelIds,
   buildAdaptationPrompt,
@@ -12,7 +13,6 @@ import {
   listAdaptation,
   MAX_NOTES_PER_MODEL,
   parseFeedbackParams,
-  PROMPT_BUDGET_CHARS,
   recordFeedback,
   removeNote,
   applyParamSuggestion,
@@ -23,7 +23,6 @@ import {
   removeCorrection,
   buildCorrectionPrompt,
   MAX_CORRECTIONS_PER_MODEL,
-  CORRECTION_BUDGET_CHARS,
   resetAllParams,
   resetParam,
   sanitizeParams,
@@ -32,7 +31,6 @@ import {
   addKnowledge,
   buildKnowledgePrompt,
   clearKnowledge,
-  KB_BUDGET_CHARS,
   listKnowledge,
   MAX_KB_ENTRIES,
   removeKnowledge,
@@ -105,16 +103,15 @@ test('系统提示词：无记录时原样返回；有记录时附加说明，�
   assert.match(text, /请据此调整回答的风格、格式与事实/);
 });
 
-test('提示词预算：超出时保留最新的记录，并保持时间顺序', () => {
+test('提示词：不截断长度，全部说明按时间顺序完整输出', () => {
   const s = memoryStorage();
   const long = '甲'.repeat(400);
   for (let i = 0; i < 10; i++) recordFeedback('m', `${i}-${long}`, { storage: s, now: i });
   const prompt = buildAdaptationPrompt('m', { storage: s });
   const lines = prompt.split('\n').filter((l) => l.startsWith('- '));
-  assert.ok(lines.length < 10);
-  assert.ok(lines.at(-1).startsWith('- 9-'));
+  assert.equal(lines.length, 10);
+  assert.ok(lines.every((l) => l.includes(long)));
   assert.ok(lines.every((l, i) => i === 0 || Number(l.slice(2, 3)) > Number(lines[i - 1].slice(2, 3))));
-  assert.ok(lines.join('\n').length <= PROMPT_BUDGET_CHARS + 10);
 });
 
 test('删除单条说明与清空某个模型的记录', () => {
@@ -292,16 +289,13 @@ test('系统提示词顺序：基础提示 → 本地知识库（最高优先级
   assert.match(text, /不限制对任何话题的讨论、解释与分析/);
 });
 
-test('本地知识库：预算内保留最新条目，且输出仍按时间先后排列', () => {
+test('本地知识库：不截断长度，全部条目完整输出并按时间先后排列', () => {
   const s = memoryStorage();
   const long = '长'.repeat(300);
   for (let i = 0; i < 6; i++) addKnowledge('m', `${i}-${long}`, { storage: s, now: i });
   const prompt = buildKnowledgePrompt('m', { storage: s });
-  assert.ok(!prompt.includes('0-' + long));
-  assert.ok(prompt.includes('5-' + long));
+  for (let i = 0; i < 6; i++) assert.ok(prompt.includes(`- ${i}-${long}`));
   assert.ok(prompt.indexOf('2-' + long) < prompt.indexOf('5-' + long));
-  const bulletChars = prompt.split('\n').filter((l) => l.startsWith('- ')).join('').length;
-  assert.ok(bulletChars <= KB_BUDGET_CHARS + 2 + long.length);
 });
 
 test('本地知识库：删除、清空与模型列表', () => {
@@ -389,16 +383,13 @@ test('更正：位于系统提示词最前面，无条件采纳；没有更正�
   assert.equal(composeSystemPrompt('基础提示', 'other', { storage: s }), '基础提示');
 });
 
-test('更正：超过预算时保留最新的更正，输出仍按时间先后排列；超过上限丢弃最旧的', () => {
+test('更正：不截断长度，全部更正按时间先后输出；超过数量上限丢弃最旧的', () => {
   const s = memoryStorage();
   const long = '长'.repeat(200);
   for (let i = 0; i < 8; i++) recordFeedback('m', `更正：${i}-${long}`, { storage: s, now: i + 1, allowCorrections: true });
   const prompt = buildCorrectionPrompt('m', { storage: s });
-  assert.ok(!prompt.includes('- 0-' + long));
-  assert.ok(prompt.includes('- 7-' + long));
+  for (let i = 0; i < 8; i++) assert.ok(prompt.includes(`- ${i}-${long}`));
   assert.ok(prompt.indexOf('- 2-') < prompt.indexOf('- 7-'));
-  const bulletChars = prompt.split('\n').filter((l) => l.startsWith('- ')).join('').length;
-  assert.ok(bulletChars <= CORRECTION_BUDGET_CHARS + 2 + long.length);
   for (let i = 0; i < MAX_CORRECTIONS_PER_MODEL + 5; i++) {
     recordFeedback('m', `更正：A${i}`, { storage: s, now: 100 + i, allowCorrections: true });
   }
@@ -496,3 +487,129 @@ test('权威措辞：没有任何记录时不添加提醒，提示词保持原�
   assert.equal(composeSystemPrompt('基础提示', 'm', { storage: s }), '基础提示');
 });
 
+test('迁移：只复制所选的更正与知识库条目，源 AI 保持不变，并记录来源', () => {
+  const s = memoryStorage();
+  recordFeedback('src', '更正：甲', { storage: s, now: 1, allowCorrections: true, question: 'Q甲' });
+  recordFeedback('src', '更正：乙', { storage: s, now: 2, allowCorrections: true, question: 'Q乙' });
+  addKnowledge('src', '知识丙', { storage: s, now: 3, question: 'Q丙' });
+  const [c1, c2] = listCorrections('src', { storage: s });
+  const [k1] = listKnowledge('src', { storage: s });
+  const srcSnapshot = () =>
+    JSON.stringify([listCorrections('src', { storage: s }), listKnowledge('src', { storage: s })]);
+  const before = srcSnapshot();
+
+  const r = migrateAdaptation('src', 'dst', { corrections: [c1.id], knowledge: [k1.id] }, {
+    storage: s,
+    now: 10,
+    allowCorrections: true,
+  });
+
+  assert.deepEqual(r, { corrections: 1, knowledge: 1, duplicate: 0, missing: 0 });
+  assert.deepEqual(listCorrections('dst', { storage: s }).map((c) => c.text), ['甲']);
+  assert.equal(listCorrections('dst', { storage: s })[0].from, 'src');
+  assert.deepEqual(listKnowledge('dst', { storage: s }).map((k) => k.text), ['知识丙']);
+  assert.equal(listKnowledge('dst', { storage: s })[0].from, 'src');
+  // 未勾选的“乙”没有被迁移，源 AI 的记录也没有变化
+  assert.equal(listCorrections('dst', { storage: s }).some((c) => c.text === '乙'), false);
+  assert.equal(listCorrections('src', { storage: s }).length, 2);
+  assert.equal(srcSnapshot(), before);
+  assert.equal(c2.text, '乙');
+});
+
+test('迁移：迁移更正必须通过管理员验证（allowCorrections），否则拒绝且不写入', () => {
+  const s = memoryStorage();
+  recordFeedback('src', '更正：甲', { storage: s, now: 1, allowCorrections: true });
+  const [c1] = listCorrections('src', { storage: s });
+  assert.throws(
+    () => migrateAdaptation('src', 'dst', { corrections: [c1.id] }, { storage: s, now: 2 }),
+    /管理员密钥验证/,
+  );
+  assert.deepEqual(adaptedModelIds({ storage: s }), ['src']);
+});
+
+test('迁移：只迁移知识库条目时不需要管理员验证', () => {
+  const s = memoryStorage();
+  addKnowledge('src', '知识甲', { storage: s, now: 1 });
+  const [k1] = listKnowledge('src', { storage: s });
+  const r = migrateAdaptation('src', 'dst', { knowledge: [k1.id] }, { storage: s, now: 2 });
+  assert.equal(r.knowledge, 1);
+});
+
+test('迁移：不带对话训练样本时去掉问题字段，目标 AI 的固化数据不包含它', () => {
+  const s = memoryStorage();
+  recordFeedback('src', '更正：甲', { storage: s, now: 1, allowCorrections: true, question: 'Q甲' });
+  const [c1] = listCorrections('src', { storage: s });
+  migrateAdaptation('src', 'dst', { corrections: [c1.id] }, {
+    storage: s,
+    now: 2,
+    allowCorrections: true,
+    includeTraining: false,
+  });
+  assert.equal(listCorrections('dst', { storage: s })[0].question, '');
+  assert.equal(buildSolidifyRecords('dst', { storage: s }).samples.length, 0);
+  // 提示词中照常生效
+  assert.match(composeSystemPrompt('基础', 'dst', { storage: s }), /- 甲/);
+});
+
+test('迁移：带对话训练样本时，目标 AI 可导出固化样本（问题→回答）', () => {
+  const s = memoryStorage();
+  addKnowledge('src', '知识甲', { storage: s, now: 1, question: 'Q甲' });
+  const [k1] = listKnowledge('src', { storage: s });
+  migrateAdaptation('src', 'dst', { knowledge: [k1.id] }, { storage: s, now: 2, includeTraining: true });
+  const { samples, counts } = buildSolidifyRecords('dst', { storage: s });
+  assert.equal(counts.knowledge, 1);
+  assert.deepEqual(samples[0].messages, [
+    { role: 'user', content: 'Q甲' },
+    { role: 'assistant', content: '知识甲' },
+  ]);
+});
+
+test('迁移：目标 AI 中已有的相同文字跳过并计入重复，不产生空记录', () => {
+  const s = memoryStorage();
+  addKnowledge('dst', '知识甲', { storage: s, now: 1 });
+  addKnowledge('src', '知识甲', { storage: s, now: 2 });
+  const [k1] = listKnowledge('src', { storage: s });
+  const r = migrateAdaptation('src', 'dst', { knowledge: [k1.id] }, { storage: s, now: 3 });
+  assert.deepEqual(r, { corrections: 0, knowledge: 0, duplicate: 1, missing: 0 });
+  assert.equal(listKnowledge('dst', { storage: s }).length, 1);
+
+  const none = migrateAdaptation('src', 'empty', { knowledge: [] }, { storage: s, now: 4 });
+  assert.deepEqual(none, { corrections: 0, knowledge: 0, duplicate: 0, missing: 0 });
+  assert.equal(adaptedModelIds({ storage: s }).includes('empty'), false);
+});
+
+test('迁移：找不到的条目计入 missing；源与目标相同或为空时报错', () => {
+  const s = memoryStorage();
+  addKnowledge('src', '知识甲', { storage: s, now: 1 });
+  const r = migrateAdaptation('src', 'dst', { knowledge: ['不存在'] }, { storage: s, now: 2 });
+  assert.equal(r.missing, 1);
+  assert.throws(() => migrateAdaptation('src', 'src', {}, { storage: s }), /不能相同/);
+  assert.throws(() => migrateAdaptation('', 'dst', {}, { storage: s }), /请选择/);
+});
+
+test('迁移：目标 AI 的更正与知识库同样遵守数量上限（丢弃最旧）', () => {
+  const s = memoryStorage();
+  for (let i = 0; i < MAX_CORRECTIONS_PER_MODEL; i++) {
+    recordFeedback('dst', `更正：旧${i}`, { storage: s, now: i + 1, allowCorrections: true });
+  }
+  recordFeedback('src', '更正：新', { storage: s, now: 1000, allowCorrections: true });
+  const [c1] = listCorrections('src', { storage: s });
+  migrateAdaptation('src', 'dst', { corrections: [c1.id] }, { storage: s, now: 1001, allowCorrections: true });
+  const texts = listCorrections('dst', { storage: s }).map((c) => c.text);
+  assert.equal(texts.length, MAX_CORRECTIONS_PER_MODEL);
+  assert.equal(texts.at(-1), '新');
+  assert.equal(texts.includes('旧0'), false);
+});
+
+test('长度：更正、知识库、反馈与训练问题都完整保存，不再截断', () => {
+  const s = memoryStorage();
+  const huge = '超长'.repeat(1500);
+  recordFeedback('m', `${huge}\n更正：${huge}`, { storage: s, now: 1, allowCorrections: true, question: huge });
+  addKnowledge('m', huge, { storage: s, now: 2, question: huge });
+  assert.equal(listAdaptation('m', { storage: s }).notes[0].text, huge);
+  assert.equal(listCorrections('m', { storage: s })[0].text, huge);
+  assert.equal(listCorrections('m', { storage: s })[0].question, huge);
+  assert.equal(listKnowledge('m', { storage: s })[0].text, huge);
+  assert.equal(listKnowledge('m', { storage: s })[0].question, huge);
+  assert.ok(composeSystemPrompt('基础', 'm', { storage: s }).includes(huge));
+});
