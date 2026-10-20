@@ -144,6 +144,14 @@ export function thinkingMeter(budget) {
  * 历史超过预算时，从最早的消息开始丢弃（保留系统提示与最后一条当前提问）。
  * 返回新数组，不修改原数组。
  */
+/**
+ * 系统提示（含更正、知识库与反馈）本身能否放进上下文窗口。
+ * 管理员信息不会被截断：放不下时调用方应报错，而不是静默删减。
+ */
+export function systemPromptFits(systemMessage, contextWindow, reserve = 0) {
+  return estimatePromptTokens([systemMessage]) <= contextWindow - ANSWER_MIN_TOKENS - reserve;
+}
+
 export function fitHistory(messages, limitTokens) {
   const out = [...messages];
   while (out.length > 2 && estimatePromptTokens(out) > limitTokens) out.splice(1, 1);

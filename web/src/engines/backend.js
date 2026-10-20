@@ -14,6 +14,7 @@ import {
   FORCE_NOTE_RESERVE,
   fitHistory,
   forcedAnswerMessages,
+  systemPromptFits,
   forcedPromptTokens,
   ANSWER_MIN_TOKENS,
   estimatePromptTokens,
@@ -124,6 +125,10 @@ function createWebLLMBackend(cfg) {
         new Error('Prompt tokens exceed context window size：对话内容已占满上下文窗口，请新建对话或减少历史');
       // 历史超出提示词空间时从最早的消息开始丢弃；若启用了思考预算，为强制输出说明预留空间
       const reserve = w.thinkingActive ? FORCE_NOTE_RESERVE : 0;
+      // 管理员信息（更正、知识库、反馈）从不截断：系统提示放不下时直接报错
+      if (!systemPromptFits(system, w.contextWindow, reserve)) {
+        throw new Error('管理员信息（更正、知识库、反馈）与系统提示已超出上下文窗口，为避免截断，本次未发送。请精简这些内容，或在参数中调大上下文窗口（最大 20000）。');
+      }
       const all = fitHistory([system, ...messages], w.contextWindow - ANSWER_MIN_TOKENS - reserve);
       // 提示词估计 + 思考预算 + 回答长度，保证不超过引擎窗口
       const plan = planGeneration({

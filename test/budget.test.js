@@ -10,6 +10,7 @@ import {
   estimatePromptTokens,
   estimateTokens,
   planGeneration,
+  systemPromptFits,
   resolveWindows,
   thinkingMeter,
   WINDOW_LIMITS,
@@ -191,4 +192,12 @@ test('关闭思考时引擎窗口只用上下文窗口（推理模型也一样�
   assert.equal(resolveWindows({ defaults: DEFAULTS, reserveThinking: true }).engineContextSize, 20480);
   // 推理模型关闭思考：不预留，引擎窗口 = 16384
   assert.equal(resolveWindows({ defaults: DEFAULTS, reserveThinking: false }).engineContextSize, 16384);
+});
+
+test('管理员信息放不下时报错而非截断：systemPromptFits', () => {
+  const small = { role: 'system', content: '短' };
+  const big = { role: 'system', content: '长'.repeat(100000) };
+  assert.equal(systemPromptFits(small, 16384), true);
+  assert.equal(systemPromptFits(big, 16384), false);
+  assert.equal(systemPromptFits(small, 16384, 16000), false);
 });
