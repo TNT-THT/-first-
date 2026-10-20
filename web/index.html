@@ -107,6 +107,22 @@
         </section>
       </div>
     </div>
+    <dialog id="markDialog" class="correction-dialog mark-dialog" aria-labelledby="markTitle">
+      <form id="markForm" class="correction-form">
+        <h3 id="markTitle">标记错误说法</h3>
+        <p id="markDesc" class="muted small"></p>
+        <label class="small muted" for="markWrong">错误的说法（可从回复中选取后打开）</label>
+        <textarea id="markWrong" rows="2" aria-label="错误的说法"></textarea>
+        <label class="small muted" for="markRight">正确的说法（会同时作为该 AI 的更正）</label>
+        <textarea id="markRight" rows="3" aria-label="正确的说法"></textarea>
+        <input id="markKey" type="password" autocomplete="off" placeholder="管理员密钥" aria-label="管理员密钥" />
+        <p id="markError" class="error small" role="alert"></p>
+        <div class="correction-actions">
+          <button id="markCancel" type="button" class="btn ghost small">取消</button>
+          <button id="markSubmit" type="submit" class="btn primary small">验证并记录</button>
+        </div>
+      </form>
+    </dialog>
     <dialog id="correctionDialog" class="correction-dialog" aria-labelledby="correctionTitle">
       <form id="correctionForm" class="correction-form">
         <h3 id="correctionTitle">管理员验证</h3>
