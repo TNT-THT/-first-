@@ -1,0 +1,30 @@
+{
+  "name": "oj-ai-assistant",
+  "version": "1.0.0",
+  "private": true,
+  "description": "可嵌入 iframe 的刷题助手：默认纯静态（浏览器内运行开源模型 WebLLM），可选自托管服务端模式",
+  "type": "module",
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "dev:web": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build --config web/vite.config.js && node scripts/pack-site.mjs",
+    "build:remote": "VITE_ENGINE=remote vite build --config web/vite.config.js",
+    "start": "node server/index.js",
+    "set-password": "node scripts/set-access-password.mjs",
+    "test": "node --test test/unit.test.js test/server.test.js test/model-file.test.js test/training-pack.test.js test/training-catalog.test.js test/adaptation.test.js test/health.test.js test/lifecycle.test.js test/data-export.test.js test/site-pack.test.js",
+    "test:training": "python3 -m unittest discover -s training/tests -p \"test_*.py\""
+  },
+  "dependencies": {
+    "@mlc-ai/web-llm": "0.2.86",
+    "dompurify": "^3.4.17",
+    "express": "^4.22.3",
+    "highlight.js": "^11.12.0",
+    "katex": "^0.16.47",
+    "markdown-it": "^14.3.2"
+  },
+  "devDependencies": {
+    "vite": "^5.4.21"
+  }
+}

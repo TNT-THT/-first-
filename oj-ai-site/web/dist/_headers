@@ -1,0 +1,7 @@
+# Netlify / Cloudflare Pages 等支持 _headers 的静态托管平台生效。
+# 允许被任何站点 iframe 嵌入（不设置 X-Frame-Options）。
+# 如只想让指定 OJ 嵌入，把 frame-ancestors 改为：'self' https://hydro.ac https://*.hydro.ac
+/*
+  Content-Security-Policy: frame-ancestors *
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin

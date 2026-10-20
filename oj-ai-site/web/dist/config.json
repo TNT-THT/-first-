@@ -1,0 +1,150 @@
+{
+  "appName": "OJ 刷题助手",
+  "allowedParentOrigins": [
+    "https://hydro.ac",
+    "https://*.hydro.ac"
+  ],
+  "access": {
+    "salt": "47f3078386f76eb16bd503d9051fde95",
+    "passwordSha256": "e878a3fac18f90b0ecf213003d69fe5018c11e56b5620ed3dfdb344afe4a9f54"
+  },
+  "webllm": {
+    "defaultModel": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
+    "mirrorOwner": "",
+    "models": [
+      {
+        "id": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5 3B（非推理·小·纯文本·默认·需约 2.4 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-3B-Instruct-q4f32_1-MLC",
+        "label": "Qwen2.5 3B q4f32（非推理·小·纯文本·高精度·需约 2.8 GB 显存）"
+      },
+      {
+        "id": "Qwen3-4B-q4f16_1-MLC",
+        "label": "Qwen3 4B（推理·小·纯文本·需约 3.4 GB 显存）"
+      },
+      {
+        "id": "Qwen3-4B-q4f32_1-MLC",
+        "label": "Qwen3 4B q4f32（推理·小·纯文本·高精度·需约 4.2 GB 显存）"
+      },
+      {
+        "id": "Qwen3-1.7B-q4f16_1-MLC",
+        "label": "Qwen3 1.7B（推理·小·纯文本·需约 2.0 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5-Coder 3B（非推理·小·纯文本·需约 2.4 GB 显存）"
+      },
+      {
+        "id": "Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC",
+        "label": "Ministral 3 3B Instruct（非推理·小·纯文本·需约 2.8 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5-Coder 7B（非推理·中·纯文本·需约 5.0 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-Coder-7B-Instruct-q4f32_1-MLC",
+        "label": "Qwen2.5-Coder 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-7B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5 7B（非推理·中·纯文本·需约 5.0 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-7B-Instruct-q4f32_1-MLC",
+        "label": "Qwen2.5 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）"
+      },
+      {
+        "id": "Qwen3-8B-q4f16_1-MLC",
+        "label": "Qwen3 8B（推理·中·纯文本·需约 5.6 GB 显存）"
+      },
+      {
+        "id": "Qwen3-8B-q4f32_1-MLC",
+        "label": "Qwen3 8B q4f32（推理·中·纯文本·高精度·需约 6.7 GB 显存）"
+      },
+      {
+        "id": "Phi-4-mini-instruct-q4f16_1-MLC",
+        "label": "Phi-4 mini 3.8B（非推理·小·纯文本·需约 3.4 GB 显存）"
+      },
+      {
+        "id": "Phi-4-mini-instruct-q4f32_1-MLC",
+        "label": "Phi-4 mini 3.8B q4f32（非推理·中·纯文本·高精度·需约 4.1 GB 显存）"
+      },
+      {
+        "id": "gemma3-1b-it-q4f16_1-MLC",
+        "label": "Gemma 3 1B（非推理·极小·纯文本·需约 0.7 GB 显存）"
+      },
+      {
+        "id": "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
+        "label": "Qwen2.5 0.5B（非推理·极小·纯文本·需约 0.9 GB 显存）"
+      },
+      {
+        "id": "Qwen3-0.6B-q4f16_1-MLC",
+        "label": "Qwen3 0.6B（推理·小·纯文本·需约 1.4 GB 显存）"
+      },
+      {
+        "id": "Qwen3.5-0.8B-q4f16_1-MLC",
+        "label": "Qwen3.5 0.8B（推理·小·纯文本·需约 1.6 GB 显存）"
+      },
+      {
+        "id": "Qwen3.5-2B-q4f16_1-MLC",
+        "label": "Qwen3.5 2B（推理·小·纯文本·需约 2.2 GB 显存）"
+      },
+      {
+        "id": "Qwen3.5-4B-q4f16_1-MLC",
+        "label": "Qwen3.5 4B（推理·中·纯文本·需约 3.8 GB 显存）"
+      },
+      {
+        "id": "Qwen3.5-9B-q4f16_1-MLC",
+        "label": "Qwen3.5 9B（推理·中·纯文本·需约 6.3 GB 显存）"
+      },
+      {
+        "id": "gemma-2-9b-it-q4f16_1-MLC",
+        "label": "Gemma 2 9B（非推理·中·纯文本·需约 6.3 GB 显存）"
+      },
+      {
+        "id": "gemma-2-9b-it-q4f32_1-MLC",
+        "label": "Gemma 2 9B q4f32（非推理·大·纯文本·高精度·需约 8.2 GB 显存）"
+      },
+      {
+        "id": "DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC",
+        "label": "DeepSeek-R1 8B（推理·中·纯文本·需约 4.9 GB 显存）"
+      },
+      {
+        "id": "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC",
+        "label": "DeepSeek-R1 7B（推理·中·纯文本·需约 5.0 GB 显存）"
+      },
+      {
+        "id": "Llama-2-13b-chat-hf-q4f16_1-MLC",
+        "label": "Llama 2 13B（非推理·大·纯文本·需约 11.5 GB 显存）"
+      },
+      {
+        "id": "Llama-3.1-70B-Instruct-q3f16_1-MLC",
+        "label": "Llama 3.1 70B（非推理·超大·纯文本·需约 30.4 GB 显存）"
+      },
+      {
+        "id": "Llama-3-70B-Instruct-q3f16_1-MLC",
+        "label": "Llama 3 70B（非推理·超大·纯文本·需约 30.4 GB 显存）"
+      }
+    ],
+    "temperature": 0.3,
+    "maxTokens": 16384,
+    "contextChars": 5000,
+    "maxMessages": 10,
+    "extraRecords": [
+      {
+        "model": "https://huggingface.co/mlc-ai/DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
+        "model_id": "DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",
+        "model_lib": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen2-1.5B-Instruct-q4f16_1_cs1k-webgpu.wasm",
+        "low_resource_required": true,
+        "vram_required_MB": 1629.75,
+        "overrides": {
+          "context_window_size": 4096
+        }
+      }
+    ]
+  },
+  "systemPrompt": "你是一个有帮助的 AI 助手，可以回答各类问题。请使用用户提问的语言回答。数学公式使用 LaTeX（行内用 $...$，独立公式用 $$...$$），代码使用带语言标注的 Markdown 代码块。"
+}
