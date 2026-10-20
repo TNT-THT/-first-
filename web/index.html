@@ -42,6 +42,7 @@
             <button id="historyBtn" type="button" class="btn ghost small history-toggle" aria-expanded="false">历史</button>
             <span id="chatTitle" class="chat-title"></span>
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
+            <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
             <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
             <button id="roleBtn" type="button" class="btn ghost small" aria-expanded="false">更改权限</button>
             <div id="historyPanel" class="history-panel" hidden>
@@ -94,7 +95,6 @@
             <div class="progress" id="statusProgress" hidden><i id="statusBarFill"></i></div>
           </div>
 
-          <div id="adaptSuggest" class="adapt-suggest" hidden></div>
           <form id="composer" class="composer">
             <textarea id="input" rows="1" placeholder="描述题目或粘贴代码。Enter 发送，Shift+Enter 换行"></textarea>
             <label id="thinkToggleLabel" class="think-toggle" title="仅推理模型：开启后先展示思考过程（可折叠）；关闭后直接给出回答，速度更快" hidden>

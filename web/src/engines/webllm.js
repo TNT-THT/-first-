@@ -72,6 +72,26 @@ function resetEngine() {
   }
 }
 
+/**
+ * 释放引擎占用的显存（排队执行，不与加载交错）：先中断并等待进行中的生成，再丢弃引擎与 worker。
+ * worker 终止后 GPU 资源随之释放；下次发送时会按当前设置重新加载。没有引擎时返回 false。
+ */
+export function releaseEngine() {
+  return enqueueLoad(async () => {
+    if (inflight) {
+      try {
+        engine?.interruptGenerate?.();
+      } catch {
+        // 忽略：引擎可能已经结束
+      }
+      await inflight.catch(() => {});
+    }
+    if (!engine && !worker) return false;
+    resetEngine();
+    return true;
+  });
+}
+
 /** 加载模型（排队执行）。 */
 export function loadWebLLMEngine(modelId, onProgress, opts = {}) {
   return enqueueLoad(() => doLoadWebLLMEngine(modelId, onProgress, opts));

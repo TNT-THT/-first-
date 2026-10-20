@@ -44,6 +44,7 @@ import {
   suggestParams,
   mechanicalReply,
 } from './adaptation.js';
+import { buildConversationMarkdown, conversationFilename } from './chat-export.js';
 import {
   buildContext,
   createSession,
@@ -127,7 +128,7 @@ const els = {
   modelAdminHint: $('#modelAdminHint'),
   localModelList: $('#localModelList'),
   adaptHint: $('#adaptHint'),
-  adaptSuggest: $('#adaptSuggest'),
+  exportChatBtn: $('#exportChatBtn'),
   paramOverrides: $('#paramOverrides'),
   exportWithParams: $('#exportWithParams'),
   exportParamsText: $('#exportParamsText'),
@@ -374,12 +375,14 @@ function openMarkDialog(msg, presetWrong = '') {
   const dlg = els.markDialog;
   const session = activeSession();
   if (!dlg || !session) return;
+  // 标记错误针对即将回答的 AI（下拉框当前选中的模型），而不是这条回复的 AI
+  const target = state.backend.modelId;
   els.markWrong.value = presetWrong;
   els.markRight.value = '';
   els.markKey.value = '';
   els.markError.textContent = '';
   els.markDesc.textContent =
-    `为「${modelDisplayName(msg.model)}」标记错误说法。之后该 AI 的回答若再出现错误说法，会在回答下方提示正确说法。` +
+    `为即将回答的「${modelDisplayName(target)}」标记错误说法。之后该 AI 的回答若再出现错误说法，会在回答下方提示正确说法。` +
     '正确说法会同时作为该 AI 的更正（底层设定，仅本机）。输入管理员密钥验证后保存；取消则不记录。';
   els.markForm.onsubmit = async (e) => {
     e.preventDefault();
@@ -405,13 +408,13 @@ function openMarkDialog(msg, presetWrong = '') {
         els.markKey.select();
         return;
       }
-      const res = addCheckRule(msg.model, { wrong, right });
+      const res = addCheckRule(target, { wrong, right });
       if (res.error) {
         els.markError.textContent = res.error;
         return;
       }
       // 正确说法同时作为更正（已验证密钥，仅本机）；换行压成一行，符合更正格式
-      recordFeedback(msg.model, `更正：${right.replace(/\s*\n\s*/g, ' ')}`, {
+      recordFeedback(target, `更正：${right.replace(/\s*\n\s*/g, ' ')}`, {
         allowCorrections: true,
         question: questionBefore(session, msg),
       });
@@ -558,16 +561,10 @@ function modelDisplayName(id) {
 }
 
 /**
- * 管理员（且为本机模式）在某个 AI 的回复之后发送的消息，视为对该 AI 的反馈：
- * 仅保存在本机，并在之后的回答中作为该 AI 的附加说明（参数行可调整该 AI 的采样参数）。
- * 反馈仍会照常发送给当前 AI，不影响对话。
+ * 管理员（且为本机模式）在对话中的修改（参数行、参数关键词、附加说明、更正、标记错误）
+ * 一律针对“即将回答的 AI”，即下拉框当前选中的模型（state.backend.modelId），而不是上一条回复的 AI。
+ * 这些修改仅保存在本机，并作为该 AI 之后回答的附加说明或参数。
  */
-/** 可以接收管理员反馈的目标：会话中最后一条已完成的 AI 回复（且带有模型信息）。 */
-function feedbackTarget(session) {
-  const last = [...(session?.messages || [])].reverse().find((m) => m.role === 'assistant' && !m.fixed);
-  if (!last || !last.model || last.error || !last.content) return null;
-  return last;
-}
 
 /** 某条回复之前最近的用户消息（即它所回答的问题），用于固化训练数据。 */
 function questionBefore(session, target) {
@@ -577,41 +574,6 @@ function questionBefore(session, target) {
   }
   return '';
 }
-
-function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
-  if (MODE !== 'webllm' || !isAdmin()) return { found: [] };
-  const last = feedbackTarget(session);
-  if (!last) return { found: [] };
-  const question = questionBefore(session, last);
-  const rec = recordFeedback(last.model, text, { allowCorrections, question });
-  if (!rec) return { found: [] };
-  const parts = [];
-  if (rec.note) parts.push('已记录反馈');
-  if (rec.corrections?.length) {
-    parts.push(`已记录 ${rec.corrections.length} 条更正（已验证密钥，作为该 AI 的底层设定，无条件采纳）`);
-  }
-  if (rec.params) {
-    const changed = (rec.changes || []).map((c) => `${c.key} ${c.from ?? '默认'}→${c.to}`);
-    parts.push('已更新参数 ' + (changed.length ? changed.join(', ') : '（未变化）'));
-  }
-  // 没有显式参数行、也没有更正时，按关键词给出“建议参数”，必须由管理员确认后才生效
-  let suggested = 0;
-  let found = [];
-  if (!rec.params && !rec.corrections?.length) {
-    found = suggestParams(text, effectiveParams(last.model));
-    suggested = addSuggestions(last.model, last.modelLabel || modelDisplayName(last.model), found);
-    if (suggested) parts.push(`有 ${suggested} 条参数建议，请在输入框上方确认（确认前不生效）`);
-  }
-  if (parts.length) {
-    showStatus(`${parts.join('，')}（仅本机，对「${modelDisplayName(last.model)}」生效，不上传）。`);
-  }
-  renderAdaptList();
-  // 返回找到的参数建议，供发送流程做机械识别（找到建议且无提问时不调用模型）
-  return { found, suggested };
-}
-
-/** 待管理员确认的参数建议（仅内存中保存；刷新页面或退出管理员后清空）。 */
-let pendingSuggestions = [];
 
 /** 某模型当前生效的参数：本机覆盖优先，否则使用配置默认值。 */
 function effectiveParams(modelId) {
@@ -625,74 +587,68 @@ function effectiveParams(modelId) {
   };
 }
 
-/** 参数在界面中的名称（管理员可见的建议卡片、参数详情共用）。 */
-const PARAM_NAMES = {
-  temperature: 'temperature（温度）',
-  maxTokens: 'maxTokens（最大输出长度）',
-  contextWindow: 'contextWindow（上下文窗口）',
-  thinkingWindow: 'thinkingWindow（思考窗口）',
-};
+/** 参数变更的展示格式：key 原值→新值（原值为空时显示“默认”）。 */
+function fmtChange(c) {
+  return `${c.key} ${c.from ?? '默认'}→${c.to}`;
+}
 
-function addSuggestions(modelId, modelLabel, found) {
-  for (const f of found) {
-    pendingSuggestions = pendingSuggestions.filter((x) => !(x.modelId === modelId && x.key === f.key));
-    pendingSuggestions.push({ id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, modelId, modelLabel, ...f });
+/**
+ * 记录管理员在本条消息中的修改，并直接生效（不需要确认，不调用模型）。
+ * 返回 {target, label, changes, extra, parts}：changes 为实际变更的参数 [{key, from, to}]，
+ * extra 为同时记录的附加说明或更正描述。非管理员、非本机模式或没有 AI 时返回空结果。
+ */
+function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
+  const none = { target: null, label: '', changes: [], extra: [], parts: [] };
+  if (MODE !== 'webllm' || !isAdmin() || !state.backend) return none;
+  const target = state.backend.modelId;
+  if (!target) return none;
+  const label = modelDisplayName(target);
+  // 附加说明与更正关联的问题：会话中最近一条已完成回答所回答的问题
+  const lastReply = [...(session?.messages || [])].reverse().find((m) => m.role === 'assistant' && !m.fixed && m.content && !m.error);
+  const question = lastReply ? questionBefore(session, lastReply) : '';
+  const rec = recordFeedback(target, text, { allowCorrections, question });
+  const parts = [];
+  const changes = [];
+  const extra = [];
+  if (rec?.note) {
+    parts.push('已记录反馈');
+    extra.push('记录了附加说明');
   }
-  pendingSuggestions = pendingSuggestions.slice(-6);
-  renderSuggestions();
-  return found.length;
-}
-
-function dropPendingSuggestions(modelId) {
-  pendingSuggestions = pendingSuggestions.filter((x) => x.modelId !== modelId);
-  renderSuggestions();
-}
-
-/** 输入框上方的建议卡片：仅管理员可见。 */
-function renderSuggestions() {
-  const box = els.adaptSuggest;
-  if (!box) return;
-  box.replaceChildren();
-  const items = isAdmin() && MODE === 'webllm' ? pendingSuggestions : [];
-  box.hidden = items.length === 0;
-  for (const s of items) {
-    const row = document.createElement('div');
-    row.className = 'adapt-suggest-row';
-    const text = document.createElement('span');
-    const name = PARAM_NAMES[s.key] || s.key;
-    text.textContent = `检测到你${s.reason}，是否将「${s.modelLabel}」的 ${name} 设为 ${s.value}？`;
-    const ok = document.createElement('button');
-    ok.type = 'button';
-    ok.className = 'btn primary small';
-    ok.dataset.action = 'suggest-accept';
-    ok.dataset.id = s.id;
-    ok.textContent = '确认';
-    const no = document.createElement('button');
-    no.type = 'button';
-    no.className = 'btn ghost small';
-    no.dataset.action = 'suggest-dismiss';
-    no.dataset.id = s.id;
-    no.textContent = '忽略';
-    row.append(text, ok, no);
-    box.append(row);
+  if (rec?.corrections?.length) {
+    parts.push(`已记录 ${rec.corrections.length} 条更正（已验证密钥，作为该 AI 的底层设定，无条件采纳）`);
+    extra.push(`记录了 ${rec.corrections.length} 条更正`);
   }
-}
-
-function acceptSuggestion(id) {
-  if (!requireAdmin('确认参数建议')) return;
-  const s = pendingSuggestions.find((x) => x.id === id);
-  if (!s) return;
-  const value = applyParamSuggestion(s.modelId, s.key, s.value, { reason: s.reason });
-  pendingSuggestions = pendingSuggestions.filter((x) => x.id !== id);
-  renderSuggestions();
+  if (rec?.params) {
+    for (const c of rec.changes || []) changes.push({ key: c.key, from: c.from, to: c.to });
+    parts.push('已更新参数 ' + (changes.length ? changes.map(fmtChange).join(', ') : '（未变化）'));
+  }
+  // 没有显式参数行、也没有更正时，按关键词直接修改参数（不需要确认，不调用模型）
+  if (!rec?.params && !rec?.corrections?.length) {
+    const current = effectiveParams(target);
+    for (const f of suggestParams(text, current)) {
+      const to = applyParamSuggestion(target, f.key, f.value, { reason: f.reason });
+      if (to !== null) changes.push({ key: f.key, from: current[f.key], to });
+    }
+    if (changes.length) parts.push('已按关键词修改参数 ' + changes.map(fmtChange).join(', '));
+  }
+  if (parts.length) showStatus(`${parts.join('，')}（仅本机，对「${label}」生效，不上传）。`);
   renderAdaptList();
-  if (value === null) return showStatus('参数建议无效，未生效。', { error: true });
-  showStatus(`已确认：「${s.modelLabel}」的 ${s.key} = ${value}（仅本机，从下一次回答起生效）。`);
+  renderParamOverrides();
+  return { target, label, changes, extra, parts };
 }
 
-function dismissSuggestion(id) {
-  pendingSuggestions = pendingSuggestions.filter((x) => x.id !== id);
-  renderSuggestions();
+/**
+ * 参数改变后释放多余显存：若已加载的引擎模型或窗口与当前设置不一致，则释放引擎（下次发送时按新设置加载）。
+ * 返回是否真的释放了。只用于不调用模型的回复；需要回答的消息会在加载新引擎时替换旧引擎。
+ */
+async function releaseStaleEngine() {
+  if (MODE !== 'webllm' || !state.backend?.releaseIfStale) return false;
+  try {
+    return await state.backend.releaseIfStale();
+  } catch (err) {
+    console.warn('释放显存失败', err);
+    return false;
+  }
 }
 
 /**
@@ -763,32 +719,29 @@ async function send(rawText) {
   const text = (rawText || '').trim();
   if (!text || state.streaming) return;
 
-  // 更正需要管理员密钥验证（仅 WebLLM 本机模式、管理员、且存在可接收反馈的 AI 回复时）
+  // 更正需要管理员密钥验证（仅 WebLLM 本机模式、管理员）；更正针对即将回答的 AI
   let allowCorrections = false;
   if (MODE === 'webllm' && isAdmin() && parseCorrections(text).length) {
-    if (feedbackTarget(activeSession())) {
-      const ok = await verifyCorrectionKey(text);
-      if (!ok) {
-        if (!els.input.value) {
-          els.input.value = text;
-          autoGrow();
-        }
-        return;
+    const desc = `这条消息包含更正，将作为「${modelDisplayName(state.backend.modelId)}」（即将回答的 AI）的底层设定记录（仅本机）。输入管理员密钥验证后保存；取消则不发送。`;
+    const ok = await verifyCorrectionKey(text, desc);
+    if (!ok) {
+      if (!els.input.value) {
+        els.input.value = text;
+        autoGrow();
       }
-      allowCorrections = true;
-    } else {
-      showStatus('更正需要在某个 AI 的回复之后发送，本条未记录为更正。');
+      return;
     }
+    allowCorrections = true;
   }
 
   const session = ensureSession();
   const isFirst = session.messages.length === 0;
   const userMsg = { role: 'user', content: text, ts: Date.now() };
   const feedback = recordAdminFeedback(session, text, { allowCorrections });
-  // 机械识别：管理员消息只是参数调整指令（找到参数建议、没有提问）时，给出固定提示，不调用模型
-  const fixed = mechanicalReply(text, feedback?.found);
-  if (fixed) {
-    showFixedReply(session, isFirst, userMsg, fixed);
+  // 机械识别：管理员消息只是参数调整指令（已直接修改参数、没有提问）时，不调用模型，给出固定提示
+  if (mechanicalReply(text, feedback)) {
+    const released = await releaseStaleEngine();
+    showFixedReply(session, isFirst, userMsg, mechanicalReply(text, { ...feedback, released }));
     return;
   }
   // 记录本次回答所用的 AI（名称快照保存，之后删除或改名模型也能正确标注）
@@ -1045,6 +998,20 @@ function flashStatus(text) {
 }
 
 // ---------- 模型导出 / 导入 ----------
+/** 导出当前对话为 Markdown 文件（所有用户可用，仅在本机生成，不上传）。 */
+function exportCurrentChat() {
+  const session = activeSession();
+  const hasContent = !!session && session.messages.some((m) => m.content && !m.error);
+  if (!hasContent) {
+    showStatus('当前没有可导出的对话。', { error: true });
+    return;
+  }
+  const md = buildConversationMarkdown(session);
+  downloadBlob(new Blob([md], { type: 'text/markdown;charset=utf-8' }), conversationFilename(session.title));
+  showStatus('已导出当前对话（Markdown 文件，仅保存在本机，不上传）。');
+}
+els.exportChatBtn.addEventListener('click', exportCurrentChat);
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -1302,7 +1269,6 @@ function clearAdaptation(modelId) {
   if (!requireAdmin('清空 AI 适应记录')) return;
   if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录（包括说明、本地知识库、参数与参数变更记录）？`)) return;
   clearModelAdaptation(modelId);
-  dropPendingSuggestions(modelId);
   renderAdaptList();
 }
 
@@ -1315,7 +1281,6 @@ async function deleteLocalModel(id) {
     const removed = await removeLocalModelFiles(entry.record);
     removeLocalModel(id);
     clearModelAdaptation(id);
-    dropPendingSuggestions(id);
     if (state.backend.modelId === id) state.backend.setModel(state.appConfig.webllm.defaultModel);
     if (getSavedDefaultModel() === id) saveDefaultModel(null);
     renderModelOptions(state.backend.modelId);
@@ -1441,8 +1406,6 @@ function refreshRoleUI() {
     : '导出与导入模型仅限管理员。';
   renderLocalList();
   renderAdaptList();
-  if (!admin) pendingSuggestions = [];
-  renderSuggestions();
   renderParamOverrides();
 }
 
@@ -1735,7 +1698,7 @@ function renderAdaptList() {
   }
 }
 
-const PARAM_SOURCE_LABEL = { explicit: '参数行', suggestion: '建议确认', reset: '恢复默认' };
+const PARAM_SOURCE_LABEL = { explicit: '参数行', suggestion: '关键词识别', reset: '恢复默认' };
 
 function formatLogTime(ts) {
   return new Date(ts).toLocaleString('zh-CN', { hour12: false });
@@ -1780,7 +1743,7 @@ function renderParamDetails(list, modelId, overrides) {
       const row = document.createElement('div');
       row.className = 'muted small local-meta';
       const src = PARAM_SOURCE_LABEL[c.source] || c.source;
-      const why = c.source === 'suggestion' ? `（${c.reason.replace(/^确认建议：/, '')}）` : '';
+      const why = c.source === 'suggestion' ? `（${c.reason.replace(/^关键词识别：/, '')}）` : '';
       row.textContent =
         `${formatLogTime(c.ts)}  ${c.key}：${c.from ?? '默认'} → ${c.to ?? '默认'}  来源：${src}${why}`;
       list.append(row);
@@ -2031,8 +1994,6 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'adapt-reset') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert-all') return revertAllParams(btn.dataset.id);
-  if (btn && btn.dataset.action === 'suggest-accept') return acceptSuggestion(btn.dataset.id);
-  if (btn && btn.dataset.action === 'suggest-dismiss') return dismissSuggestion(btn.dataset.id);
   if (!e.target.closest('.chat-head')) {
     if (!els.historyPanel.hidden) closeHistory();
     if (!els.rolePanel.hidden) toggleRolePanel(false);

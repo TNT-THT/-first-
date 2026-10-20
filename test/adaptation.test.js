@@ -50,6 +50,9 @@ function memoryStorage() {
 test('参数行：解析已知参数，限制范围，忽略未知项', () => {
   assert.deepEqual(parseFeedbackParams('参数：temperature=0.2, maxTokens=800'), { temperature: 0.2, maxTokens: 800 });
   assert.deepEqual(parseFeedbackParams('设置: temperature=9，maxTokens=10'), { temperature: 1.5, maxTokens: 64 });
+  // 等号两侧的空格不影响解析：「参数：contextWindow = 4096」
+  assert.deepEqual(parseFeedbackParams('参数：contextWindow = 4096'), { contextWindow: 4096 });
+  assert.deepEqual(parseFeedbackParams('参数：contextWindow = 4096， maxTokens =800'), { contextWindow: 4096, maxTokens: 800 });
   assert.deepEqual(parseFeedbackParams('参数：foo=1, temperature=abc'), null);
   assert.equal(parseFeedbackParams('普通的反馈，不含参数'), null);
   assert.equal(parseFeedbackParams(''), null);
@@ -194,11 +197,11 @@ test('变更记录：显式参数行记录旧值（默认为 null）与新值，
   assert.deepEqual(log[1], { ts: 1, key: 'temperature', from: null, to: 0.2, source: 'explicit', reason: '显式参数行' });
 });
 
-test('变更记录：建议确认与恢复默认都有来源', () => {
+test('变更记录：关键词识别与恢复默认都有来源', () => {
   const s = memoryStorage();
   applyParamSuggestion('m', 'maxTokens', 400, { storage: s, now: 5, reason: '希望回答更简洁' });
   assert.equal(listParamLog('m', { storage: s })[0].source, 'suggestion');
-  assert.equal(listParamLog('m', { storage: s })[0].reason, '确认建议：希望回答更简洁');
+  assert.equal(listParamLog('m', { storage: s })[0].reason, '关键词识别：希望回答更简洁');
   assert.equal(resetParam('m', 'maxTokens', { storage: s, now: 6 }), true);
   assert.deepEqual(getModelParams('m', { storage: s }), {});
   assert.deepEqual(listParamLog('m', { storage: s })[0], {
@@ -642,15 +645,20 @@ test('参数建议：上下文窗口可由关键词识别（机械规则，不�
   assert.deepEqual(suggestParams('显存不够，跑不动', { contextWindow: 8192 }), []);
 });
 
-test('机械识别：参数指令返回固定提示；含问题或无建议时返回 null', () => {
-  const found = suggestParams('太啰嗦了，回答更简洁一点', { maxTokens: 16384 });
-  const reply = mechanicalReply('太啰嗦了，回答更简洁一点', found);
-  assert.match(reply, /已识别为参数调整：最大输出长度 → 400/);
-  assert.match(reply, /本条无需模型回答/);
+test('机械识别：参数已直接修改时返回固定提示；含问题或无参数变更时返回 null', () => {
+  const changes = [{ key: 'maxTokens', from: null, to: 400 }];
+  const reply = mechanicalReply('太啰嗦了，回答更简洁一点', { changes, label: '测试AI' });
+  assert.match(reply, /已修改参数：最大输出长度 默认 → 400，对「测试AI」生效/);
+  assert.match(reply, /不调用模型/);
+  assert.match(reply, /下次发送时按新参数生效/);
+  // 释放了多余显存时，提示中说明
+  assert.match(mechanicalReply('太啰嗦了', { changes, label: 'X', released: true }), /已释放多余显存/);
+  // 同时记录的附加说明也会提示
+  assert.match(mechanicalReply('太啰嗦了', { changes, extra: ['记录了附加说明'], label: 'X' }), /同时记录了附加说明/);
   // 带问题的消息仍交给模型回答
-  assert.equal(mechanicalReply('太啰嗦了，回答更简洁一点？二分查找是什么', found), null);
-  assert.equal(mechanicalReply('太啰嗦了？', found), null);
-  // 没有建议：不是参数指令
-  assert.equal(mechanicalReply('这个说法不对', []), null);
+  assert.equal(mechanicalReply('太啰嗦了，回答更简洁一点？二分查找是什么', { changes, label: 'X' }), null);
+  assert.equal(mechanicalReply('太啰嗦了？', { changes, label: 'X' }), null);
+  // 没有参数变更：不是参数指令
+  assert.equal(mechanicalReply('这个说法不对', { changes: [] }), null);
   assert.equal(mechanicalReply('这个说法不对', undefined), null);
 });
