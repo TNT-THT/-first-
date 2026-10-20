@@ -27,6 +27,7 @@ import {
   sanitizeParams,
   setModelParams,
   suggestParams,
+  mechanicalReply,
   addKnowledge,
   buildKnowledgePrompt,
   clearKnowledge,
@@ -626,4 +627,30 @@ test('长度：更正、知识库、反馈与训练问题都完整保存，不�
   assert.equal(k.text, long);
   assert.equal(k.question, long);
   assert.ok(composeSystemPrompt('基础', 'm', { storage: s }).includes(long));
+});
+
+test('参数建议：上下文窗口可由关键词识别（机械规则，不调用模型）', () => {
+  // 记不住前文：窗口低于 12288 时建议调大
+  assert.deepEqual(suggestParams('你记不住前面说的内容', { contextWindow: 8192 }), [
+    { key: 'contextWindow', value: 12288, reason: '希望记住更长的对话（窗口越大越占显存）' },
+  ]);
+  assert.deepEqual(suggestParams('你记不住前面说的内容', { contextWindow: 16384 }), []);
+  // 显存不够：窗口高于 8192 时建议调小
+  assert.deepEqual(suggestParams('显存不够，跑不动', { contextWindow: 16384 }), [
+    { key: 'contextWindow', value: 8192, reason: '显存不够，需要减小上下文窗口' },
+  ]);
+  assert.deepEqual(suggestParams('显存不够，跑不动', { contextWindow: 8192 }), []);
+});
+
+test('机械识别：参数指令返回固定提示；含问题或无建议时返回 null', () => {
+  const found = suggestParams('太啰嗦了，回答更简洁一点', { maxTokens: 16384 });
+  const reply = mechanicalReply('太啰嗦了，回答更简洁一点', found);
+  assert.match(reply, /已识别为参数调整：最大输出长度 → 400/);
+  assert.match(reply, /本条无需模型回答/);
+  // 带问题的消息仍交给模型回答
+  assert.equal(mechanicalReply('太啰嗦了，回答更简洁一点？二分查找是什么', found), null);
+  assert.equal(mechanicalReply('太啰嗦了？', found), null);
+  // 没有建议：不是参数指令
+  assert.equal(mechanicalReply('这个说法不对', []), null);
+  assert.equal(mechanicalReply('这个说法不对', undefined), null);
 });

@@ -42,6 +42,7 @@ import {
   setModelParams,
   solidifyJsonl,
   suggestParams,
+  mechanicalReply,
 } from './adaptation.js';
 import {
   buildContext,
@@ -563,7 +564,7 @@ function modelDisplayName(id) {
  */
 /** 可以接收管理员反馈的目标：会话中最后一条已完成的 AI 回复（且带有模型信息）。 */
 function feedbackTarget(session) {
-  const last = [...(session?.messages || [])].reverse().find((m) => m.role === 'assistant');
+  const last = [...(session?.messages || [])].reverse().find((m) => m.role === 'assistant' && !m.fixed);
   if (!last || !last.model || last.error || !last.content) return null;
   return last;
 }
@@ -578,12 +579,12 @@ function questionBefore(session, target) {
 }
 
 function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
-  if (MODE !== 'webllm' || !isAdmin()) return;
+  if (MODE !== 'webllm' || !isAdmin()) return { found: [] };
   const last = feedbackTarget(session);
-  if (!last) return;
+  if (!last) return { found: [] };
   const question = questionBefore(session, last);
   const rec = recordFeedback(last.model, text, { allowCorrections, question });
-  if (!rec) return;
+  if (!rec) return { found: [] };
   const parts = [];
   if (rec.note) parts.push('已记录反馈');
   if (rec.corrections?.length) {
@@ -595,8 +596,9 @@ function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
   }
   // 没有显式参数行、也没有更正时，按关键词给出“建议参数”，必须由管理员确认后才生效
   let suggested = 0;
+  let found = [];
   if (!rec.params && !rec.corrections?.length) {
-    const found = suggestParams(text, effectiveParams(last.model));
+    found = suggestParams(text, effectiveParams(last.model));
     suggested = addSuggestions(last.model, last.modelLabel || modelDisplayName(last.model), found);
     if (suggested) parts.push(`有 ${suggested} 条参数建议，请在输入框上方确认（确认前不生效）`);
   }
@@ -604,6 +606,8 @@ function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
     showStatus(`${parts.join('，')}（仅本机，对「${modelDisplayName(last.model)}」生效，不上传）。`);
   }
   renderAdaptList();
+  // 返回找到的参数建议，供发送流程做机械识别（找到建议且无提问时不调用模型）
+  return { found, suggested };
 }
 
 /** 待管理员确认的参数建议（仅内存中保存；刷新页面或退出管理员后清空）。 */
@@ -741,6 +745,20 @@ function verifyCorrectionKey(text, desc = '') {
   });
 }
 
+/** 固定提示（不调用模型）：作为助手消息显示，但不标注 AI、不作为反馈对象，也不发送给模型。 */
+function showFixedReply(session, isFirst, userMsg, content) {
+  session.messages.push(userMsg, { role: 'assistant', content, ts: Date.now(), fixed: true });
+  if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
+    session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
+  }
+  if (isFirst) session.title = titleFrom(userMsg.content);
+  session.updatedAt = Date.now();
+  persist();
+  refreshAll();
+  scrollToBottom(true);
+  els.input.focus({ preventScroll: true });
+}
+
 async function send(rawText) {
   const text = (rawText || '').trim();
   if (!text || state.streaming) return;
@@ -766,7 +784,13 @@ async function send(rawText) {
   const session = ensureSession();
   const isFirst = session.messages.length === 0;
   const userMsg = { role: 'user', content: text, ts: Date.now() };
-  recordAdminFeedback(session, text, { allowCorrections });
+  const feedback = recordAdminFeedback(session, text, { allowCorrections });
+  // 机械识别：管理员消息只是参数调整指令（找到参数建议、没有提问）时，给出固定提示，不调用模型
+  const fixed = mechanicalReply(text, feedback?.found);
+  if (fixed) {
+    showFixedReply(session, isFirst, userMsg, fixed);
+    return;
+  }
   // 记录本次回答所用的 AI（名称快照保存，之后删除或改名模型也能正确标注）
   const modelId = state.backend.modelId;
   const modelLabel = modelDisplayName(modelId);
@@ -941,7 +965,7 @@ async function regenerate() {
   const msgs = activeSession()?.messages || [];
   const last = msgs.at(-1);
   const prev = msgs.at(-2);
-  if (!last || last.role !== 'assistant' || !prev || prev.role !== 'user') return;
+  if (!last || last.role !== 'assistant' || last.fixed || !prev || prev.role !== 'user') return;
   const text = prev.content;
   msgs.splice(-2, 2);
   persist();

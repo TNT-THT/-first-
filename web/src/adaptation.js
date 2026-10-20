@@ -422,7 +422,23 @@ const SUGGEST_RULES = [
     key: 'temperature', value: 0.9, dir: 'up', reason: '希望回答更有创意',
     re: /更有创意|更发散|更多样|更灵活|更活泼|多一些想法/,
   },
+  {
+    key: 'contextWindow', value: 12288, dir: 'up', reason: '希望记住更长的对话（窗口越大越占显存）',
+    re: /记不住|记不清|忘了前面|忘记前面|忘了之前|前面说过|上下文太短|窗口太小|记住前面/,
+  },
+  {
+    key: 'contextWindow', value: 8192, dir: 'down', reason: '显存不够，需要减小上下文窗口',
+    re: /显存不够|显存不足|爆显存|显存爆|显存太大|占用太高|内存不足/,
+  },
 ];
+
+/** 参数在提示中的中文名称。 */
+export const PARAM_LABELS = {
+  temperature: '温度',
+  maxTokens: '最大输出长度',
+  contextWindow: '上下文窗口',
+  thinkingWindow: '思考窗口',
+};
 
 /**
  * 根据反馈文字给出参数建议。current 为该模型当前生效的参数（含默认值）。
@@ -442,6 +458,17 @@ export function suggestParams(text, current = {}) {
     if (needed) out.push({ key: rule.key, value: rule.value, reason: rule.reason });
   }
   return out;
+}
+
+/**
+ * 机械识别：管理员的消息只是参数调整指令（找到了参数建议、且没有提问）时，返回固定提示，不需要调用模型生成回答。
+ * 含有问号（？或 ?）的消息视为还有问题，返回 null，仍交给模型回答。没有建议时也返回 null。
+ */
+export function mechanicalReply(text, found) {
+  if (!Array.isArray(found) || !found.length) return null;
+  if (/[?？]/.test(String(text || ''))) return null;
+  const items = found.map((f) => `${PARAM_LABELS[f.key] || f.key} → ${f.value}（${f.reason}）`).join('；');
+  return `已识别为参数调整：${items}。请在输入框上方确认，确认前不生效。本条无需模型回答。`;
 }
 
 /**
