@@ -17,18 +17,18 @@ import {
 } from '../web/src/budget.js';
 import { sanitizeParams, parseFeedbackParams } from '../web/src/adaptation.js';
 
-const DEFAULTS = { contextWindow: 8192, thinkingWindow: 4096 };
+const DEFAULTS = { contextWindow: 16384, thinkingWindow: 4096 };
 
-test('默认窗口：上下文 8192，思考 4096；推理模型引擎窗口 = 两者之和', () => {
+test('默认窗口：上下文 16384，思考 4096；推理模型引擎窗口 = 两者之和', () => {
   const r = resolveWindows({ defaults: DEFAULTS, reserveThinking: true });
-  assert.equal(r.contextWindow, 8192);
+  assert.equal(r.contextWindow, 16384);
   assert.equal(r.thinkingWindow, 4096);
-  assert.equal(r.engineContextSize, 12288);
+  assert.equal(r.engineContextSize, 20480);
 });
 
 test('非推理模型不占用思考窗口', () => {
   const r = resolveWindows({ defaults: DEFAULTS, reserveThinking: false });
-  assert.equal(r.engineContextSize, 8192);
+  assert.equal(r.engineContextSize, 16384);
 });
 
 test('管理员参数覆盖默认值，并夹在允许范围内', () => {
@@ -189,9 +189,9 @@ test('强制输出的提示词估计包含已用完的思考预算', () => {
 
 test('关闭思考时引擎窗口只用上下文窗口（推理模型也一样）', () => {
   // 推理模型开启思考：预留思考窗口
-  assert.equal(resolveWindows({ defaults: DEFAULTS, reserveThinking: true }).engineContextSize, 12288);
-  // 推理模型关闭思考：不预留，引擎窗口 = 8192
-  assert.equal(resolveWindows({ defaults: DEFAULTS, reserveThinking: false }).engineContextSize, 8192);
+  assert.equal(resolveWindows({ defaults: DEFAULTS, reserveThinking: true }).engineContextSize, 20480);
+  // 推理模型关闭思考：不预留，引擎窗口 = 16384
+  assert.equal(resolveWindows({ defaults: DEFAULTS, reserveThinking: false }).engineContextSize, 16384);
 });
 
 test('管理员信息放不下时报错而非截断：systemPromptFits', () => {

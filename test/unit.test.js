@@ -247,3 +247,16 @@ test('多 AI 对话：切换模型后仍保留完整的上下文轮次（不以�
   assert.equal(ctx[0].role, 'user');
   assert.equal(ctx.at(-1).content, 'q3');
 });
+
+test('固定提示（fixed）不进入发送给模型的上下文', () => {
+  const msgs = [
+    { role: 'user', content: '问题一' },
+    { role: 'assistant', content: '回答一', model: 'A' },
+    { role: 'user', content: '太啰嗦了，回答更简洁一点' },
+    { role: 'assistant', content: '已识别为参数调整：…', fixed: true },
+    { role: 'user', content: '问题二' },
+  ];
+  const ctx = buildContext(msgs, { maxMessages: 10 });
+  assert.equal(ctx.some((m) => m.content.startsWith('已识别为参数调整')), false);
+  assert.equal(ctx.at(-1).content, '问题二');
+});

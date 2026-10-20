@@ -77,7 +77,8 @@ export function buildContext(messages, { maxMessages = 20, maxChars = 40000, cur
   let total = 0;
   for (let i = messages.length - 1; i >= 0 && picked.length < maxMessages; i--) {
     const m = messages[i];
-    if (m.error || !m.content) continue;
+    // 固定提示（机械识别的参数调整回复）不作为上下文发送给模型
+    if (m.error || !m.content || m.fixed) continue;
     const content = attributeContent(m, currentModel);
     if (total + content.length > maxChars && picked.length > 0) break;
     total += content.length;
