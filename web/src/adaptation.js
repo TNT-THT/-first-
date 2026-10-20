@@ -163,7 +163,8 @@ export function parseFeedbackParams(text) {
   const m = PARAM_LINE.exec(text || '');
   if (!m) return null;
   const out = {};
-  for (const pair of m[1].split(/[,，;；\s]+/)) {
+  // 先把等号两侧的空白去掉（「contextWindow = 4096」与「contextWindow=4096」等价），再按分隔符切分
+  for (const pair of m[1].replace(/\s*[=＝]\s*/g, '=').split(/[,，;；\s]+/)) {
     const [key, raw] = pair.split('=').map((s) => s?.trim());
     const limits = PARAM_LIMITS[key];
     if (!limits || raw === undefined || raw === '') continue;
@@ -461,14 +462,19 @@ export function suggestParams(text, current = {}) {
 }
 
 /**
- * 机械识别：管理员的消息只是参数调整指令（找到了参数建议、且没有提问）时，返回固定提示，不需要调用模型生成回答。
- * 含有问号（？或 ?）的消息视为还有问题，返回 null，仍交给模型回答。没有建议时也返回 null。
+ * 机械识别：管理员的消息只是参数调整指令（已直接修改了参数、且没有提问）时，返回固定提示，不调用模型。
+ * 参数变更来自 feedback.changes（[{key, from, to}]）；feedback.extra 为同时记录的附加说明或更正描述；
+ * feedback.label 为生效的 AI 名称；feedback.released 表示是否已释放多余显存。
+ * 含有问号（？或 ?）的消息视为还有问题，返回 null，仍交给模型回答。没有参数变更时也返回 null。
  */
-export function mechanicalReply(text, found) {
-  if (!Array.isArray(found) || !found.length) return null;
+export function mechanicalReply(text, { changes = [], extra = [], label = '', released = false } = {}) {
+  if (!Array.isArray(changes) || !changes.length) return null;
   if (/[?？]/.test(String(text || ''))) return null;
-  const items = found.map((f) => `${PARAM_LABELS[f.key] || f.key} → ${f.value}（${f.reason}）`).join('；');
-  return `已识别为参数调整：${items}。请在输入框上方确认，确认前不生效。本条无需模型回答。`;
+  const items = changes.map((c) => `${PARAM_LABELS[c.key] || c.key} ${c.from ?? '默认'} → ${c.to}`).join('，');
+  const parts = [`已修改参数：${items}，对「${label}」生效（仅本机，不调用模型）。`];
+  if (extra.length) parts.push(`同时${extra.join('，')}。`);
+  parts.push(released ? '已释放多余显存，下次发送时按新参数重新加载模型。' : '下次发送时按新参数生效。');
+  return parts.join('');
 }
 
 /**
@@ -489,7 +495,7 @@ export function applyParamSuggestion(
   const from = entry.params[key] ?? null;
   entry.params = { ...entry.params, [key]: clamped };
   if (from !== clamped) {
-    appendParamLog(entry, [{ key, from, to: clamped }], { ts: now, source: 'suggestion', reason: `确认建议：${reason}` });
+    appendParamLog(entry, [{ key, from, to: clamped }], { ts: now, source: 'suggestion', reason: `关键词识别：${reason}` });
   }
   writeAll(data, storage);
   return clamped;

@@ -8,6 +8,7 @@ import {
   forcedAnswerMessages,
   forcedPromptTokens,
   estimatePromptTokens,
+  engineIsStale,
   estimateTokens,
   planGeneration,
   systemPromptFits,
@@ -200,4 +201,13 @@ test('管理员信息放不下时报错而非截断：systemPromptFits', () => {
   assert.equal(systemPromptFits(small, 16384), true);
   assert.equal(systemPromptFits(big, 16384), false);
   assert.equal(systemPromptFits(small, 16384, 16000), false);
+});
+
+test('engineIsStale：模型或窗口与已加载引擎不一致时才需要释放', () => {
+  const same = { loadedId: 'm', loadedCtx: 16384, modelId: 'm', engineContextSize: 16384 };
+  assert.equal(engineIsStale(same), false);
+  assert.equal(engineIsStale({ ...same, engineContextSize: 4096 }), true);
+  assert.equal(engineIsStale({ ...same, modelId: 'other' }), true);
+  // 没有引擎时 loadedId 为 null，与任何模型都不一致（调用方另行判断是否有引擎）
+  assert.equal(engineIsStale({ ...same, loadedId: null, loadedCtx: null }), true);
 });

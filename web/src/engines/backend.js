@@ -4,6 +4,7 @@ import {
   getLoadedContextWindow,
   getLoadedModelId,
   loadVerifiedWebLLMEngine,
+  releaseEngine,
   streamWebLLM,
   WEBGPU_MISSING,
 } from './webllm.js';
@@ -18,6 +19,7 @@ import {
   forcedPromptTokens,
   ANSWER_MIN_TOKENS,
   estimatePromptTokens,
+  engineIsStale,
   planGeneration,
   resolveWindows,
 } from '../budget.js';
@@ -50,6 +52,9 @@ function createRemoteBackend() {
     thinkingEnabled: () => true,
     setThinking() {},
     async ensureReady() {},
+    async releaseIfStale() {
+      return false;
+    },
     async *stream({ messages, signal }) {
       yield* streamChat({ messages, signal });
     },
@@ -98,6 +103,19 @@ function createWebLLMBackend(cfg) {
     thinkingEnabled: () => getThinkingPref(),
     setThinking(on) {
       setThinkingPref(on);
+    },
+    /**
+     * 参数改变后释放多余显存：若已加载的引擎模型或窗口与当前设置不一致，则释放引擎。
+     * 返回是否真的释放了（没有加载任何引擎时返回 false）。
+     */
+    async releaseIfStale() {
+      const id = getLoadedModelId();
+      if (!id) return false;
+      const { engineContextSize } = windowsFor(cfg, modelId, getThinkingPref());
+      if (!engineIsStale({ loadedId: id, loadedCtx: getLoadedContextWindow(), modelId, engineContextSize })) {
+        return false;
+      }
+      return releaseEngine();
     },
     async ensureReady(onProgress) {
       if (loaded()) return;

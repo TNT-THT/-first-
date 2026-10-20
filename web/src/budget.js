@@ -181,3 +181,11 @@ export function forcedAnswerMessages(messages, thinking) {
 export function forcedPromptTokens(messages, thinkingTokens) {
   return estimatePromptTokens(messages) + thinkingTokens + FORCE_NOTE_RESERVE;
 }
+
+/**
+ * 已加载的引擎是否与当前设置不一致：模型不同，或上下文窗口不同（管理员调整了参数）。
+ * 不一致时引擎占用的显存（KV 缓存按窗口分配）已经多余，应当释放；下次发送时按新设置重新加载。
+ */
+export function engineIsStale({ loadedId, loadedCtx, modelId, engineContextSize }) {
+  return loadedId !== modelId || loadedCtx !== engineContextSize;
+}
