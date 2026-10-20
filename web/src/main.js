@@ -17,6 +17,7 @@ import {
 } from './model-file.js';
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
+import { pendingModels } from './pending-models.js';
 import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
   adaptedModelIds,
@@ -960,6 +961,19 @@ function refreshThinkToggle() {
 
 function renderModelOptions(selectId = state.backend.modelId) {
   const children = state.backend.models.map((m) => makeOption(m.id, m.label));
+  // 待转换的第三方模型：禁用（尚不能运行），与官方模型分组显示，备注放在悬停提示中
+  const pending = pendingModels(state.appConfig?.webllm);
+  if (pending.length) {
+    const group = document.createElement('optgroup');
+    group.label = '待转换（暂不可用）';
+    for (const p of pending) {
+      const opt = makeOption(p.id, p.label);
+      opt.disabled = true;
+      opt.title = p.note || p.label;
+      group.append(opt);
+    }
+    children.push(group);
+  }
   const locals = loadLocalModels();
   if (locals.length) {
     const group = document.createElement('optgroup');
