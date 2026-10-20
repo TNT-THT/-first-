@@ -143,7 +143,7 @@
     ],
     "temperature": 0.3,
     "maxTokens": 16384,
-    "contextWindowTokens": 16384,
+    "contextWindowTokens": 8192,
     "thinkingWindowTokens": 4096,
     "contextChars": 8000,
     "maxMessages": 15,

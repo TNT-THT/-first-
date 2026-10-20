@@ -7,6 +7,7 @@ import { truncateThinking } from './reasoning.js';
 import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
+import { getSavedDefaultModel, resolveStartupModel, saveDefaultModel } from './default-model.js';
 import { checkWebGPU, getModelRecords, WEBGPU_MISSING } from './engines/webllm.js';
 import {
   buildModelFile,
@@ -1178,6 +1179,7 @@ async function deleteLocalModel(id) {
     clearModelAdaptation(id);
     dropPendingSuggestions(id);
     if (state.backend.modelId === id) state.backend.setModel(state.appConfig.webllm.defaultModel);
+    if (getSavedDefaultModel() === id) saveDefaultModel(null);
     renderModelOptions(state.backend.modelId);
     renderLocalList();
     await refreshModelCacheStatus();
@@ -1858,6 +1860,8 @@ els.thinkToggle.addEventListener('change', () => {
 
 els.modelSelect.addEventListener('change', () => {
   state.backend.setModel(els.modelSelect.value);
+  // 切换模型即更改默认模型：保存在本浏览器，下次打开时使用
+  saveDefaultModel(els.modelSelect.value);
   refreshThinkToggle();
   renderParamOverrides();
   renderExportParamsOption();
@@ -1990,6 +1994,15 @@ async function init() {
 
   state.backend = createBackend({ mode: MODE, appConfig: state.appConfig });
   if (MODE === 'webllm') {
+    // 启动时使用用户上次保存的默认模型（若仍在下拉框中），否则使用配置中的 defaultModel
+    const availableIds = [...new Set([...state.backend.models.map((m) => m.id), ...loadLocalModels().map((e) => e.id)])];
+    state.backend.setModel(
+      resolveStartupModel({
+        availableIds,
+        defaultModel: state.appConfig.webllm.defaultModel,
+        saved: getSavedDefaultModel(),
+      }),
+    );
     renderModelOptions(state.backend.modelId);
     els.modelSelect.hidden = false;
     els.modelSelect.title = '✓ 表示模型已下载到本机，可离线使用';
