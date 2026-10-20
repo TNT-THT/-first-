@@ -582,6 +582,32 @@ body.embed .role-section { display: none !important; }
 .correction-dialog input { width: 100%; box-sizing: border-box; margin-top: 10px; }
 .correction-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
+/* 标记错误说法（管理员） */
+.mark-dialog label { display: block; margin-top: 10px; }
+.mark-dialog textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  resize: vertical;
+  font: inherit;
+  background: var(--bg);
+  color: inherit;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.mark-dialog input { margin-top: 10px; }
+/* 生成后的校验提示（回答下方） */
+.check-warning {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-left: 3px solid #d97706;
+  background: rgba(217, 119, 6, 0.08);
+  border-radius: 6px;
+  font-size: 13px;
+}
+.check-warning ul { margin: 6px 0 0 18px; padding: 0; }
+
 /* 管理员：网站包与本机数据导出 */
 .site-tools,
 .data-export {

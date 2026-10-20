@@ -8,6 +8,7 @@ import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
 import { getSavedDefaultModel, resolveStartupModel, saveDefaultModel } from './default-model.js';
+import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './answer-check.js';
 import { checkWebGPU, getModelRecords, WEBGPU_MISSING } from './engines/webllm.js';
 import {
   buildModelFile,
@@ -110,6 +111,14 @@ const els = {
   correctionPreview: $('#correctionPreview'),
   correctionDesc: $('#correctionDesc'),
   correctionKey: $('#correctionKey'),
+  markDialog: $('#markDialog'),
+  markForm: $('#markForm'),
+  markDesc: $('#markDesc'),
+  markWrong: $('#markWrong'),
+  markRight: $('#markRight'),
+  markKey: $('#markKey'),
+  markError: $('#markError'),
+  markCancel: $('#markCancel'),
   correctionError: $('#correctionError'),
   correctionCancel: $('#correctionCancel'),
   correctionSubmit: $('#correctionSubmit'),
@@ -274,6 +283,29 @@ function paintAssistant(bubble, msg, { streaming = false, label = '正在思考�
   let html = sanitize(renderMarkdown(parts.answer));
   if (msg.stopped) html += '<p class="note">（已停止生成）</p>';
   answerEl.innerHTML = html;
+  // 生成后的校验：回答完成后，若含有管理员标记的错误说法，在回答下方提示正确说法（不改写回答）
+  bubble.querySelector(':scope > .check-warning')?.remove();
+  if (!streaming && msg.role === 'assistant' && msg.model && !msg.error) {
+    const hits = findViolations(parts.answer, listCheckRules(msg.model));
+    if (hits.length) bubble.appendChild(buildCheckWarning(hits));
+  }
+}
+
+/** 校验提示：列出命中的错误说法与对应的正确说法（用 textContent 写入，避免注入）。 */
+function buildCheckWarning(hits) {
+  const box = document.createElement('div');
+  box.className = 'check-warning';
+  const title = document.createElement('strong');
+  title.textContent = '⚠ 回答中含有管理员标记为错误的说法（以下为正确说法，以更正为准）';
+  box.appendChild(title);
+  const list = document.createElement('ul');
+  for (const { rule } of hits) {
+    const li = document.createElement('li');
+    li.textContent = `「${rule.wrong}」→ 正确说法：「${rule.right}」`;
+    list.appendChild(li);
+  }
+  box.appendChild(list);
+  return box;
 }
 
 /** 回复结束：拆分思考过程与回答。历史记录只保存回答，以及（截断后的）思考过程用于回看。 */
@@ -304,12 +336,94 @@ function createMessageEl(msg, { streaming = false } = {}) {
   return { wrap, bubble };
 }
 
-/** 回复结束后，在该回复下方挂一个“重新生成”按钮。 */
-function attachRegen(afterEl) {
+/** 回复结束后，在该回复下方挂一个“重新生成”按钮；管理员还可以看到“标记错误”。 */
+function attachRegen(afterEl, msg) {
   const bar = document.createElement('div');
   bar.className = 'msg-actions';
   bar.innerHTML = '<button type="button" class="btn ghost small" data-action="regen">重新生成</button>';
+  if (MODE === 'webllm' && isAdmin() && msg?.model) {
+    const mark = document.createElement('button');
+    mark.type = 'button';
+    mark.className = 'btn ghost small';
+    mark.textContent = '标记错误';
+    // 点击按钮前按下鼠标时记下选中的文字（点击后选区可能消失），只取这条回复中的选区
+    let picked = '';
+    mark.addEventListener('mousedown', () => {
+      picked = selectedTextIn(afterEl.querySelector('.bubble'));
+    });
+    mark.addEventListener('click', () => openMarkDialog(msg, picked));
+    bar.appendChild(mark);
+  }
   afterEl.after(bar);
+}
+
+/** 当前选中的文字（仅当选区完全位于 el 内时返回）。 */
+function selectedTextIn(el) {
+  const sel = window.getSelection?.();
+  if (!el || !sel || sel.isCollapsed) return '';
+  const inside = el.contains(sel.anchorNode) && el.contains(sel.focusNode);
+  return inside ? sel.toString().trim() : '';
+}
+
+/**
+ * 管理员标记错误：填写错误说法与正确说法，验证管理员密钥后，
+ * 保存为校验规则（以后回答再出现错误说法时提示），并把正确说法记为该 AI 的更正（仅本机）。
+ */
+function openMarkDialog(msg, presetWrong = '') {
+  const dlg = els.markDialog;
+  const session = activeSession();
+  if (!dlg || !session) return;
+  els.markWrong.value = presetWrong;
+  els.markRight.value = '';
+  els.markKey.value = '';
+  els.markError.textContent = '';
+  els.markDesc.textContent =
+    `为「${modelDisplayName(msg.model)}」标记错误说法。之后该 AI 的回答若再出现错误说法，会在回答下方提示正确说法。` +
+    '正确说法会同时作为该 AI 的更正（底层设定，仅本机）。输入管理员密钥验证后保存；取消则不记录。';
+  els.markForm.onsubmit = async (e) => {
+    e.preventDefault();
+    els.markError.textContent = '';
+    const wrong = els.markWrong.value;
+    const right = els.markRight.value;
+    // 先检查输入，再验证密钥，避免无效规则被保存
+    const inputError = checkRuleError(wrong, right);
+    if (inputError) {
+      els.markError.textContent = inputError;
+      return;
+    }
+    if (!hasAccessGate(state.appConfig.access)) {
+      els.markError.textContent = '未配置管理员密钥，无法记录。';
+      return;
+    }
+    const submitBtn = els.markForm.querySelector('[type="submit"]');
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const ok = await verifyAccessPassword(state.appConfig.access, els.markKey.value);
+      if (!ok) {
+        els.markError.textContent = '管理员密钥错误，未记录。';
+        els.markKey.select();
+        return;
+      }
+      const res = addCheckRule(msg.model, { wrong, right });
+      if (res.error) {
+        els.markError.textContent = res.error;
+        return;
+      }
+      // 正确说法同时作为更正（已验证密钥，仅本机）；换行压成一行，符合更正格式
+      recordFeedback(msg.model, `更正：${right.replace(/\s*\n\s*/g, ' ')}`, {
+        allowCorrections: true,
+        question: questionBefore(session, msg),
+      });
+      dlg.close();
+      renderMessages();
+      showStatus(`已记录：「${wrong.trim()}」→「${right.trim()}」（同时作为该 AI 的更正，仅本机）。`);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  };
+  els.markCancel.onclick = () => dlg.close();
+  dlg.showModal();
+  (presetWrong ? els.markRight : els.markWrong).focus();
 }
 
 /** 历史会话的折叠条：较早的消息未渲染，点击再展开（分批渲染，避免一次性加载很慢）。 */
@@ -751,7 +865,7 @@ async function send(rawText) {
     persist();
     renderSessionList();
     // 仅当本条回复仍在会话中（未因登录过期被撤回）时才显示“重新生成”
-    if (session.messages.includes(assistantMsg)) attachRegen(assistantWrap);
+    if (session.messages.includes(assistantMsg)) attachRegen(assistantWrap, assistantMsg);
     scrollToBottom();
     els.input.focus({ preventScroll: true });
   }
