@@ -157,9 +157,18 @@ export function systemPromptFits(systemMessage, contextWindow, reserve = 0) {
 }
 
 export function fitHistory(messages, limitTokens) {
-  const out = [...messages];
-  while (out.length > 2 && estimatePromptTokens(out) > limitTokens) out.splice(1, 1);
-  return out;
+  if (messages.length <= 2) return [...messages];
+  // 每条消息的估计值只计算一次（原实现每删一条都重新统计全部文字，长历史会卡住界面）。
+  // 总数 = 整体开销 + 各条（内容 + 开销）之和，与 estimatePromptTokens 完全一致。
+  const costs = messages.map((m) => estimateTokens(m.content) + PER_MESSAGE_OVERHEAD);
+  let total = PER_MESSAGE_OVERHEAD + costs.reduce((s, c) => s + c, 0);
+  // 从第二条（index 1）开始逐条丢弃，系统提示（index 0）与最后一条始终保留（至少剩两条）
+  let removed = 0;
+  while (messages.length - removed > 2 && total > limitTokens) {
+    total -= costs[1 + removed];
+    removed += 1;
+  }
+  return [messages[0], ...messages.slice(1 + removed)];
 }
 
 /**
