@@ -72,18 +72,37 @@ export function attributeContent(m, currentModel = null) {
  * 从最新消息往前取，直到超过条数或字符预算；保证第一条一定是用户消息。
  * currentModel：本次回答所用的模型 id，用于判断历史回复是否来自其他 AI。
  */
-export function buildContext(messages, { maxMessages = 20, maxChars = 40000, currentModel = null } = {}) {
+/**
+ * 构造发送给模型的上下文（多轮记忆）。
+ * 规则：固定提示、错误与空消息不发送；最多 maxMessages 条、总字符不超过 maxChars；
+ * 超出时从最早的消息开始丢弃，且保证第一条一定是用户消息。
+ *
+ * chunk（丢弃粒度）：起点只会落在 chunk 的倍数上，因此超出限制后一次丢掉一段，之后的几轮起点不变，
+ * WebLLM 可以复用已经计算过的 KV 缓存（不必整段重新预填）。chunk 为 1 时与逐条丢弃完全相同。
+ * currentModel：本次回答所用的模型 id，用于判断历史回复是否来自其他 AI。
+ */
+export function buildContext(
+  messages,
+  { maxMessages = 20, maxChars = 40000, currentModel = null, chunk = 1 } = {},
+) {
+  const eligible = messages.filter((m) => !(m.error || !m.content || m.fixed));
+  const contents = eligible.map((m) => attributeContent(m, currentModel));
+  const n = contents.length;
+  if (!n) return [];
+  // suffix[s] = 从 s 开始到末尾的字符数
+  const suffix = new Array(n + 1).fill(0);
+  for (let i = n - 1; i >= 0; i -= 1) suffix[i] = suffix[i + 1] + contents[i].length;
+  const fits = (s) => n - s <= maxMessages && suffix[s] <= maxChars;
+  const firstFit = (step) => {
+    for (let s = 0; s < n; s += step) if (fits(s)) return s;
+    return -1;
+  };
+  const step = Math.max(1, Math.floor(chunk));
+  let start = firstFit(step);
+  if (start < 0) start = firstFit(1); // 对齐的起点都放不下时，退回到逐条
+  if (start < 0) start = n - 1; // 连最后一条都超出字数限制：仍保留它（与原行为一致）
   const picked = [];
-  let total = 0;
-  for (let i = messages.length - 1; i >= 0 && picked.length < maxMessages; i--) {
-    const m = messages[i];
-    // 固定提示（机械识别的参数调整回复）不作为上下文发送给模型
-    if (m.error || !m.content || m.fixed) continue;
-    const content = attributeContent(m, currentModel);
-    if (total + content.length > maxChars && picked.length > 0) break;
-    total += content.length;
-    picked.unshift({ role: m.role, content });
-  }
+  for (let i = start; i < n; i += 1) picked.push({ role: eligible[i].role, content: contents[i] });
   while (picked.length && picked[0].role !== 'user') picked.shift();
   return picked;
 }

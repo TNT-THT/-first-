@@ -840,8 +840,11 @@ async function send(rawText) {
   } finally {
     // 历史记录只保存最终回答（思考过程另存，供回看，不发送给模型）
     finalizeAssistant(assistantMsg);
-    state.streaming = null;
-    setBusy(false);
+    // 只清理本次发送自己的状态：若已被强制停止并开始了新的发送，不能清掉新一轮的状态
+    if (state.streaming?.controller === controller) {
+      state.streaming = null;
+      setBusy(false);
+    }
     session.updatedAt = Date.now();
     persist();
     renderSessionList();
@@ -853,7 +856,28 @@ async function send(rawText) {
 }
 
 function stop() {
-  state.streaming?.controller.abort();
+  const s = state.streaming;
+  if (!s) return;
+  if (!s.controller.signal.aborted) {
+    // 第一次点击：请求停止，生成会在下一个 token 之前结束
+    s.controller.abort();
+    return;
+  }
+  // 已经请求过停止，但模型仍没有结束（例如显卡卡住）：由用户决定，立即释放模型并解除等待
+  forceStop(s);
+}
+
+/** 强制停止：终止模型 worker，把当前回答标记为已停止，并恢复输入状态（不设时限，只由用户触发）。 */
+function forceStop(s) {
+  state.backend.forceRelease?.();
+  s.assistant.stopped = true;
+  finalizeAssistant(s.assistant);
+  state.streaming = null;
+  setBusy(false);
+  persist();
+  renderSessionList();
+  renderMessages();
+  showStatus('模型没有响应，已强制停止并释放模型。下次发送时会重新加载。', { error: true });
 }
 
 // ---------- 会话操作 ----------

@@ -156,19 +156,31 @@ export function systemPromptFits(systemMessage, contextWindow, reserve = 0) {
   return estimatePromptTokens([systemMessage]) <= contextWindow - ANSWER_MIN_TOKENS - reserve;
 }
 
-export function fitHistory(messages, limitTokens) {
-  if (messages.length <= 2) return [...messages];
-  // 每条消息的估计值只计算一次（原实现每删一条都重新统计全部文字，长历史会卡住界面）。
-  // 总数 = 整体开销 + 各条（内容 + 开销）之和，与 estimatePromptTokens 完全一致。
+/**
+ * 把历史放进 limitTokens 以内：保留 messages[0]（系统提示）与最后一条，从最早的消息开始丢弃。
+ * chunk（丢弃粒度）：保留的起点只会落在 1 + k·chunk 上，超出后一次丢掉一段，之后几轮的前缀不变，
+ * 便于复用 KV 缓存。chunk 为 1 时结果与逐条丢弃完全一致。
+ * 每条消息的估计值只计算一次（原实现每删一条都重新统计全部文字，长历史会卡住界面）。
+ */
+export function fitHistory(messages, limitTokens, { chunk = 1 } = {}) {
+  const n = messages.length;
+  if (n <= 2) return [...messages];
   const costs = messages.map((m) => estimateTokens(m.content) + PER_MESSAGE_OVERHEAD);
-  let total = PER_MESSAGE_OVERHEAD + costs.reduce((s, c) => s + c, 0);
-  // 从第二条（index 1）开始逐条丢弃，系统提示（index 0）与最后一条始终保留（至少剩两条）
-  let removed = 0;
-  while (messages.length - removed > 2 && total > limitTokens) {
-    total -= costs[1 + removed];
-    removed += 1;
-  }
-  return [messages[0], ...messages.slice(1 + removed)];
+  const base = PER_MESSAGE_OVERHEAD + costs[0];
+  // sumFrom[s] = messages[s..] 的估计 tokens 之和（s 从 1 起）
+  const sumFrom = new Array(n + 1).fill(0);
+  for (let i = n - 1; i >= 1; i -= 1) sumFrom[i] = sumFrom[i + 1] + costs[i];
+  // 从 s 开始保留时是否放得下；s 的范围是 [1, n-1]（至少保留最后一条）
+  const fits = (s) => base + sumFrom[s] <= limitTokens;
+  const firstFit = (step) => {
+    for (let s = 1; s <= n - 1; s += step) if (fits(s)) return s;
+    return -1;
+  };
+  const step = Math.max(1, Math.floor(chunk));
+  let s = firstFit(step);
+  if (s < 0) s = firstFit(1);
+  if (s < 0) s = n - 1;
+  return [messages[0], ...messages.slice(s)];
 }
 
 /**
