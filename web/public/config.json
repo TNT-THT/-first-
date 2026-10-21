@@ -158,6 +158,7 @@
     "thinkingWindowTokens": 4096,
     "contextChars": 8000,
     "maxMessages": 15,
+    "historyDropChunk": 6,
     "extraRecords": [
       {
         "model": "https://huggingface.co/mlc-ai/DeepSeek-R1-Distill-Qwen-1.5B-q4f16_1-MLC",

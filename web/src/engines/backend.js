@@ -1,6 +1,7 @@
 import { streamChat } from '../api.js';
 import {
   checkWebGPU,
+  forceResetEngine,
   getLoadedContextWindow,
   getLoadedModelId,
   loadVerifiedWebLLMEngine,
@@ -47,6 +48,7 @@ function createRemoteBackend() {
     models: [],
     slidingEnabled: () => false,
     setSliding() {},
+    forceRelease() {},
     get modelId() {
       return '';
     },
@@ -99,10 +101,12 @@ function createWebLLMBackend(cfg) {
   return {
     mode: 'webllm',
     // 滑动窗口开启时历史不按条数与字数截断，由 stream() 中的 fitHistory 按窗口截断（最早的消息滚出窗口）
+    // 丢弃粒度（historyDropChunk）：超出后一次丢一段，之后几轮的起点不变，减少 KV 缓存失效（重新预填）
     get limits() {
+      const chunk = cfg.historyDropChunk ?? 1;
       return getSlidingPref()
-        ? { maxMessages: Infinity, maxChars: Infinity }
-        : { maxMessages: cfg.maxMessages, maxChars: cfg.contextChars };
+        ? { maxMessages: Infinity, maxChars: Infinity, chunk }
+        : { maxMessages: cfg.maxMessages, maxChars: cfg.contextChars, chunk };
     },
     models: cfg.models,
     get modelId() {
@@ -121,6 +125,10 @@ function createWebLLMBackend(cfg) {
     slidingEnabled: () => getSlidingPref(),
     setSliding(on) {
       setSlidingPref(on);
+    },
+    /** 用户已停止但模型仍无响应时的强制释放（立即终止 worker，不等待）。 */
+    forceRelease() {
+      forceResetEngine();
     },
     /**
      * 参数改变后释放多余显存：若已加载的引擎模型或窗口与当前设置不一致，则释放引擎。
@@ -168,7 +176,9 @@ function createWebLLMBackend(cfg) {
           `管理员信息（更正、知识库、反馈）与系统提示已超出${w.sliding ? '滑动' : '上下文'}窗口，为避免截断，本次未发送。请精简这些内容，或在参数中调大${w.sliding ? '滑动窗口（参数 slidingWindow，最大 20000）' : '上下文窗口（参数 contextWindow，最大 20000）'}。`,
         );
       }
-      const all = fitHistory([system, ...messages], w.contextWindow - ANSWER_MIN_TOKENS - reserve);
+      const all = fitHistory([system, ...messages], w.contextWindow - ANSWER_MIN_TOKENS - reserve, {
+        chunk: cfg.historyDropChunk ?? 1,
+      });
       // 提示词估计 + 思考预算 + 回答长度，保证不超过引擎窗口
       const plan = planGeneration({
         promptTokens: estimatePromptTokens(all),
