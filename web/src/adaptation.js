@@ -25,10 +25,11 @@ const PARAM_LIMITS = {
   temperature: [0, 1.5],
   maxTokens: [64, 16384],
   contextWindow: [WINDOW_LIMITS.contextWindow.min, WINDOW_LIMITS.contextWindow.max],
+  slidingWindow: [WINDOW_LIMITS.slidingWindow.min, WINDOW_LIMITS.slidingWindow.max],
   thinkingWindow: [WINDOW_LIMITS.thinkingWindow.min, WINDOW_LIMITS.thinkingWindow.max],
 };
 /** 需要取整的参数（其余为小数）。 */
-const INTEGER_PARAMS = new Set(['maxTokens', 'contextWindow', 'thinkingWindow']);
+const INTEGER_PARAMS = new Set(['maxTokens', 'contextWindow', 'slidingWindow', 'thinkingWindow']);
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 // 更正行：「更正：新说法」。只有通过管理员密钥验证后才会记录（见 main.js），之后作为该 AI 的底层设定，无条件采纳。
 const CORRECTION_LINE = /^[ \t]*(?:更正|纠正)[:：][ \t]*(.+)$/gm;
@@ -438,6 +439,7 @@ export const PARAM_LABELS = {
   temperature: '温度',
   maxTokens: '最大输出长度',
   contextWindow: '上下文窗口',
+  slidingWindow: '滑动窗口',
   thinkingWindow: '思考窗口',
 };
 

@@ -2,8 +2,10 @@
  * 上下文预算（纯逻辑，便于测试）。
  *
  * - 上下文窗口 W：提示词（系统提示 + 历史）与回答共用。默认 16384，最大 20000（管理员可在参数中调整）。
- * - 思考窗口 T：只有推理模型开启思考时才占用，与 W 分开计算。默认 4096，最大 8000（管理员可调）。
- * - 引擎的 context_window_size = W + T（推理模型）或 W（其他模型），加载模型时设置。
+ * - 滑动窗口 S：开启“滑动窗口”后替代 W 作为上下文窗口，默认 4096，可调到 20000。历史超出时最早的消息滚出窗口，
+ *   系统提示（更正、知识库、反馈）始终保留在最前面。开启时历史不再按条数与字数截断，只按窗口截断。
+ * - 思考窗口 T：只有推理模型开启思考时才占用，与 W（或 S）分开计算，思考内容不计入窗口。默认 4096，最大 8000（管理员可调）。
+ * - 引擎的 context_window_size = W（或 S）+ T（推理模型开启思考时）或 W（或 S）（其他情况），加载模型时设置。
  * - 发送的 max_tokens = （思考开启 ? T : 0）+ 回答长度；回答长度 = min(最大输出长度, W − 提示词估计 tokens)。
  *   因此 提示词 + 思考 + 回答 ≤ W + T。
  * - T 是思考的预算，但不是硬性截断：模型思考超过 T 时，剩余给回答的空间会变少，总量仍不超过引擎窗口。
@@ -11,6 +13,7 @@
 
 export const WINDOW_LIMITS = {
   contextWindow: { min: 4096, max: 20000 },
+  slidingWindow: { min: 2048, max: 20000 },
   thinkingWindow: { min: 512, max: 8000 },
 };
 
@@ -48,15 +51,15 @@ export function estimatePromptTokens(messages) {
 
 /**
  * 解析某个模型的窗口大小（管理员参数优先，否则使用配置默认值；都夹在允许范围内）。
- * reserveThinking：本次是否预留思考窗口（推理模型且开启思考）。关闭思考时引擎只用上下文窗口。
- * @returns {{contextWindow: number, thinkingWindow: number, engineContextSize: number}}
+ * sliding：是否使用滑动窗口。开启时窗口取 slidingWindow（忽略 contextWindow 参数），否则取 contextWindow。
+ * reserveThinking：本次是否预留思考窗口（推理模型且开启思考）。思考窗口与上述窗口分开计算。
+ * @returns {{contextWindow: number, thinkingWindow: number, engineContextSize: number, sliding: boolean}}
  */
-export function resolveWindows({ defaults = {}, overrides = {}, reserveThinking = false } = {}) {
+export function resolveWindows({ defaults = {}, overrides = {}, reserveThinking = false, sliding = false } = {}) {
+  const key = sliding ? 'slidingWindow' : 'contextWindow';
+  const limits = WINDOW_LIMITS[key];
   const contextWindow =
-    clamp(overrides.contextWindow ?? defaults.contextWindow, [
-      WINDOW_LIMITS.contextWindow.min,
-      WINDOW_LIMITS.contextWindow.max,
-    ]) ?? WINDOW_LIMITS.contextWindow.min;
+    clamp(overrides[key] ?? defaults[key], [limits.min, limits.max]) ?? limits.min;
   const thinkingWindow =
     clamp(overrides.thinkingWindow ?? defaults.thinkingWindow, [
       WINDOW_LIMITS.thinkingWindow.min,
@@ -66,6 +69,7 @@ export function resolveWindows({ defaults = {}, overrides = {}, reserveThinking 
     contextWindow,
     thinkingWindow,
     engineContextSize: contextWindow + (reserveThinking ? thinkingWindow : 0),
+    sliding: !!sliding,
   };
 }
 

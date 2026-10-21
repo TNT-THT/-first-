@@ -88,6 +88,8 @@ const els = {
   stopBtn: $('#stopBtn'),
   thinkToggleLabel: $('#thinkToggleLabel'),
   thinkToggle: $('#thinkToggle'),
+  slidingToggleLabel: $('#slidingToggleLabel'),
+  slidingToggle: $('#slidingToggle'),
   statusBar: $('#statusBar'),
   statusText: $('#statusText'),
   statusProgress: $('#statusProgress'),
@@ -582,6 +584,7 @@ function effectiveParams(modelId) {
     temperature: d.temperature,
     maxTokens: d.maxTokens,
     contextWindow: d.contextWindowTokens,
+    slidingWindow: d.slidingWindowTokens,
     thinkingWindow: d.thinkingWindowTokens,
     ...getModelParams(modelId),
   };
@@ -1065,6 +1068,18 @@ function refreshThinkToggle() {
   els.thinkToggle.checked = state.backend?.thinkingEnabled() ?? true;
 }
 
+/** 滑动窗口开关：所有模型可用；偏好在本浏览器中保存（默认关闭）。 */
+function refreshSlidingToggle() {
+  const show = MODE === 'webllm';
+  els.slidingToggleLabel.hidden = !show;
+  els.slidingToggle.checked = state.backend?.slidingEnabled() ?? false;
+}
+
+/** 当前生效的上下文窗口（滑动窗口开启时为滑动窗口大小，否则为上下文窗口）。 */
+function activeContextWindow(eff) {
+  return state.backend?.slidingEnabled() ? eff.slidingWindow : eff.contextWindow;
+}
+
 function renderModelOptions(selectId = state.backend.modelId) {
   const children = state.backend.models.map((m) => makeOption(m.id, m.label));
   // 待转换的第三方模型：禁用（尚不能运行），与官方模型分组显示，备注放在悬停提示中
@@ -1092,6 +1107,7 @@ function renderModelOptions(selectId = state.backend.modelId) {
     els.modelSelect.value = selectId;
   }
   refreshThinkToggle();
+  refreshSlidingToggle();
 }
 
 /** 在下拉框中给已下载到本机的模型加上 ✓。 */
@@ -1211,6 +1227,7 @@ async function importModelFromFile(file, kind = 'import') {
     renderModelOptions(record.model_id);
     state.backend.setModel(record.model_id);
     refreshThinkToggle();
+  refreshSlidingToggle();
     await refreshModelCacheStatus();
     renderLocalList();
     const carriedNote = carried ? `，并带入自定义参数（${paramSummary(carried)}）` : '';
@@ -1711,7 +1728,7 @@ function renderParamDetails(list, modelId, overrides) {
   line.className = 'muted small local-meta';
   line.textContent =
     '当前生效：' +
-    ['temperature', 'maxTokens', 'contextWindow', 'thinkingWindow']
+    ['temperature', 'maxTokens', 'contextWindow', 'slidingWindow', 'thinkingWindow']
       .map((k) => `${k} = ${eff[k]}（${k in overrides ? '本机覆盖' : '默认'}）`)
       .join('｜');
   list.append(line);
@@ -1952,10 +1969,25 @@ els.thinkToggle.addEventListener('change', () => {
   state.backend.setThinking(els.thinkToggle.checked);
   // 思考窗口在加载模型时确定：切换后下一次发送会按新窗口重新加载模型
   const eff = effectiveParams(state.backend.modelId);
+  const win = activeContextWindow(eff);
   flashStatus(
     els.thinkToggle.checked
-      ? `已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。下次发送时将按 ${eff.contextWindow + eff.thinkingWindow} 窗口重新加载模型。`
-      : `已关闭思考模式：推理模型直接给出回答，速度更快。下次发送时将按 ${eff.contextWindow} 窗口重新加载模型。`,
+      ? `已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。下次发送时将按 ${win + eff.thinkingWindow} 窗口重新加载模型（思考内容不计入窗口）。`
+      : `已关闭思考模式：推理模型直接给出回答，速度更快。下次发送时将按 ${win} 窗口重新加载模型。`,
+  );
+});
+
+els.slidingToggle.addEventListener('change', async () => {
+  state.backend.setSliding(els.slidingToggle.checked);
+  const eff = effectiveParams(state.backend.modelId);
+  const win = activeContextWindow(eff);
+  // 窗口改变后释放多余显存（与参数改变相同）；下次发送时按新窗口重新加载
+  const released = await releaseStaleEngine();
+  const tail = released ? '已释放多余显存，' : '';
+  flashStatus(
+    els.slidingToggle.checked
+      ? `已开启滑动窗口：上下文固定为 ${win}（思考窗口另计），超出的最早历史会滚出窗口，管理员信息始终保留。${tail}下次发送时按新窗口加载模型。`
+      : `已关闭滑动窗口：恢复为上下文窗口 ${eff.contextWindow}，并按 ${state.appConfig.webllm.maxMessages} 条、${state.appConfig.webllm.contextChars} 字限制历史。${tail}下次发送时按新窗口加载模型。`,
   );
 });
 
@@ -1964,6 +1996,7 @@ els.modelSelect.addEventListener('change', () => {
   // 切换模型即更改默认模型：保存在本浏览器，下次打开时使用
   saveDefaultModel(els.modelSelect.value);
   refreshThinkToggle();
+  refreshSlidingToggle();
   renderParamOverrides();
   renderExportParamsOption();
   const label = els.modelSelect.selectedOptions[0]?.textContent || els.modelSelect.value;
