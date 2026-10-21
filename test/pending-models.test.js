@@ -20,36 +20,51 @@ const officialIds = new Set([
   ...prebuiltAppConfig.model_list.map((r) => r.model_id),
 ]);
 
-test('配置中登记了两个待转换模型，且都标记为 pending', () => {
-  assert.equal(webllm.pendingModels.length, 2);
-  assert.equal(pending.length, 2);
-  for (const m of webllm.pendingModels) assert.equal(m.status, PENDING_STATUS, m.id);
+const THIRD_PARTY = [
+  {
+    id: 'Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC',
+    repo: 'https://huggingface.co/kamekichi1231/Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC',
+    lib: 'Qwen3.5-4B-q4f16_1_cs1k-webgpu.wasm',
+    vram: 3867.82,
+  },
+  {
+    id: 'Leyten-Qwen3.5-9B-compute-q4f16_1-MLC',
+    repo: 'https://huggingface.co/Leyten/Qwen3.5-9B-compute-q4f16_1-MLC',
+    lib: 'Qwen3.5-9B-q4f16_1_cs1k-webgpu.wasm',
+    vram: 6433.01,
+  },
+];
+
+test('待转换列表已清空：两个第三方模型已改为正式登记（不再是待转换）', () => {
+  assert.deepEqual(webllm.pendingModels, []);
+  assert.equal(pending.length, 0);
 });
 
-test('两个待转换模型对应指定的 Hugging Face 仓库，并带有备注', () => {
-  const byRepo = Object.fromEntries(pending.map((m) => [m.source, m]));
-  assert.ok(byRepo['https://huggingface.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive']);
-  assert.ok(byRepo['https://huggingface.co/DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF']);
-  for (const m of pending) {
-    assert.match(m.label, /待转换/, m.id);
-    assert.match(m.label, /暂不可用/, m.id);
-    assert.match(m.note, /^备注：/, m.id);
-    assert.match(m.note, /GGUF/, m.id);
+test('两个第三方模型登记在下拉框与 extraRecords 中，指向指定的 MLC 仓库与官方 cs1k 运行库', () => {
+  for (const t of THIRD_PARTY) {
+    const item = webllm.models.find((m) => m.id === t.id);
+    assert.ok(item, `下拉框缺少 ${t.id}`);
+    assert.equal(item.reasoning, true, t.id);
+    assert.match(item.label, /纯文本/, t.id);
+    assert.match(item.label, /去审查/, t.id);
+    const rec = webllm.extraRecords.find((r) => r.model_id === t.id);
+    assert.ok(rec, `extraRecords 缺少 ${t.id}`);
+    assert.equal(rec.model, t.repo, t.id);
+    assert.ok(rec.model_lib.endsWith(t.lib), t.id);
+    assert.equal(rec.vram_required_MB, t.vram, t.id);
+    assert.deepEqual(rec.overrides, { context_window_size: 4096, max_history_size: 1 }, t.id);
   }
 });
 
-test('待转换模型与官方模型的 model_id 完全分开', () => {
-  for (const m of pending) {
-    assert.equal(officialIds.has(m.id), false, `${m.id} 与官方模型冲突`);
-  }
-  assert.equal(new Set(pending.map((m) => m.id)).size, pending.length);
+test('第三方模型的 model_id 与官方预编译记录不冲突，且互不重复', () => {
+  const builtin = new Set(prebuiltAppConfig.model_list.map((r) => r.model_id));
+  for (const t of THIRD_PARTY) assert.equal(builtin.has(t.id), false, `${t.id} 与官方记录冲突`);
+  assert.equal(new Set(THIRD_PARTY.map((t) => t.id)).size, THIRD_PARTY.length);
 });
 
-test('待转换模型不进入模型列表（不会被当作可加载的运行记录）', () => {
+test('第三方模型进入模型列表（可被加载），待转换列表中没有残留条目', () => {
   const list = buildModelList(prebuiltAppConfig.model_list, webllm.extraRecords, '');
-  for (const m of pending) {
-    assert.equal(list.some((r) => r.model_id === m.id), false, m.id);
-  }
+  for (const t of THIRD_PARTY) assert.equal(list.some((r) => r.model_id === t.id), true, t.id);
 });
 
 test('pendingModels：忽略非 pending 状态、缺字段、与官方冲突和重复的条目', () => {

@@ -11,7 +11,11 @@ const root = join(here, '..');
 const webConfig = JSON.parse(readFileSync(join(root, 'web', 'public', 'config.json'), 'utf8'));
 const catalog = JSON.parse(readFileSync(join(root, 'training', 'catalog.json'), 'utf8'));
 const { prebuiltAppConfig } = await import(join(root, 'node_modules', '@mlc-ai', 'web-llm', 'lib', 'index.js'));
+// 与 training/build_catalog.mjs 一致：内置记录 + config.json 的 extraRecords（第三方模型）
 const records = new Map(prebuiltAppConfig.model_list.map((r) => [r.model_id, r]));
+for (const extra of webConfig.webllm.extraRecords || []) {
+  records.set(extra.model_id, extra);
+}
 
 test('catalog.json 与生成脚本的输出一致（修改网页模型后需重新生成）', async () => {
   const fresh = await buildCatalog();

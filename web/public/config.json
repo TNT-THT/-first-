@@ -139,6 +139,16 @@
       {
         "id": "Llama-3-70B-Instruct-q3f16_1-MLC",
         "label": "Llama 3 70B（非推理·超大·纯文本·需约 30.4 GB 显存）"
+      },
+      {
+        "id": "Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC",
+        "label": "Qwen3.5 4B 去审查·慧辉版（推理·中·纯文本·第三方·需约 3.8 GB 显存）",
+        "reasoning": true
+      },
+      {
+        "id": "Leyten-Qwen3.5-9B-compute-q4f16_1-MLC",
+        "label": "Qwen3.5 9B 去审查·Heretical 版（推理·中·纯文本·第三方·需约 6.3 GB 显存）",
+        "reasoning": true
       }
     ],
     "temperature": 0.3,
@@ -158,24 +168,31 @@
         "overrides": {
           "context_window_size": 4096
         }
-      }
-    ],
-    "pendingModels": [
-      {
-        "id": "Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-q4f16_1-MLC",
-        "label": "Qwen3.5 4B Uncensored HauhauCS Aggressive（第三方微调·推理·待转换·暂不可用·预计需约 3.8 GB 显存）",
-        "status": "pending",
-        "source": "https://huggingface.co/HauhauCS/Qwen3.5-4B-Uncensored-HauhauCS-Aggressive",
-        "note": "备注：第三方无审查微调，基于官方 Qwen3.5-4B。作者声明 0/465 拒绝，属作者自述，未经独立验证。仓库只提供 GGUF（BF16/Q8/Q6/Q4_K_M），不能直接在本站运行，需先转换为 MLC 格式并编译 WebGPU 运行库。与官方 Qwen3.5 4B 完全分开：独立的 model_id，适应记录与更正互不相通。作者提示：偶尔会在回答末尾附加免责声明，并非拒绝。"
       },
       {
-        "id": "Qwen3.5-9B-Defiant-Fable-Uncensored-Heretic-q4f16_1-MLC",
-        "label": "Qwen3.5 9B Defiant Fable Uncensored Heretic（第三方融合微调·推理·待转换·暂不可用·预计需约 6.3 GB 显存）",
-        "status": "pending",
-        "source": "https://huggingface.co/DavidAU/Qwen3.5-9B-The-Defiant-Fable-Uncensored-Heretic-NEO-IMATRIX-MAX-MTP-GGUF",
-        "note": "备注：第三方多阶段融合微调，基于 Qwen3.5-9B。“超过 Qwen3.5 27B”等基准数据均为作者自测，未经独立验证，实际表现需在 OJ 题目上与官方 Qwen3.5 9B 对比。仓库只提供 GGUF；其中 MTP 版本依赖 llama.cpp 的投机解码，不适用于 WebLLM。需先转换并编译后才能使用。与官方 Qwen3.5 9B 完全分开：独立的 model_id，适应记录互不相通。"
+        "model": "https://huggingface.co/kamekichi1231/Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC",
+        "model_id": "Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC",
+        "model_lib": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3.5-4B-q4f16_1_cs1k-webgpu.wasm",
+        "low_resource_required": false,
+        "vram_required_MB": 3867.82,
+        "overrides": {
+          "context_window_size": 4096,
+          "max_history_size": 1
+        }
+      },
+      {
+        "model": "https://huggingface.co/Leyten/Qwen3.5-9B-compute-q4f16_1-MLC",
+        "model_id": "Leyten-Qwen3.5-9B-compute-q4f16_1-MLC",
+        "model_lib": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3.5-9B-q4f16_1_cs1k-webgpu.wasm",
+        "low_resource_required": false,
+        "vram_required_MB": 6433.01,
+        "overrides": {
+          "context_window_size": 4096,
+          "max_history_size": 1
+        }
       }
-    ]
+    ],
+    "pendingModels": []
   },
   "systemPrompt": "你是一个有帮助的 AI 助手，可以回答各类问题。请使用用户提问的语言回答。数学公式使用 LaTeX（行内用 $...$，独立公式用 $$...$$），代码使用带语言标注的 Markdown 代码块。"
 }

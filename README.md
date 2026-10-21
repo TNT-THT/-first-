@@ -30,7 +30,7 @@ The first repository of me,and first of "炸药工厂"
 - **下载失败提示**：出错时会显示失败时的下载进度，并提示可以改用“导入模型”。
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 29 个可选：非推理 17 个、推理 12 个。默认模型为 Qwen2.5 3B。其中 Qwen2.5 3B 与 Qwen3 4B 另有 q4f32（fp32）版本，精度更高、显存略多，可在下拉框中直接选择，用于 fp16 版本回答乱码时切换。下拉框中的模型全部为纯文本语言模型，不接受图片输入，标签中均标注“纯文本”。每个标签末尾都标注了推理所需的显存（WebLLM 记录的 `vram_required_MB` ÷ 1024，取一位小数）。按尺寸：极小 2 个（Gemma 3 1B、Qwen2.5 0.5B）；小 11 个；中 12 个；大 2 个；超大 2 个。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 31 个可选：非推理 17 个、推理 14 个。默认模型为 Qwen2.5 3B。其中 Qwen2.5 3B 与 Qwen3 4B 另有 q4f32（fp32）版本，精度更高、显存略多，可在下拉框中直接选择，用于 fp16 版本回答乱码时切换。下拉框中的模型全部为纯文本语言模型，不接受图片输入，标签中均标注“纯文本”。每个标签末尾都标注了推理所需的显存（WebLLM 记录的 `vram_required_MB` ÷ 1024，取一位小数）。按尺寸：极小 2 个（Gemma 3 1B、Qwen2.5 0.5B）；小 11 个；中 14 个（其中 2 个为第三方去审查版，见下）；大 2 个；超大 2 个。
   - 厂商：Qwen（阿里）、Google Gemma、Microsoft Phi（Phi-4 mini 的官方语言列表含中文）、Mistral（Ministral 3 3B，官方列表含中文）、DeepSeek（仅 R1 蒸馏版，均为推理模型）、Meta Llama（仅用于大级与超大级，见下）。
   - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）、Gemma 2 9B q4f32（需约 8.2 GB 显存）。
   - 超大：Llama 3.1 70B、Llama 3 70B（均为 q3f16 量化，需约 30.4 GB 显存）。**8 GB 显存的 RTX 4060 无法加载这两个模型，即使是 16 GB 的 4060 Ti 也无法加载**，选中时会显示警告。这两个模型不能满足“4060 上 1 分钟内回复”的要求，也没有在任何真实硬件上测过速度。
@@ -77,26 +77,30 @@ The first repository of me,and first of "炸药工厂"
 - **仅静态版**：服务端模式（`VITE_ENGINE=remote`）下这两个按钮隐藏。
 - **安全说明**：这两个功能同样只在浏览器中校验管理员身份。网站源码本身已在公开仓库中，网站包不包含额外的秘密。
 
-## 待转换模型与跨模型迁移（仅管理员）
+## 第三方模型与跨模型迁移（仅管理员）
 
-### 待转换模型（下拉框中的“待转换（暂不可用）”分组）
+### 第三方去审查模型（下拉框中，标签注明“去审查”）
 
-`web/public/config.json` 的 `webllm.pendingModels` 登记了尚未转换的第三方模型，它们显示在下拉框中，但处于禁用状态，附带备注（悬停可见）：
+下拉框中有两个第三方模型，它们的权重由第三方发布在 Hugging Face 上，已经是 WebLLM 可直接加载的 MLC 格式，不需要转换或编译：
 
-- `Qwen3.5-4B-Uncensored-HauhauCS-Aggressive-q4f16_1-MLC`：HauhauCS 的第三方无审查微调（基于 Qwen3.5-4B）。
-- `Qwen3.5-9B-Defiant-Fable-Uncensored-Heretic-q4f16_1-MLC`：DavidAU 的第三方融合微调（基于 Qwen3.5-9B）。
+- `Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC`：慧辉版（kamekichi1231 发布的 MLC 格式），基于 huihui-ai/Huihui-Qwen3.5-4B-abliterated，即 Qwen3.5 4B 去审查版。
+- `Leyten-Qwen3.5-9B-compute-q4f16_1-MLC`：Heretical 版（Leyten 发布的 MLC 格式），基于 Kewk/Heretical-Qwen3.5-9B，即 Qwen3.5 9B 去审查版。
 
-这两个仓库只提供 GGUF 格式，WebLLM 无法加载，因此暂时不能选用。它们**不放进 `webllm.models`**，以免破坏与 `training/catalog.json` 的一致性检查。
+登记方式：两个模型都在 `webllm.models` 中（出现在下拉框），并在 `webllm.extraRecords` 中登记 MLC 权重地址。运行库沿用官方 Qwen3.5 的预编译文件（`Qwen3.5-4B-q4f16_1_cs1k-webgpu.wasm` 与 `Qwen3.5-9B-q4f16_1_cs1k-webgpu.wasm`），上下文窗口 4096、`max_history_size` 1，与官方记录一致。
 
-- 每个待转换模型都有独立的 model_id，适应记录（更正、知识库、参数）按 model_id 分开保存，与官方原版互不影响。
-- 备注中的基准数据与“无拒绝”等说法均为作者自述，未经独立验证。
-- 启用方法：先在本机把权重转换为 MLC 格式并编译 WebGPU 运行库，上传到自己的 Hugging Face 仓库；然后把该条目从 `pendingModels` 移到 `webllm.models`，并在 `webllm.extraRecords` 中补充 `model` / `model_lib` 记录，`status` 字段删除。
+注意：
+- **去审查**：这两个模型是为了移除拒绝行为而微调的，与官方 Qwen3.5 不同。作者的说明均为自述，未经独立验证。
+- **未验证**：只在配置层面核对了架构参数、预填块大小、运行库与模板一致，**尚未在真实的 WebGPU 设备上加载和回答**。首次使用前请在目标设备上测试。
+- 训练目录（`training/catalog.json`）中的原始仓库分别为 `huihui-ai/Huihui-Qwen3.5-4B-abliterated` 与 `Kewk/Heretical-Qwen3.5-9B`（BF16 safetensors），可作为训练的基础模型。
+- 每个模型都有独立的 model_id，适应记录（更正、知识库、参数）按 model_id 分开保存，与官方原版互不影响。
+
+`webllm.pendingModels` 目前为空。以后如果有需要登记但暂不可用的模型，仍可在其中添加（标签需包含“待转换”“暂不可用”，并附备注）。
 
 ### 跨模型迁移（管理员，仅本机）
 
 在“更改权限”面板的“AI 适应记录”区域，可以把一个 AI 的管理员更正与本地知识库条目复制到另一个 AI：
 
-- **源 AI / 目标 AI**：源 AI 只能选择有适应记录的模型；目标 AI 可以是任何下拉框中的模型（包括待转换和“新建AI”）。
+- **源 AI / 目标 AI**：源 AI 只能选择有适应记录的模型；目标 AI 可以是任何下拉框中的模型（包括第三方模型和“新建AI”）。
 - **选择性**：逐条勾选要迁移的更正或知识库条目，未勾选的不迁移。
 - **复制而非移动**：源 AI 的记录保持不变；迁入的条目带有“迁入自 …”标记。相同文字在目标 AI 中已存在时跳过。
 - **对话训练信息**：默认连同“问题→回答”一起迁移，因此目标 AI 之后可以导出固化数据；取消勾选“同时迁移对话训练样本”则只作为提示词内容使用。
