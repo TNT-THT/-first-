@@ -9,6 +9,8 @@
 /** 固定自检提示词与参数：确定性（temperature 0）、输出很短，耗时可忽略。 */
 export const HEALTH_PROMPT = '你好';
 export const HEALTH_MAX_TOKENS = 32;
+/** 自检最长等待时间。超时则跳过自检（不阻塞加载），并中断这次生成。 */
+export const HEALTH_TIMEOUT_MS = 90_000;
 
 const FP16_SUFFIX = 'q4f16_1-MLC';
 const FP32_SUFFIX = 'q4f32_1-MLC';

@@ -3,8 +3,27 @@
  * 之后的对话完全在本机完成，不需要服务器，也不需要 API Key。
  */
 import { buildModelList } from '../model-source.js';
-import { decideVariant, diagnoseOutput, fp32VariantOf, HEALTH_MAX_TOKENS, HEALTH_PROMPT } from './health.js';
-import { createSerialQueue, gpuResetError, isGpuResetError } from './lifecycle.js';
+import {
+  decideVariant,
+  diagnoseOutput,
+  fp32VariantOf,
+  HEALTH_MAX_TOKENS,
+  HEALTH_PROMPT,
+  HEALTH_TIMEOUT_MS,
+} from './health.js';
+import {
+  abortError,
+  createSerialQueue,
+  createStallGuard,
+  gpuResetError,
+  isGpuResetError,
+  isTimeoutError,
+  iterateWithTimeout,
+  LOAD_STALL_MS,
+  STREAM_FIRST_TOKEN_MS,
+  STREAM_IDLE_MS,
+  withTimeout,
+} from './lifecycle.js';
 import { thinkingRequestOptions } from '../reasoning.js';
 import { THINK_CLOSE_TEXT, thinkingMeter } from '../budget.js';
 
@@ -97,16 +116,22 @@ export function loadWebLLMEngine(modelId, onProgress, opts = {}) {
   return enqueueLoad(() => doLoadWebLLMEngine(modelId, onProgress, opts));
 }
 
-async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecords, contextWindowSize } = {}) {
-  // 先等待进行中的生成结束（如有），再重新加载，避免 unload 时销毁仍在读回的 GPU 缓冲区
+async function doLoadWebLLMEngine(
+  modelId,
+  onProgress,
+  { mirrorOwner, extraRecords, contextWindowSize, signal } = {},
+) {
+  if (signal?.aborted) throw abortError();
+  // 先等待进行中的生成结束（如有），再重新加载，避免 unload 时销毁仍在读回的 GPU 缓冲区。
+  // 生成有超时（见 streamWebLLM），所以这里一定会结束。
   if (inflight) {
     engine?.interruptGenerate().catch(() => {});
     await inflight;
   }
+  if (signal?.aborted) throw abortError();
   if (!(await checkWebGPU())) {
     throw new Error(WEBGPU_MISSING);
   }
-  const progress = (r) => onProgress?.({ progress: r.progress ?? 0, text: r.text || '' });
   // 动态导入：避免把较大的推理库打进首屏
   const { CreateWebWorkerMLCEngine, prebuiltAppConfig } = await import('@mlc-ai/web-llm');
   // 合并自定义记录；配置了 mirrorOwner 时权重从自己的 Hugging Face 仓库下载
@@ -119,21 +144,52 @@ async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecor
   loadedCtx = null;
   // 运行时覆盖上下文窗口（KV 缓存大小）；会覆盖模型自带的 context_window_size
   const chatOpts = contextWindowSize ? { context_window_size: contextWindowSize } : undefined;
+
+  // 加载可以被取消（停止按钮），也会因长时间没有进展而超时。两种情况都会终止 worker，
+  // 因为 WebLLM 没有提供取消加载的接口；终止 worker 后未完成的工作随之结束，队列也能继续。
+  let settled = false;
+  let fail = () => {};
+  const failed = new Promise((_, reject) => {
+    fail = reject;
+  });
+  const guard = createStallGuard({
+    stallMs: LOAD_STALL_MS,
+    message: `模型加载超过 ${Math.round(LOAD_STALL_MS / 1000)} 秒没有进展，已取消加载。请重新发送；如果持续出现，请检查网络或刷新页面。`,
+    onStall: (err) => fail(err),
+  });
+  const onAbort = () => fail(abortError());
+  signal?.addEventListener('abort', onAbort, { once: true });
+  // 注册监听器之前可能已经停止（检查 WebGPU、加载推理库期间）：此时立即取消
+  if (signal?.aborted) onAbort();
+  const progress = (r) => {
+    guard.touch();
+    onProgress?.({ progress: r.progress ?? 0, text: r.text || '' });
+  };
+
   try {
-    if (!engine) {
-      worker = new Worker(new URL('../llm-worker.js', import.meta.url), { type: 'module' });
-      engine = await CreateWebWorkerMLCEngine(worker, modelId, { initProgressCallback: progress, appConfig }, chatOpts);
-    } else {
-      engine.setInitProgressCallback(progress);
-      engine.setAppConfig(appConfig);
-      await engine.reload(modelId, chatOpts);
-    }
+    const work = (async () => {
+      if (!engine) {
+        const w = new Worker(new URL('../llm-worker.js', import.meta.url), { type: 'module' });
+        worker = w;
+        const created = await CreateWebWorkerMLCEngine(w, modelId, { initProgressCallback: progress, appConfig }, chatOpts);
+        if (settled) return; // 已取消或超时：丢弃结果，不能再写入引擎状态
+        engine = created;
+      } else {
+        engine.setInitProgressCallback(progress);
+        engine.setAppConfig(appConfig);
+        await engine.reload(modelId, chatOpts);
+      }
+    })();
+    await Promise.race([work, failed]);
   } catch (err) {
-    if (isGpuResetError(err)) {
-      resetEngine();
-      throw gpuResetError();
-    }
+    settled = true;
+    resetEngine();
+    if (isGpuResetError(err)) throw gpuResetError();
     throw err;
+  } finally {
+    settled = true;
+    guard.stop();
+    signal?.removeEventListener('abort', onAbort);
   }
   loadedId = modelId;
   loadedCtx = contextWindowSize ?? null;
@@ -141,19 +197,32 @@ async function doLoadWebLLMEngine(modelId, onProgress, { mirrorOwner, extraRecor
 
 /** 用固定提示词做一次确定性短输出，返回 {sample, reason}；reason 为 null 表示正常。 */
 export async function runHealthCheck() {
+  const current = engine;
   try {
-    const res = await engine.chat.completions.create({
-      messages: [{ role: 'user', content: HEALTH_PROMPT }],
-      stream: false,
-      temperature: 0,
-      max_tokens: HEALTH_MAX_TOKENS,
-    });
+    const res = await withTimeout(
+      current.chat.completions.create({
+        messages: [{ role: 'user', content: HEALTH_PROMPT }],
+        stream: false,
+        temperature: 0,
+        max_tokens: HEALTH_MAX_TOKENS,
+      }),
+      HEALTH_TIMEOUT_MS,
+      `输出自检超过 ${Math.round(HEALTH_TIMEOUT_MS / 1000)} 秒没有完成`,
+    );
     const sample = res.choices?.[0]?.message?.content ?? '';
     return { sample, reason: diagnoseOutput(sample) };
   } catch (err) {
     if (isGpuResetError(err)) {
       resetEngine();
       throw gpuResetError();
+    }
+    if (isTimeoutError(err)) {
+      // 自检超时：中断这次生成，但不释放引擎（自检失败不阻塞加载，由调用方标记为“未完成”）
+      try {
+        current.interruptGenerate().catch(() => {});
+      } catch {
+        // 忽略：引擎可能已经结束
+      }
     }
     throw err;
   }
@@ -204,6 +273,16 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
     : { variant: 'fp32', healthy: true, note: '检测到 fp16 输出异常，已自动切换到 fp32 版本' };
 }
 
+/** 生成卡住时：中断这次生成，并终止 worker 释放显存（下次发送时重新加载）。 */
+function abandonEngine(current) {
+  try {
+    current.interruptGenerate().catch(() => {});
+  } catch {
+    // 忽略：引擎可能已经结束
+  }
+  if (engine === current) resetEngine();
+}
+
 /**
  * 流式生成。supportsThinking / thinkingEnabled 决定是否关闭推理模型的思考（见 reasoning.js）。
  */
@@ -243,7 +322,15 @@ export async function* streamWebLLM({
     // 用户停止后仍把剩余的流读完（不再输出）：引擎会在下一个 token 前停止，
     // 读完才表示本次生成的 GPU 工作已经结束，之后才允许重新加载模型。
     const meter = thinkingMeter(thinkingBudget);
-    for await (const chunk of stream) {
+    // 每一块都有超时：长时间没有输出（卡住）时中断生成并释放引擎，避免界面一直等待
+    const chunks = iterateWithTimeout(stream, {
+      firstMs: STREAM_FIRST_TOKEN_MS,
+      idleMs: STREAM_IDLE_MS,
+      firstMessage: `模型在 ${Math.round(STREAM_FIRST_TOKEN_MS / 1000)} 秒内没有开始输出（提示词可能过长或显卡忙碌），已释放模型。请重新发送；经常出现时可缩短对话或换用较小的模型。`,
+      idleMessage: `模型输出中途停止超过 ${Math.round(STREAM_IDLE_MS / 1000)} 秒，已释放模型。请重新发送。`,
+      onTimeout: () => abandonEngine(current),
+    });
+    for await (const chunk of chunks) {
       if (meter.cut || signal?.aborted) continue;
       const delta = chunk.choices?.[0]?.delta?.content;
       if (delta) yield delta;
@@ -259,6 +346,8 @@ export async function* streamWebLLM({
       resetEngine();
       throw gpuResetError();
     }
+    // 用户已经点了停止：卡住的情况按停止处理，不当作错误提示
+    if (isTimeoutError(err) && signal?.aborted) throw abortError();
     throw err;
   } finally {
     signal?.removeEventListener('abort', onAbort);

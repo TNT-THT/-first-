@@ -244,3 +244,46 @@ test('参数行可设置 slidingWindow，并按允许范围取整', () => {
   assert.deepEqual(parseFeedbackParams('参数：slidingWindow=99999'), { slidingWindow: WINDOW_LIMITS.slidingWindow.max });
   assert.deepEqual(sanitizeParams({ slidingWindow: 1000 }), { slidingWindow: WINDOW_LIMITS.slidingWindow.min });
 });
+
+/** 原始实现（逐条删除并整体重算），用于对照 fitHistory 的优化结果。 */
+function fitHistoryReference(messages, limitTokens) {
+  const out = [...messages];
+  while (out.length > 2 && estimatePromptTokens(out) > limitTokens) out.splice(1, 1);
+  return out;
+}
+
+test('fitHistory 优化后与原实现结果完全一致（随机输入）', () => {
+  let seed = 12345;
+  const rand = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  const alphabet = 'ab你好，。hello 123\n';
+  for (let trial = 0; trial < 300; trial++) {
+    const n = 1 + Math.floor(rand() * 40);
+    const msgs = [];
+    for (let i = 0; i < n; i++) {
+      const len = Math.floor(rand() * 200);
+      let content = '';
+      for (let j = 0; j < len; j++) content += alphabet[Math.floor(rand() * alphabet.length)];
+      msgs.push({ role: i === 0 ? 'system' : i % 2 ? 'user' : 'assistant', content });
+    }
+    const limit = Math.floor(rand() * 4000);
+    assert.deepEqual(fitHistory(msgs, limit), fitHistoryReference(msgs, limit), `trial ${trial}`);
+  }
+});
+
+test('fitHistory：至少保留系统提示与最后一条消息，不修改原数组', () => {
+  const msgs = [
+    { role: 'system', content: '系统' },
+    { role: 'user', content: '问'.repeat(5000) },
+    { role: 'assistant', content: '答'.repeat(5000) },
+    { role: 'user', content: '最后的问题' },
+  ];
+  const before = msgs.map((m) => m.content);
+  const out = fitHistory(msgs, 10);
+  assert.equal(out.length, 2);
+  assert.equal(out[0].role, 'system');
+  assert.equal(out[1].content, '最后的问题');
+  assert.deepEqual(msgs.map((m) => m.content), before);
+});

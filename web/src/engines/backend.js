@@ -135,7 +135,7 @@ function createWebLLMBackend(cfg) {
       }
       return releaseEngine();
     },
-    async ensureReady(onProgress) {
+    async ensureReady(onProgress, { signal } = {}) {
       if (loaded()) return;
       if (!(await checkWebGPU())) throw new Error(WEBGPU_MISSING);
       // 自定义记录 + 本地“新建 AI”（仅存在于浏览器缓存中）
@@ -147,6 +147,7 @@ function createWebLLMBackend(cfg) {
         mirrorOwner: cfg.mirrorOwner,
         extraRecords,
         contextWindowSize: engineContextSize,
+        signal,
       });
     },
     async *stream({ messages, signal }) {

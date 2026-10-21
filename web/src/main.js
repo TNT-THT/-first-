@@ -788,11 +788,12 @@ async function send(rawText) {
   try {
     if (!state.backend.isReady()) {
       paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在加载模型…' });
+      // 加载可以被停止按钮取消（signal），长时间没有进展会超时并提示重试
       const loaded = await state.backend.ensureReady(({ progress, text: t }) => {
         if (t) progressText = t;
         const pct = Math.round(progress * 100);
         showStatus(`正在加载模型 ${pct}%${t ? `：${t}` : ''}`, { progress });
-      });
+      }, { signal: controller.signal });
       await refreshIdleStatus();
       refreshModelCacheStatus();
       // 输出自检的结果（异常、已切换到 fp32 等）
