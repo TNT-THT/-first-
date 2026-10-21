@@ -11,6 +11,7 @@ import {
 import { loadLocalModels, localRecords } from '../local-models.js';
 import { composeSystemPrompt, getModelParams } from '../adaptation.js';
 import { getThinkingPref, isReasoningModel, setThinkingPref } from '../reasoning.js';
+import { getSlidingPref, setSlidingPref } from '../sliding.js';
 import {
   FORCE_NOTE_RESERVE,
   fitHistory,
@@ -27,12 +28,13 @@ import {
 /**
  * 统一的推理后端接口：
  *   mode            'webllm'（默认，纯静态，浏览器内推理）| 'remote'（自托管服务端 + OpenAI 兼容 API）
- *   limits          上下文预算（发送给模型的历史消息条数 / 字符数）
+ *   limits          上下文预算（发送给模型的历史消息条数 / 字符数）；开启滑动窗口时不按条数与字数截断，只按窗口截断
  *   isReady()       模型是否已就绪
  *   ensureReady(cb) 必要时加载模型，cb 接收 {progress, text}
  *   stream({messages, signal}) 异步生成器，逐段产出文本
  *   supportsThinking() 当前模型是否为推理模型（可切换思考模式）
  *   thinkingEnabled() / setThinking(on) 思考模式开关（仅推理模型生效，默认开启）
+ *   slidingEnabled() / setSliding(on) 滑动窗口开关（所有模型，默认关闭）
  */
 export function createBackend({ mode, appConfig }) {
   return mode === 'remote' ? createRemoteBackend() : createWebLLMBackend(appConfig.webllm);
@@ -43,6 +45,8 @@ function createRemoteBackend() {
     mode: 'remote',
     limits: { maxMessages: 20, maxChars: 40000 },
     models: [],
+    slidingEnabled: () => false,
+    setSliding() {},
     get modelId() {
       return '';
     },
@@ -66,16 +70,21 @@ function createRemoteBackend() {
  * 引擎窗口 = 上下文窗口；只有推理模型且开启思考时才加上思考窗口。
  * 引擎窗口在加载时确定，所以切换思考开关后，下一次发送会按新窗口重新加载。
  */
-function windowsFor(cfg, modelId, thinkingOn) {
+function windowsFor(cfg, modelId, thinkingOn, sliding = getSlidingPref()) {
   const supportsThinking = isReasoningModel(modelId, { models: cfg.models, localEntries: loadLocalModels() });
   const thinkingActive = supportsThinking && !!thinkingOn;
   return {
     supportsThinking,
     thinkingActive,
     ...resolveWindows({
-      defaults: { contextWindow: cfg.contextWindowTokens, thinkingWindow: cfg.thinkingWindowTokens },
+      defaults: {
+        contextWindow: cfg.contextWindowTokens,
+        slidingWindow: cfg.slidingWindowTokens,
+        thinkingWindow: cfg.thinkingWindowTokens,
+      },
       overrides: getModelParams(modelId),
       reserveThinking: thinkingActive,
+      sliding,
     }),
   };
 }
@@ -89,7 +98,12 @@ function createWebLLMBackend(cfg) {
 
   return {
     mode: 'webllm',
-    limits: { maxMessages: cfg.maxMessages, maxChars: cfg.contextChars },
+    // 滑动窗口开启时历史不按条数与字数截断，由 stream() 中的 fitHistory 按窗口截断（最早的消息滚出窗口）
+    get limits() {
+      return getSlidingPref()
+        ? { maxMessages: Infinity, maxChars: Infinity }
+        : { maxMessages: cfg.maxMessages, maxChars: cfg.contextChars };
+    },
     models: cfg.models,
     get modelId() {
       return modelId;
@@ -103,6 +117,10 @@ function createWebLLMBackend(cfg) {
     thinkingEnabled: () => getThinkingPref(),
     setThinking(on) {
       setThinkingPref(on);
+    },
+    slidingEnabled: () => getSlidingPref(),
+    setSliding(on) {
+      setSlidingPref(on);
     },
     /**
      * 参数改变后释放多余显存：若已加载的引擎模型或窗口与当前设置不一致，则释放引擎。
@@ -145,7 +163,9 @@ function createWebLLMBackend(cfg) {
       const reserve = w.thinkingActive ? FORCE_NOTE_RESERVE : 0;
       // 管理员信息（更正、知识库、反馈）从不截断：系统提示放不下时直接报错
       if (!systemPromptFits(system, w.contextWindow, reserve)) {
-        throw new Error('管理员信息（更正、知识库、反馈）与系统提示已超出上下文窗口，为避免截断，本次未发送。请精简这些内容，或在参数中调大上下文窗口（最大 20000）。');
+        throw new Error(
+          `管理员信息（更正、知识库、反馈）与系统提示已超出${w.sliding ? '滑动' : '上下文'}窗口，为避免截断，本次未发送。请精简这些内容，或在参数中调大${w.sliding ? '滑动窗口（参数 slidingWindow，最大 20000）' : '上下文窗口（参数 contextWindow，最大 20000）'}。`,
+        );
       }
       const all = fitHistory([system, ...messages], w.contextWindow - ANSWER_MIN_TOKENS - reserve);
       // 提示词估计 + 思考预算 + 回答长度，保证不超过引擎窗口

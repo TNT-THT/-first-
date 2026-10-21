@@ -211,3 +211,36 @@ test('engineIsStale：模型或窗口与已加载引擎不一致时才需要释�
   // 没有引擎时 loadedId 为 null，与任何模型都不一致（调用方另行判断是否有引擎）
   assert.equal(engineIsStale({ ...same, loadedId: null, loadedCtx: null }), true);
 });
+
+test('滑动窗口：开启时窗口取 slidingWindow（默认 4096），忽略 contextWindow 参数', () => {
+  const defaults = { contextWindow: 16384, slidingWindow: 4096, thinkingWindow: 4096 };
+  const on = resolveWindows({ defaults, overrides: { contextWindow: 12000 }, sliding: true });
+  assert.equal(on.contextWindow, 4096);
+  assert.equal(on.sliding, true);
+  assert.equal(on.engineContextSize, 4096);
+  const off = resolveWindows({ defaults, overrides: { contextWindow: 12000 }, sliding: false });
+  assert.equal(off.contextWindow, 12000);
+  assert.equal(off.sliding, false);
+});
+
+test('滑动窗口：思考窗口另计，引擎窗口 = 滑动窗口 + 思考窗口（思考内容不占用滑动窗口）', () => {
+  const defaults = { contextWindow: 16384, slidingWindow: 4096, thinkingWindow: 4096 };
+  const r = resolveWindows({ defaults, reserveThinking: true, sliding: true });
+  assert.equal(r.contextWindow, 4096);
+  assert.equal(r.thinkingWindow, 4096);
+  assert.equal(r.engineContextSize, 8192);
+});
+
+test('滑动窗口：参数被夹在允许范围内（下限 2048，上限 20000）', () => {
+  const defaults = { slidingWindow: 4096, thinkingWindow: 4096 };
+  assert.equal(resolveWindows({ defaults, overrides: { slidingWindow: 100 }, sliding: true }).contextWindow, WINDOW_LIMITS.slidingWindow.min);
+  assert.equal(resolveWindows({ defaults, overrides: { slidingWindow: 99999 }, sliding: true }).contextWindow, WINDOW_LIMITS.slidingWindow.max);
+  assert.equal(WINDOW_LIMITS.slidingWindow.min, 2048);
+  assert.equal(WINDOW_LIMITS.slidingWindow.max, 20000);
+});
+
+test('参数行可设置 slidingWindow，并按允许范围取整', () => {
+  assert.deepEqual(parseFeedbackParams('参数：slidingWindow = 8192'), { slidingWindow: 8192 });
+  assert.deepEqual(parseFeedbackParams('参数：slidingWindow=99999'), { slidingWindow: WINDOW_LIMITS.slidingWindow.max });
+  assert.deepEqual(sanitizeParams({ slidingWindow: 1000 }), { slidingWindow: WINDOW_LIMITS.slidingWindow.min });
+});

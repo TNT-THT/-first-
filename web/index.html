@@ -101,6 +101,10 @@
               <input id="thinkToggle" type="checkbox" checked />
               <span>思考模式</span>
             </label>
+            <label id="slidingToggleLabel" class="think-toggle" title="开启后上下文固定为滑动窗口大小（默认 4096），超出的最早历史滚出窗口，管理员信息始终保留；关闭则沿用上下文窗口与历史条数、字数限制">
+              <input id="slidingToggle" type="checkbox" />
+              <span>滑动窗口</span>
+            </label>
             <button id="sendBtn" type="submit" class="btn primary">发送</button>
             <button id="stopBtn" type="button" class="btn danger" hidden>停止</button>
           </form>
