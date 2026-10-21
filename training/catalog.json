@@ -703,6 +703,56 @@
       "verified": false
     },
     {
+      "id": "Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC",
+      "label": "Qwen3.5 4B 去审查·慧辉版（推理·中·纯文本·第三方·需约 3.8 GB 显存）",
+      "size_class": "中",
+      "reasoning": true,
+      "in_dropdown": true,
+      "hf_repo": "huihui-ai/Huihui-Qwen3.5-4B-abliterated",
+      "hf_gated": false,
+      "params_b": 4,
+      "train_vram_gb_min": 12,
+      "quantization": "q4f16_1",
+      "conv_template": "chatml",
+      "context_window_size": 4096,
+      "overrides": {
+        "context_window_size": 4096,
+        "max_history_size": 1
+      },
+      "vram_required_MB": 3867.82,
+      "inference_vram_gb": 3.8,
+      "inference_vram_source": "webllm",
+      "source_model": "https://huggingface.co/kamekichi1231/Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC",
+      "model_lib_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3.5-4B-q4f16_1_cs1k-webgpu.wasm",
+      "wasm_file": "Qwen3.5-4B-q4f16_1_cs1k-webgpu.wasm",
+      "verified": false
+    },
+    {
+      "id": "Leyten-Qwen3.5-9B-compute-q4f16_1-MLC",
+      "label": "Qwen3.5 9B 去审查·Heretical 版（推理·中·纯文本·第三方·需约 6.3 GB 显存）",
+      "size_class": "中",
+      "reasoning": true,
+      "in_dropdown": true,
+      "hf_repo": "Kewk/Heretical-Qwen3.5-9B",
+      "hf_gated": false,
+      "params_b": 9,
+      "train_vram_gb_min": 22,
+      "quantization": "q4f16_1",
+      "conv_template": "chatml",
+      "context_window_size": 4096,
+      "overrides": {
+        "context_window_size": 4096,
+        "max_history_size": 1
+      },
+      "vram_required_MB": 6433.01,
+      "inference_vram_gb": 6.3,
+      "inference_vram_source": "webllm",
+      "source_model": "https://huggingface.co/Leyten/Qwen3.5-9B-compute-q4f16_1-MLC",
+      "model_lib_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3.5-9B-q4f16_1_cs1k-webgpu.wasm",
+      "wasm_file": "Qwen3.5-9B-q4f16_1_cs1k-webgpu.wasm",
+      "verified": false
+    },
+    {
       "id": "Qwen2.5-32B-Instruct",
       "label": "Qwen2.5 32B（非推理·超大·纯文本·需约 19 GB 显存·估算）",
       "size_class": "超大",

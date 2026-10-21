@@ -36,6 +36,9 @@ const UPSTREAM = {
   'Qwen2.5-7B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-7B-Instruct', 'qwen2', 7.6],
   'Qwen2.5-7B-Instruct-q4f32_1-MLC': ['Qwen/Qwen2.5-7B-Instruct', 'qwen2', 7.6],
   'Qwen2.5-0.5B-Instruct-q4f16_1-MLC': ['Qwen/Qwen2.5-0.5B-Instruct', 'qwen2', 0.5],
+  // 第三方去审查微调（config.json 的 extraRecords 登记）：原始仓库为 BF16 safetensors，可作为训练基础
+  'Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC': ['huihui-ai/Huihui-Qwen3.5-4B-abliterated', 'chatml', 4.0],
+  'Leyten-Qwen3.5-9B-compute-q4f16_1-MLC': ['Kewk/Heretical-Qwen3.5-9B', 'chatml', 9.0],
   'Qwen3-8B-q4f16_1-MLC': ['Qwen/Qwen3-8B', 'chatml', 8.2],
   'Qwen3-8B-q4f32_1-MLC': ['Qwen/Qwen3-8B', 'chatml', 8.2],
   'Qwen3.5-0.8B-q4f16_1-MLC': ['Qwen/Qwen3.5-0.8B', 'chatml', 0.8],
@@ -91,7 +94,9 @@ export function parseLabel(label) {
 export function buildCatalog({ configPath = CONFIG_PATH, webllmPath = WEBLLM_PATH } = {}) {
   const config = JSON.parse(readFileSync(configPath, 'utf8'));
   return import(pathToFileURL(webllmPath).href).then(({ prebuiltAppConfig }) => {
+    // 内置记录 + config.json 中的 extraRecords（第三方模型；同 model_id 以 extraRecords 为准）
     const byId = new Map(prebuiltAppConfig.model_list.map((r) => [r.model_id, r]));
+    for (const extra of config.webllm.extraRecords || []) byId.set(extra.model_id, extra);
     const entries = [];
     for (const item of config.webllm.models) {
       const rec = byId.get(item.id);
