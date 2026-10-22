@@ -112,3 +112,26 @@ test('fitHistory：chunk 默认为 1，结果与逐条丢弃一致', () => {
   const withChunk1 = fitHistory(msgs, 900, { chunk: 1 });
   assert.deepEqual(withDefault, withChunk1);
 });
+
+test('trimSessionMessages：未超过上限不删除；超过时按粒度整段删除最早的消息', async () => {
+  const { trimSessionMessages } = await import('../web/src/store.js');
+  const mk = (n) => Array.from({ length: n }, (_, i) => ({ id: i }));
+  const a = mk(200);
+  assert.equal(trimSessionMessages(a, 200, 6), 0);
+  assert.equal(a.length, 200);
+  const b = mk(201);
+  assert.equal(trimSessionMessages(b, 200, 6), 6);
+  assert.equal(b.length, 195);
+  assert.equal(b[0].id, 6); // 删除的是最早的 6 条，且删除量是粒度的整数倍
+  const c = mk(203);
+  assert.equal(trimSessionMessages(c, 200, 6), 6);
+  assert.equal(c.length, 197);
+});
+
+test('trimSessionMessages：粒度为 1 时与逐条删除一致', async () => {
+  const { trimSessionMessages } = await import('../web/src/store.js');
+  const d = Array.from({ length: 205 }, (_, i) => ({ id: i }));
+  assert.equal(trimSessionMessages(d, 200, 1), 5);
+  assert.equal(d.length, 200);
+  assert.equal(d[0].id, 5);
+});

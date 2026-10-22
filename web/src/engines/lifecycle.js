@@ -43,3 +43,34 @@ export function abortError() {
   e.name = 'AbortError';
   return e;
 }
+
+/**
+ * 进行中的生成的门闩。生成开始时 begin() 返回一个令牌，结束时 end(令牌)。
+ * pending：当前未结束的生成（用于加载或释放前等待）。
+ * releaseAll()：引擎被丢弃（worker 已终止）时调用，使等待者立即继续；
+ *   被终止的生成永远不会自行结束，如果不在这里结束，之后的加载与释放都会永远等待。
+ */
+export function createInflightGate() {
+  let current = null;
+  return {
+    begin() {
+      let resolve = () => {};
+      const promise = new Promise((r) => {
+        resolve = r;
+      });
+      current = { promise, resolve };
+      return current;
+    },
+    get pending() {
+      return current ? current.promise : null;
+    },
+    end(token) {
+      token?.resolve();
+      if (current === token) current = null;
+    },
+    releaseAll() {
+      if (current) current.resolve();
+      current = null;
+    },
+  };
+}
