@@ -121,3 +121,18 @@ export function initialVisibleStart(total, count = RECENT_RENDER_COUNT) {
 export function expandVisibleStart(start, step = UNFOLD_STEP) {
   return Math.max(0, start - step);
 }
+
+/**
+ * 会话超过上限时删除最早的消息，按 chunk 整段删除（与发送时的历史丢弃粒度一致）。
+ * 每次删除的条数是 chunk 的整数倍，因此删除前后保留的消息对齐，之后几轮的前缀不变，
+ * 仍可复用 KV 缓存。返回实际删除的条数。
+ */
+export function trimSessionMessages(messages, max = MAX_MESSAGES_PER_SESSION, chunk = 1) {
+  if (messages.length <= max) return 0;
+  const step = Math.max(1, Math.floor(chunk));
+  const excess = messages.length - max;
+  const remove = Math.min(messages.length, Math.ceil(excess / step) * step);
+  messages.splice(0, remove);
+  return remove;
+}
+

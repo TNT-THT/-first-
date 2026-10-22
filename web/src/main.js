@@ -61,6 +61,7 @@ import {
   loadStore,
   MAX_MESSAGES_PER_SESSION,
   saveStore,
+  trimSessionMessages,
   titleFrom,
   UNFOLD_STEP,
 } from './store.js';
@@ -713,9 +714,8 @@ function verifyCorrectionKey(text, desc = '') {
 /** 固定提示（不调用模型）：作为助手消息显示，但不标注 AI、不作为反馈对象，也不发送给模型。 */
 function showFixedReply(session, isFirst, userMsg, content) {
   session.messages.push(userMsg, { role: 'assistant', content, ts: Date.now(), fixed: true });
-  if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
-    session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
-  }
+  // 超过上限时按丢弃粒度整段删除最早的消息，保持之后几轮的前缀不变（减少重新预填）
+  trimSessionMessages(session.messages, MAX_MESSAGES_PER_SESSION, state.appConfig.webllm.historyDropChunk ?? 1);
   if (isFirst) session.title = titleFrom(userMsg.content);
   session.updatedAt = Date.now();
   persist();
@@ -758,9 +758,8 @@ async function send(rawText) {
   const modelLabel = modelDisplayName(modelId);
   const assistantMsg = { role: 'assistant', content: '', ts: Date.now(), model: modelId, modelLabel };
   session.messages.push(userMsg, assistantMsg);
-  if (session.messages.length > MAX_MESSAGES_PER_SESSION) {
-    session.messages.splice(0, session.messages.length - MAX_MESSAGES_PER_SESSION);
-  }
+  // 超过上限时按丢弃粒度整段删除最早的消息，保持之后几轮的前缀不变（减少重新预填）
+  trimSessionMessages(session.messages, MAX_MESSAGES_PER_SESSION, state.appConfig.webllm.historyDropChunk ?? 1);
   if (isFirst) session.title = titleFrom(text);
   session.updatedAt = Date.now();
   persist();
@@ -2016,15 +2015,17 @@ els.historyBtn.addEventListener('click', () => {
   toggleHistory();
 });
 
-els.thinkToggle.addEventListener('change', () => {
+els.thinkToggle.addEventListener('change', async () => {
   state.backend.setThinking(els.thinkToggle.checked);
-  // 思考窗口在加载模型时确定：切换后下一次发送会按新窗口重新加载模型
   const eff = effectiveParams(state.backend.modelId);
   const win = activeContextWindow(eff);
+  // 引擎窗口随思考开关改变：释放多余显存（与参数、滑动窗口开关相同）；下次发送时按新窗口加载
+  const released = await releaseStaleEngine();
+  const tail = released ? '已释放多余显存，' : '';
   flashStatus(
     els.thinkToggle.checked
-      ? `已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。下次发送时将按 ${win + eff.thinkingWindow} 窗口重新加载模型（思考内容不计入窗口）。`
-      : `已关闭思考模式：推理模型直接给出回答，速度更快。下次发送时将按 ${win} 窗口重新加载模型。`,
+      ? `已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。${tail}下次发送时将按 ${win + eff.thinkingWindow} 窗口重新加载模型（思考内容不计入窗口）。`
+      : `已关闭思考模式：推理模型直接给出回答，速度更快。${tail}下次发送时将按 ${win} 窗口重新加载模型。`,
   );
 });
 

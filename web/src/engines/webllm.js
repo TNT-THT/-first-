@@ -10,7 +10,13 @@ import {
   HEALTH_MAX_TOKENS,
   HEALTH_PROMPT,
 } from './health.js';
-import { abortError, createSerialQueue, gpuResetError, isGpuResetError } from './lifecycle.js';
+import {
+  abortError,
+  createInflightGate,
+  createSerialQueue,
+  gpuResetError,
+  isGpuResetError,
+} from './lifecycle.js';
 import { thinkingRequestOptions } from '../reasoning.js';
 import { THINK_CLOSE_TEXT, thinkingMeter } from '../budget.js';
 
@@ -22,8 +28,9 @@ let worker = null;
 let loadedId = null;
 // 当前引擎的 context_window_size（上下文窗口 + 推理模型的思考窗口）；窗口变化需要重新加载
 let loadedCtx = null;
-// 当前进行中的生成（流式输出结束时才 resolve）。加载模型前必须等待它结束，否则 GPU 资源可能被提前销毁。
-let inflight = null;
+// 进行中的生成（门闩）。加载或释放前必须等待它结束，否则 GPU 资源可能被提前销毁；
+// 引擎被丢弃（worker 终止）时门闩会立即结束等待，避免永远卡住。
+const generations = createInflightGate();
 // 所有加载请求排队执行，避免两次 reload 交错。
 const enqueueLoad = createSerialQueue();
 
@@ -66,6 +73,8 @@ export async function getModelRecords({ mirrorOwner, extraRecords } = {}) {
 
 /** 丢弃当前引擎与 worker；下次加载会创建新的 worker。 */
 function resetEngine() {
+  // worker 终止后，进行中的生成不会再结束：立即释放等待它的加载与释放
+  generations.releaseAll();
   const w = worker;
   worker = null;
   engine = null;
@@ -92,13 +101,14 @@ export function forceResetEngine() {
 
 export function releaseEngine() {
   return enqueueLoad(async () => {
-    if (inflight) {
+    const pending = generations.pending;
+    if (pending) {
       try {
         engine?.interruptGenerate?.();
       } catch {
         // 忽略：引擎可能已经结束
       }
-      await inflight.catch(() => {});
+      await pending;
     }
     if (!engine && !worker) return false;
     resetEngine();
@@ -117,49 +127,43 @@ async function doLoadWebLLMEngine(
   { mirrorOwner, extraRecords, contextWindowSize, signal } = {},
 ) {
   if (signal?.aborted) throw abortError();
-  // 先等待进行中的生成结束（如有），再重新加载，避免 unload 时销毁仍在读回的 GPU 缓冲区。
-  // 生成有超时（见 streamWebLLM），所以这里一定会结束。
-  if (inflight) {
-    engine?.interruptGenerate().catch(() => {});
-    await inflight;
-  }
-  if (signal?.aborted) throw abortError();
-  if (!(await checkWebGPU())) {
-    throw new Error(WEBGPU_MISSING);
-  }
-  // 动态导入：避免把较大的推理库打进首屏
-  const { CreateWebWorkerMLCEngine, prebuiltAppConfig } = await import('@mlc-ai/web-llm');
-  // 合并自定义记录；配置了 mirrorOwner 时权重从自己的 Hugging Face 仓库下载
-  const appConfig = {
-    ...prebuiltAppConfig,
-    model_list: buildModelList(prebuiltAppConfig.model_list, extraRecords, mirrorOwner),
-  };
-
-  loadedId = null;
-  loadedCtx = null;
-  // 运行时覆盖上下文窗口（KV 缓存大小）；会覆盖模型自带的 context_window_size
-  const chatOpts = contextWindowSize ? { context_window_size: contextWindowSize } : undefined;
-
-  // 用户点击停止即取消加载。WebLLM 没有取消加载的接口，所以终止 worker；未完成的工作随之结束。
-  // 没有时限：加载耗时由用户决定是否取消。
-  let settled = false;
+  // 停止（signal）从一开始就生效，包括等待进行中的生成结束的这段时间。
+  // WebLLM 没有取消加载的接口：取消时终止 worker，未完成的工作随之结束。
   let fail = () => {};
   const failed = new Promise((_, reject) => {
     fail = reject;
   });
   const onAbort = () => fail(abortError());
   signal?.addEventListener('abort', onAbort, { once: true });
-  // 注册监听器之前可能已经停止（检查 WebGPU、加载推理库期间）：此时立即取消
-  if (signal?.aborted) onAbort();
+  let settled = false;
   const progress = (r) => onProgress?.({ progress: r.progress ?? 0, text: r.text || '' });
-
   try {
     const work = (async () => {
+      // 先等待进行中的生成结束（如有），再重新加载，避免 unload 时销毁仍在读回的 GPU 缓冲区
+      const pending = generations.pending;
+      if (pending) {
+        engine?.interruptGenerate().catch(() => {});
+        await pending;
+      }
+      if (!(await checkWebGPU())) {
+        throw new Error(WEBGPU_MISSING);
+      }
+      // 动态导入：避免把较大的推理库打进首屏
+      const { CreateWebWorkerMLCEngine, prebuiltAppConfig } = await import('@mlc-ai/web-llm');
+      // 合并自定义记录；配置了 mirrorOwner 时权重从自己的 Hugging Face 仓库下载
+      const appConfig = {
+        ...prebuiltAppConfig,
+        model_list: buildModelList(prebuiltAppConfig.model_list, extraRecords, mirrorOwner),
+      };
+      loadedId = null;
+      loadedCtx = null;
+      // 运行时覆盖上下文窗口（KV 缓存大小）；会覆盖模型自带的 context_window_size
+      const chatOpts = contextWindowSize ? { context_window_size: contextWindowSize } : undefined;
       if (!engine) {
         const w = new Worker(new URL('../llm-worker.js', import.meta.url), { type: 'module' });
         worker = w;
         const created = await CreateWebWorkerMLCEngine(w, modelId, { initProgressCallback: progress, appConfig }, chatOpts);
-        if (settled) return; // 已取消或超时：丢弃结果，不能再写入引擎状态
+        if (settled) return; // 已取消：丢弃结果，不能再写入引擎状态
         engine = created;
       } else {
         engine.setInitProgressCallback(progress);
@@ -265,11 +269,7 @@ export async function* streamWebLLM({
   if (!engine || !loadedId) throw new Error('模型尚未加载');
   if (signal?.aborted) return;
   const current = engine;
-  let markDone;
-  const done = new Promise((resolve) => {
-    markDone = resolve;
-  });
-  inflight = done;
+  const token = generations.begin();
   const onAbort = () => {
     current.interruptGenerate().catch(() => {});
   };
@@ -304,7 +304,6 @@ export async function* streamWebLLM({
     throw err;
   } finally {
     signal?.removeEventListener('abort', onAbort);
-    markDone();
-    if (inflight === done) inflight = null;
+    generations.end(token);
   }
 }
