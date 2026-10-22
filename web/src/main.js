@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify';
 import { renderMarkdown } from './markdown.js';
 import { hasThinking, splitThinking } from './think.js';
 import { truncateThinking } from './reasoning.js';
+import { trimRepetition } from './repetition.js';
 import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
@@ -293,6 +294,7 @@ function paintAssistant(bubble, msg, { streaming = false, label = '正在思考�
   }
   let html = sanitize(renderMarkdown(parts.answer));
   if (msg.stopped) html += '<p class="note">（已停止生成）</p>';
+  if (msg.looped) html += '<p class="note">（检测到重复输出，已自动停止；以上为第一份内容）</p>';
   answerEl.innerHTML = html;
   // 生成后的校验：回答完成后，若含有管理员标记的错误说法，在回答下方提示正确说法（不改写回答）
   bubble.querySelector(':scope > .check-warning')?.remove();
@@ -589,6 +591,7 @@ function effectiveParams(modelId) {
   const d = state.appConfig.webllm;
   return {
     temperature: d.temperature,
+    repetitionPenalty: d.repetitionPenalty,
     maxTokens: d.maxTokens,
     contextWindow: d.contextWindowTokens,
     slidingWindow: d.slidingWindowTokens,
@@ -805,12 +808,24 @@ async function send(rawText) {
       if (loaded?.note) showStatus(loaded.note, { error: loaded.healthy === false });
     }
 
-    for await (const delta of state.backend.stream({ messages: context, signal: controller.signal })) {
+    let loopDetected = false;
+    for await (const delta of state.backend.stream({
+      messages: context,
+      signal: controller.signal,
+      onLoop: () => {
+        loopDetected = true;
+      },
+    })) {
       assistantMsg.content += delta;
       scheduleRender();
     }
     if (frame) cancelAnimationFrame(frame);
     if (controller.signal.aborted) assistantMsg.stopped = true;
+    if (loopDetected) {
+      // 检测到重复输出：只保留第一份内容保存到历史（之后几轮不会被模型复制重复的部分）
+      assistantMsg.content = trimRepetition(assistantMsg.content);
+      assistantMsg.looped = true;
+    }
     const raw = assistantMsg.content;
     finalizeAssistant(assistantMsg);
     if (!assistantMsg.content && !assistantMsg.stopped) {
@@ -1778,7 +1793,7 @@ function renderParamDetails(list, modelId, overrides) {
   line.className = 'muted small local-meta';
   line.textContent =
     '当前生效：' +
-    ['temperature', 'maxTokens', 'contextWindow', 'slidingWindow', 'thinkingWindow']
+    ['temperature', 'repetitionPenalty', 'maxTokens', 'contextWindow', 'slidingWindow', 'thinkingWindow']
       .map((k) => `${k} = ${eff[k]}（${k in overrides ? '本机覆盖' : '默认'}）`)
       .join('｜');
   list.append(line);

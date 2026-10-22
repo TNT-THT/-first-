@@ -18,6 +18,7 @@ import {
   isGpuResetError,
 } from './lifecycle.js';
 import { thinkingRequestOptions } from '../reasoning.js';
+import { findTailRepeat, LOOP_CHECK_EVERY } from '../repetition.js';
 import { THINK_CLOSE_TEXT, thinkingMeter } from '../budget.js';
 
 export const WEBGPU_MISSING =
@@ -265,6 +266,8 @@ export async function* streamWebLLM({
   supportsThinking = false,
   thinkingEnabled = true,
   thinkingBudget = null,
+  repetitionPenalty = null,
+  onLoop = null,
 }) {
   if (!engine || !loadedId) throw new Error('模型尚未加载');
   if (signal?.aborted) return;
@@ -280,22 +283,41 @@ export async function* streamWebLLM({
       stream: true,
       temperature,
       max_tokens: maxTokens,
+      // 温和的重复惩罚（只在配置或管理员参数中设置时发送）：减少小模型陷入循环
+      ...(repetitionPenalty ? { repetition_penalty: repetitionPenalty } : {}),
       ...thinkingRequestOptions({ supportsThinking, enabled: thinkingEnabled }),
     });
     // 用户停止后仍把剩余的流读完（不再输出）：引擎会在下一个 token 前停止，
     // 读完才表示本次生成的 GPU 工作已经结束，之后才允许重新加载模型。
     const meter = thinkingMeter(thinkingBudget);
+    let acc = '';
+    let sinceCheck = 0;
+    let looped = false;
     for await (const chunk of stream) {
-      if (meter.cut || signal?.aborted) continue;
+      if (meter.cut || signal?.aborted || looped) continue;
       const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta) yield delta;
+      if (delta) {
+        acc += delta;
+        sinceCheck += delta.length;
+        if (sinceCheck >= LOOP_CHECK_EVERY) {
+          sinceCheck = 0;
+          if (findTailRepeat(acc)) {
+            // 检测到连续重复：中断生成（剩余的流仍会读完），之后由调用方只保留第一份内容
+            looped = true;
+            onLoop?.();
+            current.interruptGenerate().catch(() => {});
+            continue;
+          }
+        }
+        yield delta;
+      }
       if (meter.step(delta)) {
         // 思考预算用完：中断生成（之后仍读完剩余的流），并补上思考结束标记
         current.interruptGenerate().catch(() => {});
         yield THINK_CLOSE_TEXT;
       }
     }
-    return { forced: meter.cut, thinking: meter.thinking(), thinkingTokens: meter.tokens };
+    return { forced: meter.cut, thinking: meter.thinking(), thinkingTokens: meter.tokens, looped };
   } catch (err) {
     if (isGpuResetError(err)) {
       resetEngine();

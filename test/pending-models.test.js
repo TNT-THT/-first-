@@ -33,6 +33,12 @@ const THIRD_PARTY = [
     lib: 'Qwen3.5-9B-q4f16_1_cs1k-webgpu.wasm',
     vram: 6433.01,
   },
+  {
+    id: 'Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC',
+    repo: 'https://huggingface.co/RaiseRuntimeError/Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC',
+    lib: 'Qwen3.5-2B-q4f16_1_cs1k-webgpu.wasm',
+    vram: 2245.44,
+  },
 ];
 
 test('待转换列表已清空：两个第三方模型已改为正式登记（不再是待转换）', () => {

@@ -23,6 +23,7 @@ export const MAX_KB_ENTRIES = 50;
 export const MAX_PARAM_LOG = 50;
 const PARAM_LIMITS = {
   temperature: [0, 1.5],
+  repetitionPenalty: [1, 2],
   maxTokens: [64, 16384],
   contextWindow: [WINDOW_LIMITS.contextWindow.min, WINDOW_LIMITS.contextWindow.max],
   slidingWindow: [WINDOW_LIMITS.slidingWindow.min, WINDOW_LIMITS.slidingWindow.max],
@@ -437,6 +438,7 @@ const SUGGEST_RULES = [
 /** 参数在提示中的中文名称。 */
 export const PARAM_LABELS = {
   temperature: '温度',
+  repetitionPenalty: '重复惩罚',
   maxTokens: '最大输出长度',
   contextWindow: '上下文窗口',
   slidingWindow: '滑动窗口',

@@ -753,6 +753,31 @@
       "verified": false
     },
     {
+      "id": "Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC",
+      "label": "Qwen3.5 2B 去审查·慧辉版（推理·小·纯文本·第三方·需约 2.2 GB 显存）",
+      "size_class": "小",
+      "reasoning": true,
+      "in_dropdown": true,
+      "hf_repo": "huihui-ai/Huihui-Qwen3.5-2B-abliterated",
+      "hf_gated": false,
+      "params_b": 2,
+      "train_vram_gb_min": 8,
+      "quantization": "q4f16_1",
+      "conv_template": "chatml",
+      "context_window_size": 4096,
+      "overrides": {
+        "context_window_size": 4096,
+        "max_history_size": 1
+      },
+      "vram_required_MB": 2245.44,
+      "inference_vram_gb": 2.2,
+      "inference_vram_source": "webllm",
+      "source_model": "https://huggingface.co/RaiseRuntimeError/Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC",
+      "model_lib_url": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3.5-2B-q4f16_1_cs1k-webgpu.wasm",
+      "wasm_file": "Qwen3.5-2B-q4f16_1_cs1k-webgpu.wasm",
+      "verified": false
+    },
+    {
       "id": "Qwen2.5-32B-Instruct",
       "label": "Qwen2.5 32B（非推理·超大·纯文本·需约 19 GB 显存·估算）",
       "size_class": "超大",
