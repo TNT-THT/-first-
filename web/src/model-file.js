@@ -46,6 +46,11 @@ function safeFileName(id) {
   return String(id).replace(/[^A-Za-z0-9._-]+/g, '_');
 }
 
+/** 导出文件的默认文件名（模型 id 去掉不安全字符，加上 .ojmodel 扩展名）。 */
+export function modelFileName(modelId) {
+  return `${safeFileName(modelId)}${MODEL_FILE_EXT}`;
+}
+
 function pickDefined(obj, keys) {
   const out = {};
   for (const k of keys) if (obj[k] !== undefined) out[k] = obj[k];
@@ -155,7 +160,7 @@ export async function buildModelFile(record, { storage = globalThis.caches, onPr
   });
   return {
     blob,
-    filename: `${safeFileName(record.model_id)}${MODEL_FILE_EXT}`,
+    filename: modelFileName(record.model_id),
     size: blob.size,
     entryCount: meta.length,
   };
