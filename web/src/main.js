@@ -14,9 +14,15 @@ import {
   buildModelFile,
   importModelFile,
   listCachedModelIds,
+  modelFileName,
   readModelFileHeader,
   removeLocalModelFiles,
 } from './model-file.js';
+import {
+  isPickerCancelled,
+  savePickerOptions,
+  supportsSaveLocationPicker,
+} from './save-location.js';
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
 import { pendingModels } from './pending-models.js';
@@ -1199,6 +1205,17 @@ async function exportCurrentModel() {
   try {
     const record = (await getRecords()).find((r) => r.model_id === modelId);
     if (!record) throw new Error(`找不到模型记录：${modelId}`);
+    // 先让用户选择保存的盘符与文件夹：必须在点击后立即弹出（之后打包可能很久，浏览器会撤销授权）
+    let handle = null;
+    if (supportsSaveLocationPicker()) {
+      try {
+        handle = await window.showSaveFilePicker(savePickerOptions(modelFileName(record.model_id)));
+      } catch (err) {
+        if (isPickerCancelled(err)) return showStatus('已取消导出。');
+        // 其他错误（例如嵌入到其他网站的 iframe 中被浏览器禁止）：回退到下载目录，不让导出失败
+        handle = null;
+      }
+    }
     // 勾选“同时保存自定义参数”时，把本机覆盖的 temperature / maxTokens 写入文件头部
     const overrides = sanitizeParams(listAdaptation(modelId).params);
     const withParams = !!overrides && els.exportWithParams.checked;
@@ -1209,9 +1226,18 @@ async function exportCurrentModel() {
       onProgress: ({ done, total }) =>
         showStatus(`正在打包 ${label}（${done}/${total} 个文件）…`, { progress: done / total }),
     });
-    downloadBlob(blob, filename);
+    if (handle) {
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+    } else {
+      // 不支持选择位置的浏览器：使用浏览器的下载目录（可在浏览器设置中选择“每次询问保存位置”）
+      downloadBlob(blob, filename);
+    }
+    const savedName = handle?.name || filename;
+    const where = handle ? '已保存到你选择的位置' : '已下载到浏览器的下载目录';
     const paramNote = withParams ? `，已保存自定义参数（${paramSummary(overrides)}）` : '';
-    showStatus(`已导出 ${filename}（${formatBytes(size)}，${entryCount} 个文件${paramNote}）。导入后即可离线使用。`);
+    showStatus(`${where}：${savedName}（${formatBytes(size)}，${entryCount} 个文件${paramNote}）。导入后即可离线使用。`);
   } catch (err) {
     showStatus(`导出失败：${err.message}`, { error: true });
   } finally {
