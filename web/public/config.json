@@ -149,9 +149,15 @@
         "id": "Leyten-Qwen3.5-9B-compute-q4f16_1-MLC",
         "label": "Qwen3.5 9B 去审查·Heretical 版（推理·中·纯文本·第三方·需约 6.3 GB 显存）",
         "reasoning": true
+      },
+      {
+        "id": "Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC",
+        "label": "Qwen3.5 2B 去审查·慧辉版（推理·小·纯文本·第三方·需约 2.2 GB 显存）",
+        "reasoning": true
       }
     ],
     "temperature": 0.3,
+    "repetitionPenalty": 1.1,
     "maxTokens": 16384,
     "contextWindowTokens": 16384,
     "slidingWindowTokens": 4096,
@@ -187,6 +193,17 @@
         "model_lib": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3.5-9B-q4f16_1_cs1k-webgpu.wasm",
         "low_resource_required": false,
         "vram_required_MB": 6433.01,
+        "overrides": {
+          "context_window_size": 4096,
+          "max_history_size": 1
+        }
+      },
+      {
+        "model": "https://huggingface.co/RaiseRuntimeError/Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC",
+        "model_id": "Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC",
+        "model_lib": "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_86/base/Qwen3.5-2B-q4f16_1_cs1k-webgpu.wasm",
+        "low_resource_required": false,
+        "vram_required_MB": 2245.44,
         "overrides": {
           "context_window_size": 4096,
           "max_history_size": 1

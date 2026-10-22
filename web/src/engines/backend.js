@@ -158,10 +158,11 @@ function createWebLLMBackend(cfg) {
         signal,
       });
     },
-    async *stream({ messages, signal }) {
+    async *stream({ messages, signal, onLoop }) {
       // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
       const system = { role: 'system', content: composeSystemPrompt(cfg.systemPrompt, modelId) };
       const params = getModelParams(modelId);
+      const repetitionPenalty = params.repetitionPenalty ?? cfg.repetitionPenalty ?? null;
       const thinkingOn = getThinkingPref();
       const w = windowsFor(cfg, modelId, thinkingOn);
       const temperature = params.temperature ?? cfg.temperature;
@@ -197,6 +198,8 @@ function createWebLLMBackend(cfg) {
         supportsThinking: w.supportsThinking,
         thinkingEnabled: thinkingOn,
         thinkingBudget: plan.thinkingTokens || null,
+        repetitionPenalty,
+        onLoop,
       });
       // 思考预算用完仍未回答：直接发起回答请求（关闭思考，并附上已写出的部分思考）
       if (first?.forced && !signal?.aborted) {
@@ -217,6 +220,8 @@ function createWebLLMBackend(cfg) {
           maxTokens: direct.maxTokens,
           supportsThinking: w.supportsThinking,
           thinkingEnabled: false,
+          repetitionPenalty,
+          onLoop,
         });
       }
     },

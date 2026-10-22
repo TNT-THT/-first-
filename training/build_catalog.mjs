@@ -39,6 +39,7 @@ const UPSTREAM = {
   // 第三方去审查微调（config.json 的 extraRecords 登记）：原始仓库为 BF16 safetensors，可作为训练基础
   'Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC': ['huihui-ai/Huihui-Qwen3.5-4B-abliterated', 'chatml', 4.0],
   'Leyten-Qwen3.5-9B-compute-q4f16_1-MLC': ['Kewk/Heretical-Qwen3.5-9B', 'chatml', 9.0],
+  'Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC': ['huihui-ai/Huihui-Qwen3.5-2B-abliterated', 'chatml', 2.0],
   'Qwen3-8B-q4f16_1-MLC': ['Qwen/Qwen3-8B', 'chatml', 8.2],
   'Qwen3-8B-q4f32_1-MLC': ['Qwen/Qwen3-8B', 'chatml', 8.2],
   'Qwen3.5-0.8B-q4f16_1-MLC': ['Qwen/Qwen3.5-0.8B', 'chatml', 0.8],
