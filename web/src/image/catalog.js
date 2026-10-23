@@ -37,3 +37,33 @@ export function sourceSizes(model) {
   for (const [key, f] of Object.entries(model.files || {})) out[key] = Number(f.size) || 0;
   return out;
 }
+
+/**
+ * 文本编码器的备选文件（config 中的 textEncoderFallback，如 fp32）。
+ * 它不在 files 中：不参与下载、缓存状态与导出，只在主文件无法创建会话时由生图 worker 直接读取。
+ * 没有备选文件时返回 null。
+ */
+export function fallbackFile(model) {
+  const f = model?.textEncoderFallback;
+  if (!f || typeof f.path !== 'string' || typeof f.repo !== 'string') return null;
+  return {
+    url: `https://huggingface.co/${f.repo}/resolve/${f.revision || 'main'}/${f.path}`,
+    size: Number(f.size) || 0,
+  };
+}
+
+/** 生成时 worker 需要的全部地址：files 的地址，加上备选文件（如有）。 */
+export function runtimeUrls(model) {
+  const urls = sourceUrls(model);
+  const fb = fallbackFile(model);
+  if (fb) urls.textEncoderFallback = fb.url;
+  return urls;
+}
+
+/** 生成时 worker 需要的全部大小：files 的大小，加上备选文件（如有）。 */
+export function runtimeSizes(model) {
+  const sizes = sourceSizes(model);
+  const fb = fallbackFile(model);
+  if (fb) sizes.textEncoderFallback = fb.size;
+  return sizes;
+}

@@ -39,10 +39,12 @@ export function sessionPlans(executionProviders = ['wasm']) {
  * @param {object} p.sources        {textEncoder, unet, unetExternal?, vaeDecoder}
  *                                  每项可以是 URL 字符串、Uint8Array，或返回其中之一的函数（按需读取，读取一次）。
  *                                  unetExternal 形如 {path: 'weights.pb', data: url|Uint8Array|function}
+ * @param {object} [p.sources.textEncoderFallback] 文本编码器的备选文件（如 fp32）。仅当主文件的全部方案都无法创建会话时使用。
  * @param {string[]} [p.executionProviders]
  * @param {(e: object) => void} [p.onSession] 会话进度：{phase: 'start'|'done'|'failed', key, label, plan, index, total, message?}
+ * @param {(e: {message: string}) => void} [p.onFallback] 文本编码器改用备选文件时调用（message 为主文件的失败原因）
  */
-export async function createSd15Runtime({ ort, sources, executionProviders = ['wasm'], onSession }) {
+export async function createSd15Runtime({ ort, sources, executionProviders = ['wasm'], onSession, onFallback }) {
   const sessions = [];
   const plansUsed = {};
   const keys = ['textEncoder', 'unet', 'vaeDecoder'];
@@ -76,8 +78,16 @@ export async function createSd15Runtime({ ort, sources, executionProviders = ['w
   let textEncoder;
   let unet;
   let vaeDecoder;
+  let textEncoderSource = 'primary';
   try {
-    textEncoder = await open('textEncoder', sources.textEncoder, {}, 0);
+    try {
+      textEncoder = await open('textEncoder', sources.textEncoder, {}, 0);
+    } catch (err) {
+      if (!sources.textEncoderFallback) throw err;
+      onFallback?.({ message: err?.message || String(err) });
+      textEncoder = await open('textEncoder', sources.textEncoderFallback, {}, 0);
+      textEncoderSource = 'fallback';
+    }
     expectInputs(textEncoder, SD15_INPUTS.textEncoder, '文本编码器');
     const ext = sources.unetExternal;
     const unetExtra = ext ? { externalData: [{ path: ext.path, data: await resolve(ext.data) }] } : {};
@@ -98,6 +108,8 @@ export async function createSd15Runtime({ ort, sources, executionProviders = ['w
   return {
     /** 每个会话实际使用的方案（WebGPU 或 CPU）。 */
     plans: plansUsed,
+    /** 文本编码器使用的文件：'primary'（主文件）或 'fallback'（备选文件）。 */
+    textEncoderSource,
     /** 文本编码：ids 为 [77] 的 int32，返回 [77 × D] 的 Float32Array。 */
     async encode(ids) {
       const type = typeOf(textEncoder, 'input_ids');

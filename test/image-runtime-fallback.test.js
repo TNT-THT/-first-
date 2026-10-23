@@ -6,6 +6,7 @@ import { createSd15Runtime, sessionPlans, SD15_SESSION_NAMES } from '../web/src/
 
 const INPUTS = {
   te: ['input_ids'],
+  te32: ['input_ids'],
   unet: ['sample', 'timestep', 'encoder_hidden_states'],
   vae: ['latent_sample'],
 };
@@ -124,4 +125,39 @@ test('只使用 wasm 时（Node 测试）：没有 WebGPU 方案', async () => {
   const rt = await createSd15Runtime({ ort, sources: SOURCES({ te: 0 }), executionProviders: ['wasm'] });
   assert.deepEqual(rt.plans, { textEncoder: 'CPU', unet: 'CPU', vaeDecoder: 'CPU' });
   assert.ok(ort.created.every((c) => c.plan === 'CPU'));
+});
+
+test('文本编码器备选：主文件的两种方案都失败时，改用备选文件，其余会话不变', async () => {
+  const ort = fakeOrt({ 'te|WebGPU': 'Pow 节点无内核', 'te|CPU': 'CPU 也失败' });
+  const counter = { te: 0 };
+  counter.fb = 0;
+  const sources = { ...SOURCES(counter), textEncoderFallback: () => { counter.fb += 1; return 'te32'; } };
+  const fallbacks = [];
+  const rt = await createSd15Runtime({
+    ort,
+    sources,
+    executionProviders: ['webgpu'],
+    onFallback: (e) => fallbacks.push(e),
+  });
+  assert.equal(rt.textEncoderSource, 'fallback');
+  assert.equal(fallbacks.length, 1);
+  assert.match(fallbacks[0].message, /Pow 节点无内核/);
+  assert.equal(counter.te, 1, '主文件数据仍只读取一次');
+  assert.equal(counter.fb, 1, '备选文件只在需要时读取一次');
+  assert.deepEqual(rt.plans, { textEncoder: 'WebGPU', unet: 'WebGPU', vaeDecoder: 'WebGPU' });
+});
+
+test('文本编码器备选：主文件成功时不读取备选文件', async () => {
+  const ort = fakeOrt();
+  const counter = { te: 0, fb: 0 };
+  const sources = { ...SOURCES(counter), textEncoderFallback: () => { counter.fb += 1; return 'te32'; } };
+  const rt = await createSd15Runtime({ ort, sources, executionProviders: ['webgpu'] });
+  assert.equal(rt.textEncoderSource, 'primary');
+  assert.equal(counter.fb, 0);
+});
+
+test('文本编码器备选：备选文件也失败时报错，并释放已创建的会话', async () => {
+  const ort = fakeOrt({ 'te|WebGPU': 'a', 'te|CPU': 'b', 'te32|WebGPU': 'c', 'te32|CPU': 'd' });
+  const sources = { ...SOURCES({ te: 0 }), textEncoderFallback: 'te32' };
+  await assert.rejects(createSd15Runtime({ ort, sources, executionProviders: ['webgpu'] }), /无法创建文本编码器会话。WebGPU：c；CPU：d/);
 });
