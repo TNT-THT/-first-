@@ -15,6 +15,15 @@ import { formatGB, imageModelsOf, isSelectable, sourceUrls, totalBytes } from '.
 import { createImageClient } from './image/client.js';
 import { addImageHint, buildImagePrompt, clearImageParams, effectiveImageSettings, getImageSettings, parseImageParams, removeImageHint, setImageParams, stripImageParamLine } from './image/params.js';
 import { randomSeed } from './image/rng.js';
+import { addGalleryImage, clearGallery, deleteGalleryImage, listGallery } from './image/gallery-store.js';
+import { buildGalleryArchive, readGalleryArchive } from './image/gallery-archive.js';
+import {
+  buildImageModelFile,
+  deleteImageModelFiles,
+  downloadImageModel,
+  imageCacheStatus,
+  importImageModelFile,
+} from './image/model-files.js';
 import { DEFAULT_SIZE, RATIOS, sizeForRatio } from './image/sizes.js';
 import {
   buildModelFile,
@@ -71,6 +80,9 @@ import {
   trimSessionMessages,
   titleFrom,
   UNFOLD_STEP,
+  undoableTurnIndex,
+  undoLastTurn,
+  newId,
 } from './store.js';
 
 // 构建模式：默认 'webllm'（纯静态，浏览器内推理）；VITE_ENGINE=remote 时使用自托管服务端
@@ -100,6 +112,7 @@ const els = {
   composer: $('#composer'),
   input: $('#input'),
   sendBtn: $('#sendBtn'),
+  undoBtn: $('#undoBtn'),
   stopBtn: $('#stopBtn'),
   thinkToggleLabel: $('#thinkToggleLabel'),
   thinkToggle: $('#thinkToggle'),
@@ -170,6 +183,18 @@ const els = {
   imageProgress: $('#imageProgress'),
   imageProgressFill: $('#imageProgressFill'),
   imageGallery: $('#imageGallery'),
+  imageModelFiles: $('#imageModelFiles'),
+  imageFilesStatus: $('#imageFilesStatus'),
+  imageDownloadBtn: $('#imageDownloadBtn'),
+  imageExportModelBtn: $('#imageExportModelBtn'),
+  imageImportModelInput: $('#imageImportModelInput'),
+  imageDeleteFilesBtn: $('#imageDeleteFilesBtn'),
+  imageDownloadProgress: $('#imageDownloadProgress'),
+  imageDownloadFill: $('#imageDownloadFill'),
+  imageGalleryCount: $('#imageGalleryCount'),
+  imageExportGalleryBtn: $('#imageExportGalleryBtn'),
+  imageImportGalleryInput: $('#imageImportGalleryInput'),
+  imageClearGalleryBtn: $('#imageClearGalleryBtn'),
   imageAdmin: $('#imageAdmin'),
   imageHintInput: $('#imageHintInput'),
   imageHintAdd: $('#imageHintAdd'),
@@ -584,12 +609,49 @@ function renderSessionList() {
 function refreshAll() {
   renderSessionList();
   renderMessages();
+  refreshUndoButton();
+}
+
+/** 撤回按钮：只有末尾是一轮完整（或失败）的对话，且没有在生成时才可用。 */
+function refreshUndoButton() {
+  const can = !state.streaming && undoableTurnIndex(activeSession()) >= 0;
+  els.undoBtn.hidden = !can;
+}
+
+/**
+ * 撤回上一轮：删除最后一问一答，问题放回输入框（不发送）。
+ * 若输入框已有内容，则不撤回，避免覆盖用户正在编辑的文字。
+ */
+function undoTurn() {
+  if (state.streaming) return;
+  if (els.input.value.trim()) {
+    flashStatus('输入框里还有未发送的内容，请先清空或发送，再撤回。');
+    return;
+  }
+  const session = activeSession();
+  const turn = undoLastTurn(session);
+  if (!turn) {
+    flashStatus('没有可以撤回的对话。');
+    return;
+  }
+  session.updatedAt = Date.now();
+  persist();
+  refreshAll();
+  els.input.value = turn.question;
+  autoGrow();
+  els.input.focus();
+  flashStatus(
+    turn.recorded
+      ? '已撤回上一轮，问题已放回输入框。该轮的反馈、更正或参数修改已记录在本机，撤回不会回滚，请到适应面板中删除。'
+      : '已撤回上一轮，问题已放回输入框（未发送）。',
+  );
 }
 
 // ---------- 发送 / 停止 ----------
 function setBusy(busy) {
   els.sendBtn.hidden = busy;
   els.stopBtn.hidden = !busy;
+  refreshUndoButton();
   // 生成期间不能切换模型，否则回答的标注与实际生成的模型可能不一致
   els.modelSelect.disabled = busy;
 }
@@ -790,6 +852,8 @@ async function send(rawText) {
   const isFirst = session.messages.length === 0;
   const userMsg = { role: 'user', content: text, ts: Date.now() };
   const feedback = recordAdminFeedback(session, text, { allowCorrections });
+  // 记录过反馈、更正或参数修改的轮次：撤回时需要提示（撤回不回滚这些记录）
+  if (feedback.parts?.length) userMsg.recorded = true;
   // 机械识别：管理员消息只是参数调整指令（已直接修改参数、没有提问）时，不调用模型，给出固定提示
   if (mechanicalReply(text, feedback)) {
     const released = await releaseStaleEngine();
@@ -2083,6 +2147,7 @@ els.composer.addEventListener('submit', (e) => {
   send(text);
 });
 els.stopBtn.addEventListener('click', stop);
+els.undoBtn.addEventListener('click', undoTurn);
 
 els.newChatBtn.addEventListener('click', newChat);
 els.embedNewBtn.addEventListener('click', newChat);
@@ -2234,8 +2299,7 @@ function notifyParentReady() {
 // ---------- 生图模式（仅本机 WebLLM 模式）----------
 // 生图与聊天互斥：进入生图模式时释放聊天模型的显存；离开时终止生图 worker。
 // 生图模型只在第一次生成时加载，启动页面时不下载、不加载。
-const imageState = { active: false, busy: false, controller: null, client: null, gallery: [] };
-const IMAGE_GALLERY_MAX = 12;
+const imageState = { active: false, busy: false, controller: null, client: null, gallery: [], downloadCtl: null, filesStatus: null, filesToken: 0 };
 
 function imageModels() {
   return imageModelsOf(state.appConfig);
@@ -2300,6 +2364,7 @@ function fillImageControls(model) {
   els.imageSeed.value = '';
   syncRatioSelect();
   renderImageEffective();
+  renderImageFiles();
 }
 
 function readImageControls() {
@@ -2340,7 +2405,7 @@ function renderImageEffective() {
   ];
   if (adminKeys.length) parts.push(`管理员参数已覆盖：${adminKeys.map((k) => `${k}=${params[k]}`).join('，')}`);
   if (hints.length) parts.push(`风格提示 ${hints.length} 条`);
-  if (isSelectable(model)) parts.push(`模型约 ${formatGB(totalBytes(model))}（首次使用需下载，之后由浏览器缓存）`);
+  if (isSelectable(model)) parts.push(`模型约 ${formatGB(totalBytes(model))}（可点“下载到本机”保存，之后离线可用）`);
   els.imageEffective.textContent = parts.join('｜');
 }
 
@@ -2392,46 +2457,272 @@ async function rgbaToPngBlob(rgba, width, height) {
   });
 }
 
-function renderImageGallery() {
-  els.imageGallery.replaceChildren(
-    ...imageState.gallery.map((item) => {
-      const card = document.createElement('figure');
-      card.className = 'image-card';
-      const img = document.createElement('img');
-      img.src = item.url;
-      img.alt = item.prompt;
-      const cap = document.createElement('figcaption');
-      cap.className = 'muted small';
-      cap.textContent = `${item.width} × ${item.height}｜${item.steps} 步｜引导 ${item.guidance}｜种子 ${item.seed}\n${item.prompt}`;
-      cap.style.whiteSpace = 'pre-wrap';
-      const actions = document.createElement('div');
-      actions.className = 'image-admin-row';
-      const dl = document.createElement('a');
-      dl.className = 'btn ghost small';
-      dl.href = item.url;
-      dl.download = item.filename;
-      dl.textContent = '下载 PNG';
-      const rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'btn ghost small';
-      rm.textContent = '移除';
-      rm.addEventListener('click', () => {
-        URL.revokeObjectURL(item.url);
-        imageState.gallery = imageState.gallery.filter((x) => x !== item);
-        renderImageGallery();
-      });
-      actions.append(dl, rm);
-      card.append(img, cap, actions);
-      return card;
-    }),
-  );
+// ---------- 画廊（保存在本机 IndexedDB，刷新页面后保留）----------
+function galleryItemFrom(record) {
+  return { ...record, url: URL.createObjectURL(record.blob), unsaved: !!record.unsaved };
 }
 
-function addImageResult(item) {
-  imageState.gallery = [item, ...imageState.gallery];
-  for (const old of imageState.gallery.slice(IMAGE_GALLERY_MAX)) URL.revokeObjectURL(old.url);
-  imageState.gallery = imageState.gallery.slice(0, IMAGE_GALLERY_MAX);
+function revokeGalleryUrls(items) {
+  for (const it of items) URL.revokeObjectURL(it.url);
+}
+
+async function loadGallery() {
+  const rows = await listGallery();
+  revokeGalleryUrls(imageState.gallery);
+  imageState.gallery = rows.map(galleryItemFrom);
   renderImageGallery();
+}
+
+function renderImageGallery() {
+  const n = imageState.gallery.length;
+  els.imageGalleryCount.textContent = n ? `共 ${n} 张（保存在本机）` : '画廊为空';
+  els.imageExportGalleryBtn.disabled = n === 0;
+  els.imageClearGalleryBtn.hidden = n === 0;
+  els.imageGallery.replaceChildren(...imageState.gallery.map(galleryCard));
+}
+
+function galleryCard(item) {
+  const card = document.createElement('figure');
+  card.className = 'image-card';
+  const img = document.createElement('img');
+  img.src = item.url;
+  img.alt = item.prompt;
+  const cap = document.createElement('figcaption');
+  cap.className = 'muted small';
+  cap.style.whiteSpace = 'pre-wrap';
+  cap.textContent =
+    `${item.width} × ${item.height}｜${item.steps} 步｜引导 ${item.guidance}｜种子 ${item.seed}` +
+    (item.unsaved ? '｜未保存到画廊' : '') +
+    `\n${item.prompt}`;
+  const actions = document.createElement('div');
+  actions.className = 'image-admin-row';
+  const dl = document.createElement('a');
+  dl.className = 'btn ghost small';
+  dl.href = item.url;
+  dl.download = item.filename;
+  dl.textContent = '下载 PNG';
+  const rm = document.createElement('button');
+  rm.type = 'button';
+  rm.className = 'btn ghost small';
+  rm.textContent = '删除';
+  rm.addEventListener('click', () => deleteGalleryItem(item));
+  actions.append(dl, rm);
+  card.append(img, cap, actions);
+  return card;
+}
+
+async function deleteGalleryItem(item) {
+  if (!window.confirm('删除这张图片？删除后无法恢复（可先导出画廊备份）。')) return;
+  try {
+    await deleteGalleryImage(item.id);
+  } catch (err) {
+    setImageStatus(`删除失败：${err.message}`, { error: true });
+    return;
+  }
+  URL.revokeObjectURL(item.url);
+  imageState.gallery = imageState.gallery.filter((x) => x !== item);
+  renderImageGallery();
+  setImageStatus('已删除这张图片。');
+}
+
+async function clearGalleryAll() {
+  const n = imageState.gallery.length;
+  if (!n) return;
+  if (!window.confirm(`清空画廊中的 ${n} 张图片？此操作无法恢复（可先导出画廊备份）。`)) return;
+  try {
+    await clearGallery();
+  } catch (err) {
+    setImageStatus(`清空失败：${err.message}`, { error: true });
+    return;
+  }
+  revokeGalleryUrls(imageState.gallery);
+  imageState.gallery = [];
+  renderImageGallery();
+  setImageStatus('已清空画廊。');
+}
+
+/** 保存一张生成的图片。无法写入 IndexedDB 时仍显示在画廊中，并标记为未保存。 */
+async function addImageResult(record) {
+  const item = galleryItemFrom(record);
+  try {
+    await addGalleryImage(record);
+  } catch (err) {
+    item.unsaved = true;
+    setImageStatus(`图片已生成，但无法保存到本机画廊（${err.message}）。请先点击“下载 PNG”保存。`, { error: true });
+  }
+  imageState.gallery = [item, ...imageState.gallery];
+  renderImageGallery();
+  return item;
+}
+
+/** 画廊导出：全部图片 + manifest.json（提示词、尺寸、步数、引导、种子、模型、时间）。 */
+async function exportGallery() {
+  if (!imageState.gallery.length) return;
+  setImageStatus('正在打包画廊…');
+  try {
+    const items = [];
+    for (const it of imageState.gallery) {
+      items.push({ ...it, data: new Uint8Array(await it.blob.arrayBuffer()) });
+    }
+    const bytes = buildGalleryArchive(items);
+    const stamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
+    downloadBlob(new Blob([bytes], { type: 'application/zip' }), `oj-ai-gallery-${stamp}.zip`);
+    setImageStatus(`已导出 ${items.length} 张图片（zip，含 manifest.json）。`);
+  } catch (err) {
+    setImageStatus(`导出失败：${err.message}`, { error: true });
+  }
+}
+
+const galleryKey = (it) => [it.model, it.seed, it.prompt, it.createdAt, it.width, it.height].join('|');
+
+/** 画廊导入：跳过与已有图片完全相同（模型、种子、提示词、时间、尺寸）的条目。 */
+async function importGalleryFile(file) {
+  setImageStatus('正在导入画廊…');
+  try {
+    const { items, skipped } = await readGalleryArchive(new Uint8Array(await file.arrayBuffer()));
+    const seen = new Set(imageState.gallery.map(galleryKey));
+    let added = 0;
+    let dup = 0;
+    for (const it of items) {
+      const key = galleryKey(it);
+      if (seen.has(key)) {
+        dup += 1;
+        continue;
+      }
+      seen.add(key);
+      await addGalleryImage({
+        id: newId(),
+        blob: new Blob([it.data], { type: 'image/png' }),
+        filename: it.filename,
+        prompt: it.prompt,
+        width: it.width,
+        height: it.height,
+        steps: it.steps,
+        guidance: it.guidance,
+        seed: it.seed,
+        model: it.model,
+        createdAt: it.createdAt,
+      });
+      added += 1;
+    }
+    await loadGallery();
+    const parts = [`已导入 ${added} 张`];
+    if (dup) parts.push(`跳过 ${dup} 张重复`);
+    if (skipped.length) parts.push(`${skipped.length} 个条目无效（${skipped[0].reason}）`);
+    setImageStatus(`${parts.join('，')}。`, { error: added === 0 && skipped.length > 0 });
+  } catch (err) {
+    setImageStatus(`导入失败：${err.message}`, { error: true });
+  }
+}
+
+// ---------- 模型文件（下载到本机 / 导出 / 导入 / 删除）----------
+function selectedImageModel() {
+  return imageModelById(els.imageModelSelect.value);
+}
+
+async function renderImageFiles() {
+  const model = selectedImageModel();
+  const show = !!model && isSelectable(model);
+  els.imageModelFiles.hidden = !show;
+  if (!show) return;
+  const token = (imageState.filesToken += 1);
+  let st;
+  try {
+    st = await imageCacheStatus(model);
+  } catch (err) {
+    if (token === imageState.filesToken) els.imageFilesStatus.textContent = `无法读取本机缓存：${err.message}`;
+    return;
+  }
+  if (token !== imageState.filesToken) return;
+  imageState.filesStatus = { ...st, modelId: model.id };
+  const size = formatGB(totalBytes(model));
+  if (st.complete) els.imageFilesStatus.textContent = `本机已下载（${size}），离线可以生成。`;
+  else if (st.cached > 0) els.imageFilesStatus.textContent = `本机部分下载（${st.cached}/${st.total} 个文件），可继续下载。`;
+  else els.imageFilesStatus.textContent = `本机未下载（约 ${size}）。未下载时，生成会从 Hugging Face 读取。`;
+  if (imageState.downloadCtl) els.imageDownloadBtn.textContent = '取消下载';
+  else els.imageDownloadBtn.textContent = st.complete ? '已下载到本机' : '下载到本机';
+  els.imageDownloadBtn.disabled = !imageState.downloadCtl && st.complete;
+  els.imageExportModelBtn.disabled = !st.complete;
+  els.imageDeleteFilesBtn.disabled = st.cached === 0 || !!imageState.downloadCtl;
+}
+
+async function downloadSelectedModel() {
+  if (imageState.downloadCtl) {
+    imageState.downloadCtl.abort();
+    return;
+  }
+  const model = selectedImageModel();
+  if (!model || !isSelectable(model)) return;
+  const ctl = new AbortController();
+  imageState.downloadCtl = ctl;
+  els.imageDownloadProgress.hidden = false;
+  els.imageDownloadFill.style.width = '0%';
+  renderImageFiles();
+  setImageStatus(`正在下载「${model.label}」（约 ${formatGB(totalBytes(model))}）…`);
+  try {
+    await downloadImageModel(model, {
+      signal: ctl.signal,
+      onProgress: ({ done, total }) => {
+        els.imageDownloadFill.style.width = `${Math.round((done / total) * 100)}%`;
+        setImageStatus(`正在下载：${done}/${total} 个文件…`);
+      },
+    });
+    setImageStatus('模型已下载到本机，之后可离线生成。');
+  } catch (err) {
+    if (err.name === 'AbortError') setImageStatus('已取消下载。已下载的文件保留，可以继续下载。');
+    else setImageStatus(`下载失败：${err.message}。已下载的文件保留，可以重试。`, { error: true });
+  } finally {
+    imageState.downloadCtl = null;
+    els.imageDownloadProgress.hidden = true;
+    renderImageFiles();
+  }
+}
+
+async function exportSelectedModel() {
+  const model = selectedImageModel();
+  if (!model) return;
+  els.imageExportModelBtn.disabled = true;
+  setImageStatus('正在打包模型文件（文件较大，请耐心等待）…');
+  try {
+    const { blob, filename, size } = await buildImageModelFile(model);
+    downloadBlob(blob, filename);
+    setImageStatus(`已导出 ${filename}（${formatGB(size)}）。`);
+  } catch (err) {
+    setImageStatus(`导出失败：${err.message}`, { error: true });
+  } finally {
+    renderImageFiles();
+  }
+}
+
+async function importModelFileFromPicker(file) {
+  setImageStatus(`正在导入 ${file.name}（文件较大，请耐心等待）…`);
+  try {
+    const { model, entryCount } = await importImageModelFile(file, { models: imageModels() });
+    if (els.imageModelSelect.value !== model.id) {
+      els.imageModelSelect.value = model.id;
+      fillImageControls(model);
+    }
+    setImageStatus(`已导入「${model.label}」（${entryCount} 个文件），已写入本机。`);
+  } catch (err) {
+    setImageStatus(`导入失败：${err.message}`, { error: true });
+  } finally {
+    els.imageImportModelInput.value = '';
+    renderImageFiles();
+  }
+}
+
+async function deleteSelectedModelFiles() {
+  const model = selectedImageModel();
+  if (!model) return;
+  if (!window.confirm(`删除「${model.label}」在本机的文件（约 ${formatGB(totalBytes(model))}）？删除后生成时需要重新下载。`)) return;
+  try {
+    const n = await deleteImageModelFiles(model);
+    setImageStatus(`已删除本机的 ${n} 个模型文件。`);
+  } catch (err) {
+    setImageStatus(`删除失败：${err.message}`, { error: true });
+  } finally {
+    renderImageFiles();
+  }
 }
 
 async function enterImageMode() {
@@ -2454,9 +2745,16 @@ async function enterImageMode() {
   els.imageModeBtn.setAttribute('aria-pressed', 'true');
   renderImageModelOptions();
   renderImageAdmin();
-  renderImageGallery();
   renderImageEffective();
+  renderImageFiles();
+  let galleryError = null;
+  try {
+    await loadGallery();
+  } catch (err) {
+    galleryError = err;
+  }
   setImageStatus('已进入生图模式。聊天模型已释放；生图模型在第一次生成时加载。');
+  if (galleryError) setImageStatus(`无法读取本机画廊：${galleryError.message}`, { error: true });
 }
 
 function exitImageMode() {
@@ -2513,7 +2811,12 @@ async function runImageGenerate(event) {
   const controller = new AbortController();
   imageState.controller = controller;
   setImageBusy(true);
-  setImageStatus('正在准备生图模型（首次使用需下载约 ' + formatGB(totalBytes(model)) + '）…');
+  const cached = !!imageState.filesStatus?.complete && imageState.filesStatus.modelId === model.id;
+  setImageStatus(
+    cached
+      ? '正在从本机加载生图模型…'
+      : '正在准备生图模型（未下载到本机，将从 Hugging Face 读取约 ' + formatGB(totalBytes(model)) + '）…',
+  );
   try {
     const res = await imageClient().generate(
       { prompt, width: eff.width, height: eff.height, steps: eff.steps, guidance: eff.guidance, seed: eff.seed },
@@ -2531,17 +2834,20 @@ async function runImageGenerate(event) {
       },
     );
     const blob = await rgbaToPngBlob(res.rgba, res.width, res.height);
-    addImageResult({
-      url: URL.createObjectURL(blob),
+    const item = await addImageResult({
+      id: newId(),
+      blob,
       filename: `${model.family || 'image'}-${eff.seed}-${res.width}x${res.height}.png`,
-      prompt: text.trim(),
+      prompt,
       width: res.width,
       height: res.height,
       steps: eff.steps,
       guidance: eff.guidance,
       seed: eff.seed,
+      model: model.id,
+      createdAt: Date.now(),
     });
-    setImageStatus(`已生成 ${res.width} × ${res.height}，种子 ${eff.seed}。`);
+    if (!item.unsaved) setImageStatus(`已生成 ${res.width} × ${res.height}，种子 ${eff.seed}，已保存到画廊。`);
   } catch (err) {
     if (err.name === 'AbortError') {
       setImageStatus('已取消。下次生成时会重新加载生图模型。');
@@ -2571,7 +2877,21 @@ function initImageMode() {
   els.imageModelSelect.addEventListener('change', () => {
     fillImageControls(imageModelById(els.imageModelSelect.value));
     renderImageAdmin();
+    renderImageFiles();
   });
+  els.imageDownloadBtn.addEventListener('click', () => downloadSelectedModel());
+  els.imageExportModelBtn.addEventListener('click', () => exportSelectedModel());
+  els.imageImportModelInput.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) importModelFileFromPicker(file);
+  });
+  els.imageDeleteFilesBtn.addEventListener('click', () => deleteSelectedModelFiles());
+  els.imageExportGalleryBtn.addEventListener('click', () => exportGallery());
+  els.imageImportGalleryInput.addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    if (file) importGalleryFile(file).finally(() => (e.target.value = ''));
+  });
+  els.imageClearGalleryBtn.addEventListener('click', () => clearGalleryAll());
   els.imageRatio.addEventListener('change', () => {
     if (els.imageRatio.value === 'custom') return;
     const long = Math.max(Number(els.imageWidth.value) || 0, Number(els.imageHeight.value) || 0);

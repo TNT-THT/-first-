@@ -4,7 +4,8 @@
  * 采用白名单：只收录网站源码、构建产物和说明文件。
  * 模型权重、导出的 .ojmodel、训练数据、环境变量与密钥一律排除。
  * 网站本身不包含任何 AI 模型：模型由浏览器从 Hugging Face 下载并缓存，
- * 或由管理员单独导出一个 .ojmodel 文件。
+ * 或由管理员单独导出一个 .ojmodel（聊天）/ .ojimage（生图）文件。
+ * 生图模块的源码（web/src/image/）属于网站源码，包含在网站包中。
  */
 
 export const SITE_ROOT_FILES = ['package.json', 'package-lock.json', 'README.md'];
@@ -29,6 +30,7 @@ const EXCLUDED_SEGMENTS = new Set(['node_modules', '.git']);
 const EXCLUDED_EXTENSIONS = [
   '.ojmodel',
   '.ojmodel.part',
+  '.ojimage',
   '.safetensors',
   '.gguf',
   '.ggml',

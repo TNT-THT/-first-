@@ -115,6 +115,16 @@
               <label class="image-field">种子 <input id="imageSeed" type="number" min="0" max="4294967295" placeholder="留空随机" /></label>
             </div>
             <p id="imageEffective" class="muted small"></p>
+            <div id="imageModelFiles" class="image-files" hidden>
+              <span id="imageFilesStatus" class="muted small" role="status"></span>
+              <div class="image-admin-row">
+                <button id="imageDownloadBtn" type="button" class="btn ghost small" title="把该模型的全部文件保存到本机浏览器（之后可离线生成）">下载到本机</button>
+                <button id="imageExportModelBtn" type="button" class="btn ghost small" title="把本机已下载的模型导出为 .ojimage 文件，供其他设备导入">导出 .ojimage</button>
+                <label class="btn ghost small image-file-label" title="导入之前导出的 .ojimage 文件（必须与本站配置的模型一致）">导入 .ojimage<input id="imageImportModelInput" type="file" accept=".ojimage" hidden /></label>
+                <button id="imageDeleteFilesBtn" type="button" class="btn ghost small" title="删除本机缓存的模型文件，释放磁盘空间">删除本机文件</button>
+              </div>
+              <div id="imageDownloadProgress" class="progress" hidden><i id="imageDownloadFill"></i></div>
+            </div>
             <form id="imageForm" class="image-composer">
               <textarea id="imagePrompt" rows="2" placeholder="描述想要的画面（英文通常效果更好）。Enter 生成，Shift+Enter 换行"></textarea>
               <button id="imageGenerateBtn" type="submit" class="btn primary">生成</button>
@@ -122,6 +132,12 @@
             </form>
             <p id="imageStatus" class="muted small" role="status"></p>
             <div id="imageProgress" class="progress" hidden><i id="imageProgressFill"></i></div>
+            <div class="image-admin-row image-gallery-tools">
+              <span id="imageGalleryCount" class="muted small"></span>
+              <button id="imageExportGalleryBtn" type="button" class="btn ghost small" title="把画廊中的全部图片与提示词导出为 zip">导出画廊（zip）</button>
+              <label class="btn ghost small image-file-label" title="导入之前导出的画廊 zip（重复的图片会跳过）">导入画廊（zip）<input id="imageImportGalleryInput" type="file" accept=".zip,application/zip" hidden /></label>
+              <button id="imageClearGalleryBtn" type="button" class="btn ghost small">清空画廊</button>
+            </div>
             <div id="imageGallery" class="image-gallery"></div>
             <div id="imageAdmin" class="image-admin" hidden>
               <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42”即可记录生图参数（仅本机，直到清除）。下方的风格提示会附加到每次生图的提示词末尾；CLIP 只读取前 77 个 token。</p>
@@ -144,6 +160,7 @@
               <input id="slidingToggle" type="checkbox" />
               <span>滑动窗口</span>
             </label>
+            <button id="undoBtn" type="button" class="btn ghost small" title="撤回上一轮：删除最后一问一答，问题放回输入框（不会发送）" hidden>撤回</button>
             <button id="sendBtn" type="submit" class="btn primary">发送</button>
             <button id="stopBtn" type="button" class="btn danger" hidden>停止</button>
           </form>
