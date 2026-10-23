@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fallbackFile, imageModelsOf, runtimeSizes, runtimeUrls, sourceUrls, totalBytes } from '../web/src/image/catalog.js';
+import { fallbackFile, imageModelsOf, isSelectable, runtimeSizes, runtimeUrls, sourceUrls, totalBytes } from '../web/src/image/catalog.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cfg = JSON.parse(fs.readFileSync(path.join(here, '..', 'web', 'public', 'config.json'), 'utf-8'));
@@ -41,4 +41,20 @@ test('没有备选文件的模型：runtimeUrls 与 sourceUrls 相同，无 text
   assert.equal(fallbackFile(model), null);
   assert.deepEqual(runtimeUrls(model), sourceUrls(model));
   assert.equal('textEncoderFallback' in runtimeSizes(model), false);
+});
+
+test('fp32 版本：独立条目，可选择，地址指向 nmkd 仓库的 fp32 文件，fp16 条目不变', () => {
+  const fp32 = imageModelsOf(cfg).find((m) => m.id === 'sd15-nmkd-fp32');
+  assert.ok(fp32, '缺少 sd15-nmkd-fp32 条目');
+  assert.equal(isSelectable(fp32), true);
+  assert.equal(fp32.repo, 'nmkd/stable-diffusion-1.5-onnx');
+  for (const key of ['textEncoder', 'unet', 'unetWeights', 'vaeDecoder', 'vocab', 'merges', 'scheduler']) {
+    assert.ok(fp32.files[key].size > 0, `${key} 大小无效`);
+  }
+  assert.equal(fp32.files.unetWeights.size, 3438083840);
+  assert.equal(totalBytes(fp32), 4131528349);
+  assert.match(sourceUrls(fp32).textEncoder, /^https:\/\/huggingface\.co\/nmkd\/stable-diffusion-1\.5-onnx\/resolve\/main\/text_encoder\/model\.onnx$/);
+  assert.equal(sd15.repo, 'nmkd/stable-diffusion-1.5-onnx-fp16');
+  assert.equal(isSelectable(sd15), true);
+  assert.equal(sd15.files.textEncoder.size, 246476214);
 });
