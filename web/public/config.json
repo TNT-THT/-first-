@@ -212,5 +212,62 @@
     ],
     "pendingModels": []
   },
-  "systemPrompt": "你是一个有帮助的 AI 助手，可以回答各类问题。请使用用户提问的语言回答。数学公式使用 LaTeX（行内用 $...$，独立公式用 $$...$$），代码使用带语言标注的 Markdown 代码块。"
+  "systemPrompt": "你是一个有帮助的 AI 助手，可以回答各类问题。请使用用户提问的语言回答。数学公式使用 LaTeX（行内用 $...$，独立公式用 $$...$$），代码使用带语言标注的 Markdown 代码块。",
+  "imageModels": [
+    {
+      "id": "sd15-nmkd-fp16",
+      "label": "Stable Diffusion 1.5（512 · fp16 ONNX · 浏览器内生图）",
+      "family": "sd15",
+      "repo": "nmkd/stable-diffusion-1.5-onnx-fp16",
+      "revision": "main",
+      "status": "available",
+      "license": "CreativeML OpenRAIL-M",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 20,
+        "guidance": 7.5
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 246476214
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 1217704
+        },
+        "unetWeights": {
+          "path": "unet/weights.pb",
+          "size": 1718976000
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 99094195
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 498
+        }
+      },
+      "note": "非官方 fp16 ONNX 转换版（nmkd）。已核对：仓库文件结构、调度器与分词器配置，以及 ONNX 接口名称（依据 diffusers 0.41 的 ONNX 管线源码）。未验证：真实模型的画质、显存占用与速度，需在有 WebGPU 的设备上测试。仓库不含安全检查器，生成内容不经过自动过滤。"
+    },
+    {
+      "id": "flux2-klein-4b-onnx-webgpu",
+      "label": "FLUX.2 Klein 4B（暂不可用）",
+      "family": "flux2",
+      "repo": "cgb/flux2-klein-4b-onnx-webgpu",
+      "status": "planned",
+      "license": "Apache-2.0",
+      "note": "尚未接入：推理管线（Qwen3 分词与聊天模板、潜变量打包与解包、VAE 输入约定）还未完成，等 SD 1.5 验证后再接入。"
+    }
+  ]
 }

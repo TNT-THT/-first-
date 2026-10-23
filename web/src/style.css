@@ -677,3 +677,24 @@ body.embed .role-section { display: none !important; }
   font-size: 13px;
 }
 .fold-bar [hidden] { display: none; }
+
+/* ---------- 对话预设 ---------- */
+.preset-select { max-width: 180px; }
+
+/* ---------- 生图面板 ---------- */
+.image-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px 14px 14px; border-top: 1px solid var(--border, #d8dbe0); overflow-y: auto; max-height: 60vh; }
+.image-controls { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; }
+.image-field { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.image-field input[type='number'] { width: 76px; }
+.image-field input[type='text'], .image-admin-row input[type='text'] { min-width: 0; flex: 1; }
+.image-composer { display: flex; align-items: flex-end; gap: 8px; }
+.image-composer textarea { flex: 1; min-width: 0; resize: none; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: inherit; background: transparent; color: inherit; }
+.image-composer .btn { height: 38px; }
+.image-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.image-card { border: 1px solid var(--border, #d8dbe0); border-radius: 8px; padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+.image-card img { width: 100%; height: auto; border-radius: 6px; background: #0001; }
+.image-card .muted { word-break: break-word; }
+.image-admin { border-top: 1px dashed var(--border, #d8dbe0); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.image-admin-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.image-mode .messages, .image-mode .status-bar, .image-mode .composer, .image-mode .history-panel { display: none !important; }
+.image-mode .image-panel { flex: 1 1 auto; max-height: none; }
