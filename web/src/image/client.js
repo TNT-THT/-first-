@@ -12,10 +12,22 @@ export function abortError() {
 }
 
 /**
+ * worker 出错时的说明。浏览器对 worker 脚本加载失败或中途退出只给出空 message，
+ * 因此附带文件位置（若有）与排查建议，避免只显示“生图 worker 出错”。
+ */
+export function workerErrorMessage(e, scriptUrl = '') {
+  const where = [e?.filename, e?.lineno].filter(Boolean).join(':');
+  const detail = e?.message ? `：${e.message}` : '';
+  const loc = where ? `（位置 ${where}）` : '';
+  const url = scriptUrl ? `，脚本 ${scriptUrl}` : '';
+  return `生图 worker 出错${detail}${loc}${url}。请刷新页面重试；若仍出现，请打开浏览器控制台查看详细错误。`;
+}
+
+/**
  * @param {object} p
  * @param {() => Worker} p.createWorker 创建 worker 的函数（测试中可以注入假的 worker）
  */
-export function createImageClient({ createWorker }) {
+export function createImageClient({ createWorker, scriptUrl = '' }) {
   let worker = null;
   let nextId = 1;
   const pending = new Map();
@@ -37,8 +49,11 @@ export function createImageClient({ createWorker }) {
       worker = createWorker();
       worker.onmessage = (e) => onMessage(e.data);
       worker.onerror = (e) => {
-        const message = e?.message || '生图 worker 出错';
-        failAll(new Error(message));
+        failAll(new Error(workerErrorMessage(e, scriptUrl)));
+        dispose();
+      };
+      worker.onmessageerror = () => {
+        failAll(new Error('生图 worker 出错：无法读取其返回的消息。请刷新页面重试。'));
         dispose();
       };
     }
@@ -53,9 +68,10 @@ export function createImageClient({ createWorker }) {
   return {
     /**
      * 生成一张图。request: {prompt, negative?, width, height, steps, guidance, seed}；
-     * urls: 模型文件地址（见 catalog.sourceUrls）。返回 {width, height, rgba}。
+     * urls: 模型文件地址（见 catalog.sourceUrls）；wasmBase: ONNX Runtime 运行库的目录地址（绝对地址）。
+     * 返回 {width, height, rgba}。
      */
-    generate(request, { urls, sizes, onProgress, signal } = {}) {
+    generate(request, { urls, sizes, wasmBase, onProgress, signal } = {}) {
       if (signal?.aborted) return Promise.reject(abortError());
       const id = nextId;
       nextId += 1;
@@ -77,7 +93,7 @@ export function createImageClient({ createWorker }) {
           },
         });
         try {
-          ensureWorker().postMessage({ id, type: 'generate', urls, sizes, request });
+          ensureWorker().postMessage({ id, type: 'generate', urls, sizes, wasmBase, request });
         } catch (err) {
           pending.delete(id);
           reject(err);

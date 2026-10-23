@@ -2334,7 +2334,9 @@ function imageModelById(id) {
 function imageClient() {
   if (!imageState.client) {
     imageState.client = createImageClient({
+      // 保持 new Worker(new URL(...)) 的字面写法，构建工具据此打包 worker
       createWorker: () => new Worker(new URL('./image/sd15-worker.js', import.meta.url), { type: 'module' }),
+      scriptUrl: new URL('./image/sd15-worker.js', import.meta.url).href,
     });
   }
   return imageState.client;
@@ -2899,6 +2901,8 @@ async function runImageGenerate(event) {
       {
         urls: sourceUrls(model),
         sizes: sourceSizes(model),
+        // 运行库目录以页面地址为准：开发服务器为 /ort/，网站包为 index.html 同级的 ort/
+        wasmBase: new URL('ort/', document.baseURI).href,
         signal: controller.signal,
         onProgress: (p) => {
           // 进度条只前进不后退：文件读取与会话创建交错进行时，两类进度的映射不同

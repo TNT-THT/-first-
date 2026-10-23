@@ -146,9 +146,11 @@ function post(message, transfer = []) {
 }
 
 self.onmessage = async (event) => {
-  const { id, type, urls, sizes, request } = event.data || {};
+  const { id, type, urls, sizes, wasmBase, request } = event.data || {};
   if (type !== 'generate') return;
   try {
+    // 运行库目录由页面给出（开发服务器与网站包的路径不同），优先于上面的默认值
+    if (wasmBase) ort.env.wasm.wasmPaths = wasmBase;
     const { runtime, tokenizer, scheduler } = await ensureLoaded(id, urls, sizes || {});
     post({ id, type: 'progress', stage: 'denoise', step: 0, total: request.steps, message: '开始生成' });
     const { width, height, chw } = await generateSd15({
