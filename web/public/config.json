@@ -256,16 +256,15 @@
         "scheduler": {
           "path": "scheduler/scheduler_config.json",
           "size": 498
+        },
+        "textEncoderFallback": {
+          "path": "text_encoder/model.onnx",
+          "repo": "nmkd/stable-diffusion-1.5-onnx",
+          "revision": "main",
+          "size": 492582967
         }
       },
-      "note": "非官方 fp16 ONNX 转换版（nmkd）。已核对：仓库文件结构、调度器与分词器配置，以及 ONNX 接口名称（依据 diffusers 0.41 的 ONNX 管线源码）。未验证：真实模型的画质、显存占用与速度，需在有 WebGPU 的设备上测试。仓库不含安全检查器，生成内容不经过自动过滤。 文本编码器备选：主文件（fp16）无法创建会话时，生图时才从 nmkd/stable-diffusion-1.5-onnx 读取 fp32 版本（约 0.49 GB，不随“下载到本机”保存）。该文件的大小与路径已由 Hugging Face 元数据核对，接口与运行效果未验证。",
-      "textEncoderFallback": {
-        "repo": "nmkd/stable-diffusion-1.5-onnx",
-        "revision": "main",
-        "path": "text_encoder/model.onnx",
-        "size": 492582967,
-        "precision": "fp32"
-      }
+      "note": "非官方 fp16 ONNX 转换版（nmkd）。已核对：仓库文件结构、调度器与分词器配置，以及 ONNX 接口名称（依据 diffusers 0.41 的 ONNX 管线源码）。未验证：真实模型的画质、显存占用与速度，需在有 WebGPU 的设备上测试。仓库不含安全检查器，生成内容不经过自动过滤。 文本编码器备选（textEncoderFallback，fp32，约 0.49 GB）：主文件无法创建会话时使用，已包含在“下载到本机”中，离线可用。大小与路径已由 Hugging Face 元数据核对，接口与运行效果未验证。"
     },
     {
       "id": "sd15-nmkd-fp32",
@@ -273,7 +272,7 @@
       "family": "sd15",
       "repo": "nmkd/stable-diffusion-1.5-onnx",
       "revision": "main",
-      "status": "available",
+      "status": "unavailable",
       "license": "CreativeML OpenRAIL-M",
       "defaults": {
         "width": 512,
@@ -311,16 +310,115 @@
           "size": 493
         }
       },
-      "note": "非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB，内存占用明显高于 fp16 版。适用于 fp16 在本机无法创建会话的情况（例如浏览器的 WebGPU 缺少 fp16 算子支持）。文件路径与大小已由 Hugging Face 元数据核对；图结构、显存占用与生成效果未在浏览器中验证。仓库不含安全检查器，生成内容不经过自动过滤。"
+      "note": "非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB。网页版暂不可用：UNet 权重（约 3.4 GB）超过浏览器单个文件 2 GB 的上限，无法在网页中加载，因此也不提供下载。可使用本机 Python 脚本（scripts/image/sd15_local.py）运行，见 README。"
     },
     {
       "id": "flux2-klein-4b-onnx-webgpu",
-      "label": "FLUX.2 Klein 4B（暂不可用）",
+      "label": "FLUX.2 Klein 4B",
       "family": "flux2",
       "repo": "cgb/flux2-klein-4b-onnx-webgpu",
       "status": "planned",
       "license": "Apache-2.0",
       "note": "尚未接入：推理管线（Qwen3 分词与聊天模板、潜变量打包与解包、VAE 输入约定）还未完成，等 SD 1.5 验证后再接入。"
+    },
+    {
+      "id": "sd-turbo-ort-web",
+      "label": "SD-Turbo（512 · fp16 ONNX · 1–4 步）",
+      "family": "sd-turbo",
+      "repo": "schmuell/sd-turbo-ort-web",
+      "revision": "main",
+      "status": "planned",
+      "license": "以原模型页面为准（第三方表格标注为非商用）",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 4,
+        "guidance": 0
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 681393168
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 1733430199
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 99094314
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 583
+        }
+      },
+      "note": "SD-Turbo（基于 SD 2.1 蒸馏，单步或少步出图，无需分类器引导）。ONNX 文件来自微软 ONNX Runtime Web 示例使用的仓库，大小已由 Hugging Face 元数据核对（约 2.5 GB）。尚未接入：需要新的调度器（Euler ancestral，trailing 时间表）、文本编码器的隐藏维度与 SD 1.5 不同，以及 UNet 的输入约定需要核对。未在浏览器中验证。"
+    },
+    {
+      "id": "z-image-turbo-webnn",
+      "label": "Z-Image-Turbo（6B · 4-bit ONNX · 9 步）",
+      "family": "z-image",
+      "repo": "webnn/Z-Image-Turbo",
+      "revision": "main",
+      "status": "planned",
+      "license": "第三方表格标注为 Apache-2.0，以原模型页面为准",
+      "defaults": {
+        "steps": 9
+      },
+      "files": {
+        "textEncoder": {
+          "path": "onnx/text_encoder_model_q4f16.onnx",
+          "size": 57983622
+        },
+        "textEncoderData": {
+          "path": "onnx/text_encoder_model_q4f16.onnx_data",
+          "size": 2036236288
+        },
+        "textEncoderData1": {
+          "path": "onnx/text_encoder_model_q4f16.onnx_data_1",
+          "size": 124387328
+        },
+        "transformer": {
+          "path": "onnx/transformer_model_q4f16.onnx",
+          "size": 129947430
+        },
+        "transformerData": {
+          "path": "onnx/transformer_model_q4f16.onnx_data",
+          "size": 2032271360
+        },
+        "transformerData1": {
+          "path": "onnx/transformer_model_q4f16.onnx_data_1",
+          "size": 1507590144
+        },
+        "vaeDecoder": {
+          "path": "onnx/vae_decoder_model_f16.onnx",
+          "size": 99209498
+        },
+        "scheduler": {
+          "path": "onnx/scheduler_step_model_f16.onnx",
+          "size": 3902
+        }
+      },
+      "note": "Z-Image-Turbo（阿里通义 6B 扩散 Transformer，文本编码器为 Qwen3-4B，9 步）。ONNX 文件来自 webnn/Z-Image-Turbo，列出的文件大小已由 Hugging Face 元数据核对（约 6 GB，不含分词器）。尚未接入：需要 Qwen3 分词与聊天模板、流匹配调度、潜变量打包，并处理分片的外部权重。未在浏览器中验证。"
+    },
+    {
+      "id": "janus-pro-1b-onnx",
+      "label": "Janus-Pro-1B（多模态 · ONNX）",
+      "family": "janus",
+      "repo": "onnx-community/Janus-Pro-1B-ONNX",
+      "revision": "main",
+      "status": "planned",
+      "license": "以原模型页面为准",
+      "note": "DeepSeek Janus-Pro-1B（自回归的多模态模型，文字生成图像能力有限）。ONNX 版在 onnx-community/Janus-Pro-1B-ONNX，演示页面称约 2.24 GB。尚未接入：需要自回归采样、图像令牌解码与 Transformers.js 风格的管线，且没有种子和尺寸控制。未核对文件清单，未在浏览器中验证。"
     }
   ]
 }

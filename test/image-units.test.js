@@ -359,6 +359,8 @@ test('模型目录：config.json 中的生图模型条目完整、可选择性�
   assert.ok(sd && flux);
   assert.equal(isSelectable(sd), true);
   assert.equal(isSelectable(flux), false, 'FLUX 尚未接入，不可选择');
+  const fp32 = imageModelsOf(JSON.parse(fs.readFileSync(new URL('../web/public/config.json', import.meta.url), 'utf8'))).find((m) => m.id === 'sd15-nmkd-fp32');
+  assert.equal(isSelectable(fp32), false, 'fp32 网页版暂不可用（超过浏览器单文件上限）');
   for (const key of ['textEncoder', 'unet', 'unetWeights', 'vaeDecoder', 'vocab', 'merges', 'scheduler']) {
     assert.ok(sd.files[key], `缺少文件 ${key}`);
     assert.ok(sd.files[key].size > 0, `${key} 大小无效`);

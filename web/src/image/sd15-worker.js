@@ -17,7 +17,7 @@ import { createSd15Runtime } from './sd15-runtime.js';
 import { createClipTokenizer, parseMerges } from './clip-tokenizer.js';
 import { createPndmScheduler } from './pndm.js';
 import { chwToRgba, generateSd15 } from './sd15.js';
-import { IMAGE_CACHE } from './model-files.js';
+import { IMAGE_CACHE, oversizedFiles, MAX_BROWSER_FILE_BYTES } from './model-files.js';
 import { rewritePowToMul } from './onnx-pow.js';
 
 // ONNX Runtime 的 wasm 运行库由构建时随网站一起输出到 dist/ort/（见 vite.config.js），
@@ -100,6 +100,15 @@ async function ensureLoaded(id, urls, sizes) {
   const key = urls.textEncoder;
   if (state && loadedKey === key) return state;
   release();
+
+  // 超过浏览器单文件上限的模型（如 fp32 的 3.4 GB UNet 权重）无法在网页中加载：尽早报错，不去读取
+  const big = oversizedFiles(sizes);
+  if (big.length) {
+    const names = big.map((b) => `${b.key}（${(b.bytes / 1e9).toFixed(2)} GB）`).join('、');
+    throw new Error(
+      `该模型的文件超过浏览器单文件上限（约 2 GB）：${names}。网页版无法加载，请改用 fp16 版，或使用本机 Python 脚本（scripts/image/sd15_local.py）。`,
+    );
+  }
 
   let total = Object.values(sizes).reduce((a, b) => a + (Number(b) || 0), 0);
   let loaded = 0;

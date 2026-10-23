@@ -11,7 +11,7 @@ import { createBackend } from './engines/backend.js';
 import { getSavedDefaultModel, resolveStartupModel, saveDefaultModel } from './default-model.js';
 import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './answer-check.js';
 import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './engines/webllm.js';
-import { formatGB, imageModelsOf, isSelectable, runtimeSizes, runtimeUrls, totalBytes } from './image/catalog.js';
+import { formatGB, imageModelsOf, isSelectable, sourceSizes, sourceUrls, totalBytes } from './image/catalog.js';
 import { createImageClient } from './image/client.js';
 import {
   addImageCorrection,
@@ -2694,14 +2694,16 @@ async function renderImageFiles() {
   if (token !== imageState.filesToken) return;
   imageState.filesStatus = { ...st, modelId: model.id };
   const size = formatGB(totalBytes(model));
+  const partial = st.cached > 0 || st.partialBytes > 0;
   if (st.complete) els.imageFilesStatus.textContent = `本机已下载（${size}），离线可以生成。`;
-  else if (st.cached > 0) els.imageFilesStatus.textContent = `本机部分下载（${st.cached}/${st.total} 个文件），可继续下载。`;
+  else if (partial) els.imageFilesStatus.textContent = `本机部分下载（${formatGB(st.doneBytes)} / ${size}），点击“继续下载”将从断点继续，不会重下已保存的部分。`;
   else els.imageFilesStatus.textContent = `本机未下载（约 ${size}）。未下载时，生成会从 Hugging Face 读取。`;
   if (imageState.downloadCtl) els.imageDownloadBtn.textContent = '取消下载';
-  else els.imageDownloadBtn.textContent = st.complete ? '已下载到本机' : '下载到本机';
+  else if (st.complete) els.imageDownloadBtn.textContent = '已下载到本机';
+  else els.imageDownloadBtn.textContent = partial ? '继续下载' : '下载到本机';
   els.imageDownloadBtn.disabled = !imageState.downloadCtl && st.complete;
   els.imageExportModelBtn.disabled = !st.complete;
-  els.imageDeleteFilesBtn.disabled = st.cached === 0 || !!imageState.downloadCtl;
+  els.imageDeleteFilesBtn.disabled = (st.cached === 0 && st.partsCached === 0) || !!imageState.downloadCtl;
 }
 
 async function downloadSelectedModel() {
@@ -2717,18 +2719,25 @@ async function downloadSelectedModel() {
   els.imageDownloadFill.style.width = '0%';
   renderImageFiles();
   setImageStatus(`正在下载「${model.label}」（约 ${formatGB(totalBytes(model))}）…`);
+  // 速度按本次下载开始后新增的字节计算（不计上次已保存的部分）
+  const t0 = Date.now();
+  let startBytes = null;
   try {
     await downloadImageModel(model, {
       signal: ctl.signal,
-      onProgress: ({ done, total }) => {
-        els.imageDownloadFill.style.width = `${Math.round((done / total) * 100)}%`;
-        setImageStatus(`正在下载：${done}/${total} 个文件…`);
+      onProgress: ({ done, total, bytes, totalBytes }) => {
+        if (startBytes === null) startBytes = bytes;
+        els.imageDownloadFill.style.width = `${totalBytes ? Math.round((bytes / totalBytes) * 100) : 0}%`;
+        const secs = (Date.now() - t0) / 1000;
+        const mbps = secs > 0.5 ? (bytes - startBytes) / secs / 1e6 : 0;
+        const speed = mbps > 0 ? `，约 ${mbps.toFixed(1)} MB/s` : '';
+        setImageStatus(`正在下载：${formatGB(bytes)} / ${formatGB(totalBytes)}（第 ${Math.min(done + 1, total)}/${total} 个文件${speed}）…`);
       },
     });
     setImageStatus('模型已下载到本机，之后可离线生成。');
   } catch (err) {
-    if (err.name === 'AbortError') setImageStatus('已取消下载。已下载的文件保留，可以继续下载。');
-    else setImageStatus(`下载失败：${err.message}。已下载的文件保留，可以重试。`, { error: true });
+    if (err.name === 'AbortError') setImageStatus('已取消下载。已保存的部分会保留，下次点击“继续下载”从断点继续。');
+    else setImageStatus(`下载失败：${err.message}。已保存的部分会保留，可以重试续传。`, { error: true });
   } finally {
     imageState.downloadCtl = null;
     els.imageDownloadProgress.hidden = true;
@@ -2899,8 +2908,8 @@ async function runImageGenerate(event) {
     const res = await imageClient().generate(
       { prompt, width: eff.width, height: eff.height, steps: eff.steps, guidance: eff.guidance, seed: eff.seed },
       {
-        urls: runtimeUrls(model),
-        sizes: runtimeSizes(model),
+        urls: sourceUrls(model),
+        sizes: sourceSizes(model),
         // 运行库目录以页面地址为准：开发服务器为 /ort/，网站包为 index.html 同级的 ort/
         wasmBase: new URL('ort/', document.baseURI).href,
         signal: controller.signal,
