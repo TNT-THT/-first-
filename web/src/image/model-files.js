@@ -120,17 +120,76 @@ export async function imageCacheStatus(model, { storage = globalThis.caches, par
   };
 }
 
-/** 分段下载时服务器忽略了 Range 头（返回 200），改为整文件下载。 */
+/** 分段下载时服务器忽略了 Range（返回 200），改为整文件下载。 */
 class RangeUnsupported extends Error {}
 
 /**
- * 下载模型文件到本机缓存。
- * - 已完整的文件跳过；大文件的已完成分段也跳过，因此中断后再次点击会从断点继续（不会从头重下）。
- * - 大文件按 PART_BYTES 分段，段之间并行下载，提高吞吐量。
- * - 任一步失败时抛出错误；已完成的文件与分段保留。
+ * 永久错误（如 404）：重试没有意义。下载阶段记录后继续下载其他文件，
+ * 并在全部完成后的缓存校验中报告（不在下载过程中中断）。
+ */
+export class PermanentDownloadError extends Error {}
+
+/** 自动重试的退避间隔：1 s、2 s、4 s …，最长 30 s。下载过程中不会因网络问题而报错，直到用户取消。 */
+export const RETRY_BASE_MS = 1000;
+export const RETRY_MAX_MS = 30000;
+
+function abortError() {
+  return Object.assign(new Error('已取消下载'), { name: 'AbortError' });
+}
+
+/** 可被取消的等待。 */
+function sleepMs(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** 4xx（408、429 除外）为永久错误；5xx、408、429 与网络错误都视为暂时的，可以重试。 */
+function isPermanentStatus(status) {
+  return status >= 400 && status < 500 && status !== 408 && status !== 429;
+}
+
+/**
+ * 执行一次下载任务，暂时性错误（网络中断、5xx 等）自动重试，直到成功或被取消。
+ * 永久错误与 RangeUnsupported 直接抛出，由调用方处理。
+ */
+async function withRetry(task, { signal, onRetry, sleep, baseMs, maxMs }) {
+  for (let attempt = 1; ; attempt += 1) {
+    if (signal?.aborted) throw abortError();
+    try {
+      return await task();
+    } catch (err) {
+      if (err?.name === 'AbortError' || signal?.aborted) throw err;
+      if (err instanceof PermanentDownloadError || err instanceof RangeUnsupported) throw err;
+      const waitMs = Math.min(maxMs, baseMs * 2 ** Math.min(attempt - 1, 16));
+      onRetry?.({ attempt, waitMs, message: err?.message || String(err) });
+      await sleep(waitMs, signal);
+    }
+  }
+}
+
+/**
+ * 下载模型文件到本机缓存（与文本模型一致：先把全部文件下载完，再从缓存校验）。
+ * - 暂时性错误自动重试，下载过程中不报错；进度中会显示重试信息。
+ * - 已完整的文件与已保存的分段会跳过，中断（取消）后再次下载从断点继续。
+ * - 大文件按 PART_BYTES 分段，段之间并行下载。
+ * - 永久错误记录后继续下载其他文件；全部完成后从缓存校验，缺失时抛出错误（已保存的部分保留）。
  * @param {object} p
- * @param {(p: {done: number, total: number, key: string|null, bytes: number, totalBytes: number}) => void} [p.onProgress]
- *   done/total 为文件数；bytes/totalBytes 为字节数（包括上次已保存的部分）。开始时会先报告一次（key 为 null）。
+ * @param {(p: {done: number, total: number, key: string|null, bytes: number, totalBytes: number, retry?: object}) => void} [p.onProgress]
+ *   done/total 为文件数；bytes/totalBytes 为字节数（含上次已保存的部分）。开始时先报告一次（key 为 null）。
+ *   重试时带 retry: {attempt, waitMs, message}。
  */
 export async function downloadImageModel(
   model,
@@ -141,6 +200,9 @@ export async function downloadImageModel(
     signal,
     partBytes = PART_BYTES,
     concurrency = PART_CONCURRENCY,
+    sleep = sleepMs,
+    retryBaseMs = RETRY_BASE_MS,
+    retryMaxMs = RETRY_MAX_MS,
   } = {},
 ) {
   if (!isSelectable(model)) throw new Error('该模型暂不可用，无法下载');
@@ -150,73 +212,103 @@ export async function downloadImageModel(
   const parts = await openParts(storage);
   const sizeOf = (k) => Number(model.files[k].size) || 0;
   const totalBytes = status.bytes;
+  const total = status.total;
   let bytes = status.doneBytes;
   let done = status.cached;
-  const total = status.total;
+  let current = null;
   onProgress?.({ done, total, key: null, bytes, totalBytes });
 
-  // 每完成一段（或一个小文件）就报告一次字节进度
-  let current = null;
   const addBytes = (n) => {
     bytes += n;
     onProgress?.({ done, total, key: current, bytes, totalBytes });
   };
+  const retry = (task) =>
+    withRetry(task, {
+      signal,
+      sleep,
+      baseMs: retryBaseMs,
+      maxMs: retryMaxMs,
+      onRetry: (info) => onProgress?.({ done, total, key: current, bytes, totalBytes, retry: info }),
+    });
 
+  const failures = [];
   for (const key of status.missing) {
     const url = urls[key];
     const size = sizeOf(key);
+    const path = model.files[key].path;
     current = key;
-    if (usesParts(size, partBytes)) {
-      try {
-        await downloadInParts({ url, path: model.files[key].path, size, parts, cache, fetchImpl, signal, partBytes, concurrency, addBytes });
-      } catch (err) {
-        if (!(err instanceof RangeUnsupported)) throw err;
-        // 服务器不支持分段：整文件下载（此时无法断点续传，但仍然正确）
-        await downloadWhole({ url, path: model.files[key].path, cache, fetchImpl, signal });
+    try {
+      if (usesParts(size, partBytes)) {
+        try {
+          await downloadInParts({ url, path, size, parts, cache, fetchImpl, signal, partBytes, concurrency, addBytes, retry });
+        } catch (err) {
+          if (!(err instanceof RangeUnsupported)) throw err;
+          // 服务器不支持分段：整文件下载（此时无法断点续传，但仍然正确）
+          await downloadWhole({ url, path, cache, fetchImpl, signal, retry });
+          addBytes(size);
+        }
+      } else {
+        await downloadWhole({ url, path, cache, fetchImpl, signal, retry });
         addBytes(size);
       }
-    } else {
-      await downloadWhole({ url, path: model.files[key].path, cache, fetchImpl, signal });
-      addBytes(size);
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      if (!(err instanceof PermanentDownloadError)) throw err;
+      failures.push(err.message);
     }
     current = null;
     done += 1;
     onProgress?.({ done, total, key, bytes, totalBytes });
   }
+
+  // 全部文件处理完后，再从缓存校验（与文本模型一致：下载完成后从缓存加载，问题在此阶段报告）
   const after = await imageCacheStatus(model, { storage, partBytes });
-  if (!after.complete) throw new Error(`下载不完整，缺少 ${after.missing.length} 个文件`);
+  if (!after.complete) {
+    const detail = failures.length ? `：${failures.join('；')}` : '';
+    throw new Error(`缓存校验未通过，缺少 ${after.missing.length} 个文件${detail}。已保存的部分会保留，可点击“继续下载”重试缺失的文件。`);
+  }
   return after;
 }
 
-async function downloadWhole({ url, path, cache, fetchImpl, signal }) {
-  const res = await fetchImpl(url, { signal });
-  if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）：${path}`);
-  await cache.put(url, res);
+async function downloadWhole({ url, path, cache, fetchImpl, signal, retry }) {
+  await retry(async () => {
+    const res = await fetchImpl(url, { signal });
+    if (!res.ok) {
+      if (isPermanentStatus(res.status)) throw new PermanentDownloadError(`下载失败（HTTP ${res.status}）：${path}`);
+      throw new Error(`服务器返回 ${res.status}：${path}`);
+    }
+    await cache.put(url, res);
+  });
 }
 
-async function downloadInParts({ url, path, size, parts, cache, fetchImpl, signal, partBytes, concurrency, addBytes }) {
+async function downloadInParts({ url, path, size, parts, cache, fetchImpl, signal, partBytes, concurrency, addBytes, retry }) {
   const n = partCount(size, partBytes);
   const have = await cachedParts(parts, url, size, partBytes);
   const todo = [];
   for (let i = 0; i < n; i += 1) if (!have.indices.has(i)) todo.push(i);
 
-  // 用户取消时中止所有进行中的请求；某段失败时不再启动新段，但进行中的段仍会完成并保存（不浪费已下载的数据）
+  // 用户取消时中止所有进行中的请求；某段出现永久错误时不再启动新段，但进行中的段仍会完成并保存
   const inner = new AbortController();
   const onAbort = () => inner.abort();
   signal?.addEventListener('abort', onAbort);
-  const fetchPart = async (i) => {
-    const { start, end, length } = partRange(size, partBytes, i);
-    const res = await fetchImpl(url, { signal: inner.signal, headers: { Range: `bytes=${start}-${end}` } });
-    if (res.status === 200) {
-      await res.body?.cancel();
-      throw new RangeUnsupported();
-    }
-    if (res.status !== 206) throw new Error(`下载失败（HTTP ${res.status}）：${path}（第 ${i + 1}/${n} 段）`);
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (buf.length !== length) throw new Error(`分段大小不符（第 ${i + 1}/${n} 段）：${path}`);
-    await parts.put(partKey(url, i), new Response(buf, { headers: { 'content-length': String(length) } }));
-    addBytes(length);
-  };
+  const fetchPart = (i) =>
+    retry(async () => {
+      const { start, end, length } = partRange(size, partBytes, i);
+      const res = await fetchImpl(url, { signal: inner.signal, headers: { Range: `bytes=${start}-${end}` } });
+      if (res.status === 200) {
+        await res.body?.cancel();
+        throw new RangeUnsupported();
+      }
+      if (res.status !== 206) {
+        const where = `${path}（第 ${i + 1}/${n} 段）`;
+        if (isPermanentStatus(res.status)) throw new PermanentDownloadError(`下载失败（HTTP ${res.status}）：${where}`);
+        throw new Error(`服务器返回 ${res.status}：${where}`);
+      }
+      const buf = new Uint8Array(await res.arrayBuffer());
+      if (buf.length !== length) throw new Error(`分段大小不符（第 ${i + 1}/${n} 段）：${path}`);
+      await parts.put(partKey(url, i), new Response(buf, { headers: { 'content-length': String(length) } }));
+      addBytes(length);
+    });
   let failure = null;
   let next = 0;
   const worker = async () => {
@@ -236,6 +328,7 @@ async function downloadInParts({ url, path, size, parts, cache, fetchImpl, signa
     await Promise.all(workers);
   } finally {
     signal?.removeEventListener('abort', onAbort);
+    if (failure || signal?.aborted) inner.abort();
   }
   if (failure) throw failure;
 

@@ -98,19 +98,32 @@ test('下载：全部写入缓存，第二次下载不会重复请求（续传�
   assert.equal(again.calls.length, 0);
 });
 
-test('下载：某个文件失败时报错，已完成的文件保留，修复后只补下缺失部分', async () => {
+test('下载：某个文件永久失败（404）时不中断，其他文件照常下载；全部完成后在缓存校验时报错，修复后只补下缺失文件', async () => {
   const storage = memoryCaches();
   await assert.rejects(
     downloadImageModel(model(), { storage, fetchImpl: fakeFetch({ missing: new Set(['unet/model.onnx']) }) }),
-    /下载失败（HTTP 404）：unet\/model\.onnx/,
+    /缓存校验未通过，缺少 1 个文件：下载失败（HTTP 404）：unet\/model\.onnx/,
   );
   const st = await imageCacheStatus(model(), { storage });
   assert.equal(st.complete, false);
-  // 按 textEncoder → unet → vocab 的顺序下载，unet 失败后 vocab 尚未请求
-  assert.deepEqual(st.missing, ['unet', 'vocab']);
+  // 下载阶段不因 404 中断：unet 之后的 vocab 也已下载
+  assert.deepEqual(st.missing, ['unet']);
   const retry = fakeFetch();
   await downloadImageModel(model(), { storage, fetchImpl: retry });
-  assert.deepEqual(retry.calls, [sourceUrls(model()).unet, sourceUrls(model()).vocab]);
+  assert.deepEqual(retry.calls, [sourceUrls(model()).unet], '已下载的 textEncoder 与 vocab 不再请求');
+});
+
+test('下载：暂时性错误（网络中断、503）自动重试，不报错', async () => {
+  const storage = memoryCaches();
+  let n = 0;
+  const flaky = async (url, opts) => {
+    n += 1;
+    if (n === 1) throw new TypeError('Failed to fetch');
+    if (n === 3) return new Response('busy', { status: 503 });
+    return fakeFetch()(url, opts);
+  };
+  const st = await downloadImageModel(model(), { storage, fetchImpl: flaky, sleep: async () => {} });
+  assert.equal(st.complete, true);
 });
 
 test('删除：移除该模型的全部缓存文件，不影响其他模型', async () => {
