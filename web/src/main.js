@@ -2725,9 +2725,14 @@ async function downloadSelectedModel() {
   try {
     await downloadImageModel(model, {
       signal: ctl.signal,
-      onProgress: ({ done, total, bytes, totalBytes }) => {
+      onProgress: ({ done, total, bytes, totalBytes, retry }) => {
         if (startBytes === null) startBytes = bytes;
         els.imageDownloadFill.style.width = `${totalBytes ? Math.round((bytes / totalBytes) * 100) : 0}%`;
+        if (retry) {
+          // 暂时性错误：下载会自动重试，这里只提示，不作为错误显示
+          setImageStatus(`网络不稳定，${Math.round(retry.waitMs / 1000)} 秒后自动重试（第 ${retry.attempt} 次）。已下载的部分会保留，无需操作。`);
+          return;
+        }
         const secs = (Date.now() - t0) / 1000;
         const mbps = secs > 0.5 ? (bytes - startBytes) / secs / 1e6 : 0;
         const speed = mbps > 0 ? `，约 ${mbps.toFixed(1)} MB/s` : '';
@@ -2737,7 +2742,7 @@ async function downloadSelectedModel() {
     setImageStatus('模型已下载到本机，之后可离线生成。');
   } catch (err) {
     if (err.name === 'AbortError') setImageStatus('已取消下载。已保存的部分会保留，下次点击“继续下载”从断点继续。');
-    else setImageStatus(`下载失败：${err.message}。已保存的部分会保留，可以重试续传。`, { error: true });
+    else setImageStatus(`下载未完成：${err.message}`, { error: true });
   } finally {
     imageState.downloadCtl = null;
     els.imageDownloadProgress.hidden = true;
