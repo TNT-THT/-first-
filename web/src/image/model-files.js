@@ -232,3 +232,19 @@ export async function importImageModelFile(file, { models, storage = globalThis.
   return { model, entryCount: header.entries.length };
 }
 
+
+/**
+ * 浏览器中单个 ArrayBuffer 的上限（本项目测试的 Chromium 中，2 GB 的分配即失败；1.7 GB 可以成功）。
+ * 模型的每个文件都要整体读入一个 ArrayBuffer 再交给 ONNX Runtime，超过上限的文件无法在网页中加载。
+ */
+export const MAX_BROWSER_FILE_BYTES = 2 ** 31 - 1;
+
+/**
+ * 返回大小超过浏览器单文件上限的文件名（sizes 为 { 文件键: 字节数 }）。
+ * 只检查 sizes 中的数值；缺失或为 0 的项目视为未知，不报错。
+ */
+export function oversizedFiles(sizes, limit = MAX_BROWSER_FILE_BYTES) {
+  return Object.entries(sizes || {})
+    .filter(([, n]) => Number(n) > limit)
+    .map(([key, n]) => ({ key, bytes: Number(n) }));
+}
