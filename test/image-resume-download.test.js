@@ -587,3 +587,183 @@ test('块级续传：中断时已写满的块与未写满的部分都保存，�
   assert.deepEqual(calls, [null, `bytes=${DROP}-${SIZE - 1}`], '第一次整文件请求；续传从 1.5 MB 处开始');
   assert.deepEqual(await cachedBytes(storage, sourceUrls(big).big), data);
 });
+
+/** 用于下面几个测试：直接给出每次请求的响应（不经过 server() 的故障表）。 */
+function scripted(handler) {
+  const calls = [];
+  const fn = async (url, opts = {}) => {
+    const name = Object.keys(DATA).find((p) => url.endsWith(`/${p}`));
+    const range = opts.headers?.Range || null;
+    calls.push({ name, range });
+    if (!name) return new Response('nope', { status: 404 });
+    return handler({ name, range, data: DATA[name], signal: opts.signal, calls });
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+/** 先送 sent 字节，之后一直不再有数据（也不报错），直到请求被中止。 */
+function stallingBody(data, sent, signal) {
+  let sentOnce = false;
+  return new ReadableStream(
+    {
+      pull(c) {
+        if (!sentOnce) {
+          sentOnce = true;
+          c.enqueue(data.slice(0, sent));
+          return undefined;
+        }
+        return new Promise((_, reject) => {
+          signal?.addEventListener('abort', () => {
+            c.error(abortError());
+            reject(abortError());
+          });
+        });
+      },
+    },
+    { highWaterMark: 0 },
+  );
+}
+
+test('连接卡住（既无数据也不报错）：超过 stallMs 后中止，已收到的字节保存，自动重试续传', async () => {
+  const storage = memoryCaches();
+  const m = model();
+  const stallUrl = sourceUrls(m).unetWeights;
+  let stalled = false;
+  const fetchImpl = scripted(({ name, range, data, signal }) => {
+    if (name === 'unet/weights.pb' && !range && !stalled) {
+      stalled = true;
+      return new Response(stallingBody(data, 4, signal), { status: 200 });
+    }
+    if (range) {
+      const m2 = /bytes=(\d+)-(\d+)/.exec(range);
+      return new Response(data.slice(Number(m2[1]), Number(m2[2]) + 1), { status: 206 });
+    }
+    return new Response(data.slice(), { status: 200 });
+  });
+  const retries = [];
+  const st = await downloadImageModel(m, {
+    storage,
+    fetchImpl,
+    stallMs: 50,
+    sleep: instantSleep,
+    onProgress: ({ retry }) => retry && retries.push(retry),
+  });
+  assert.equal(st.complete, true);
+  assert.ok(retries.some((r) => r.message.includes('没有数据')), '卡住时给出重试提示');
+  const weightCalls = fetchImpl.calls.filter((c) => c.name === 'unet/weights.pb').map((c) => c.range);
+  assert.deepEqual(weightCalls, [null, 'bytes=4-9'], '卡住前收到的 4 字节不重下');
+  assert.deepEqual(await cachedBytes(storage, stallUrl), DATA['unet/weights.pb']);
+});
+
+test('HF 链接出错（续传时返回 403）：已保存的字节保留，报错说明会保留；修复后只补下缺失的部分', async () => {
+  const storage = memoryCaches();
+  const m = model();
+  let mode = 'drop';
+  const fetchImpl = scripted(({ name, range, data }) => {
+    if (name === 'unet/weights.pb' && !range && mode === 'drop') {
+      let sent = false;
+      const stream = new ReadableStream(
+        {
+          pull(c) {
+            if (!sent) {
+              sent = true;
+              c.enqueue(data.slice(0, 4));
+              return;
+            }
+            c.error(new TypeError('network error'));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(stream, { status: 200 });
+    }
+    if (name === 'unet/weights.pb' && range && mode === 'forbidden') return new Response('denied', { status: 403 });
+    if (range) {
+      const m2 = /bytes=(\d+)-(\d+)/.exec(range);
+      return new Response(data.slice(Number(m2[1]), Number(m2[2]) + 1), { status: 206 });
+    }
+    return new Response(data.slice(), { status: 200 });
+  });
+  // 第一次断开后，续传时 HF 返回 403（链接出错）
+  await assert.rejects(
+    downloadImageModel(m, {
+      storage,
+      fetchImpl,
+      sleep: instantSleep,
+      onProgress: ({ retry }) => {
+        if (retry) mode = 'forbidden';
+      },
+    }),
+    /已保存的部分会保留/,
+  );
+  const kept = await imageCacheStatus(m, { storage });
+  assert.equal(kept.partialBytes, 4, '403 之后，已保存的 4 字节仍然保留');
+
+  // 链接修复后：只补下缺失的部分
+  mode = 'ok';
+  fetchImpl.calls.length = 0;
+  const st = await downloadImageModel(m, { storage, fetchImpl, sleep: instantSleep });
+  assert.equal(st.complete, true);
+  const weightCalls = fetchImpl.calls.filter((c) => c.name === 'unet/weights.pb').map((c) => c.range);
+  assert.deepEqual(weightCalls, ['bytes=4-9'], '只请求缺少的字节');
+  assert.deepEqual(await cachedBytes(storage, sourceUrls(m).unetWeights), DATA['unet/weights.pb']);
+});
+
+test('服务器忽略 Range、且已有保存的部分：提示“正在跳过已保存的部分”，进度不重复计数', async () => {
+  const storage = memoryCaches();
+  const m = model();
+  let first = true;
+  const fetchImpl = scripted(({ name, data }) => {
+    if (name === 'unet/weights.pb' && first) {
+      first = false;
+      let sent = false;
+      const stream = new ReadableStream(
+        {
+          pull(c) {
+            if (!sent) {
+              sent = true;
+              c.enqueue(data.slice(0, 4));
+              return;
+            }
+            c.error(new TypeError('network error'));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(stream, { status: 200 });
+    }
+    // 之后所有请求都返回整文件（忽略 Range）
+    return new Response(data.slice(), { status: 200 });
+  });
+  const notes = [];
+  let lastBytes = 0;
+  let totalBytes = 0;
+  await downloadImageModel(m, {
+    storage,
+    fetchImpl,
+    sleep: instantSleep,
+    onProgress: ({ note, bytes, totalBytes: tb, retry }) => {
+      if (note) notes.push(note);
+      if (!retry) lastBytes = bytes;
+      totalBytes = tb;
+    },
+  });
+  assert.ok(notes.some((n) => n.includes('跳过已保存的部分')), '跳过时给出提示');
+  assert.equal(lastBytes, totalBytes, '字节数不重复计数');
+  assert.deepEqual(await cachedBytes(storage, sourceUrls(m).unetWeights), DATA['unet/weights.pb']);
+});
+
+test('拼接阶段有进度提示（进度条停在已保存的字节数，并说明正在整理文件）', async () => {
+  const storage = memoryCaches();
+  const m = model();
+  const notes = [];
+  await downloadImageModel(m, {
+    storage,
+    fetchImpl: server(),
+    sleep: instantSleep,
+    onProgress: ({ note }) => note && notes.push(note),
+  });
+  assert.ok(notes.some((n) => n.includes('正在整理文件（unet/weights.pb）')), '拼接开始时提示');
+  assert.ok(notes.some((n) => n.includes('100%')), '拼接进度达到 100%');
+});

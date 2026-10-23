@@ -18,6 +18,9 @@ export const BLOCK_BYTES = 1024 * 1024;
 
 export class PermanentDownloadError extends Error {}
 
+/** 连接超过这么久没有收到任何数据，视为卡住：中止本次请求，已收到的字节保存后自动重试。 */
+export const STALL_MS = 30 * 1000;
+
 /** 服务器忽略了 Range（返回 200）。内部信号，调用方据此改用整文件读取。 */
 export class RangeUnsupported extends Error {}
 
@@ -42,6 +45,41 @@ export function sleepMs(ms, signal) {
     }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+/**
+ * 卡住检测：只在等待数据时计时（写入缓存的时间不计入）。
+ * arm() 开始等待，disarm() 收到数据后停止计时；超时后中止本次请求（signal），failure() 把结果转换为可重试的错误。
+ */
+export function stallGuard(parentSignal, stallMs) {
+  const ctl = new AbortController();
+  let timer = null;
+  let stalled = false;
+  const onParent = () => ctl.abort();
+  parentSignal?.addEventListener('abort', onParent, { once: true });
+  return {
+    signal: ctl.signal,
+    arm() {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        stalled = true;
+        ctl.abort();
+      }, stallMs);
+    },
+    disarm() {
+      clearTimeout(timer);
+    },
+    stop() {
+      clearTimeout(timer);
+      parentSignal?.removeEventListener('abort', onParent);
+    },
+    /** 把请求或读取时的错误转换：用户取消保持 AbortError；卡住则变为暂时性错误（会自动重试）。 */
+    failure(err) {
+      if (parentSignal?.aborted) return abortError();
+      if (stalled) return new Error(`网络超过 ${Math.round(stallMs / 1000)} 秒没有数据，将自动重试`);
+      return err;
+    },
+  };
 }
 
 /** 4xx（408、429 除外）为永久错误；5xx、408、429 与网络错误都视为暂时的。 */
@@ -248,7 +286,7 @@ async function planSegment(parts, size, partBytes, i, st, url) {
 
 /** 下载一个分段（或它的剩余部分）。已保存的字节不会重下；每写满一块即保存，出错时保存未写满的块。 */
 async function fetchSegment(ctx, i) {
-  const { url, label, size, partBytes, parts, fetchImpl, signal, addBytes, n } = ctx;
+  const { url, label, size, partBytes, parts, fetchImpl, signal, addBytes, n, stallMs } = ctx;
   const { start, end, length } = partRange(size, partBytes, i);
   const st = await segmentStatus(parts, url, size, partBytes);
   if (st.have[i] === length) return;
@@ -266,8 +304,11 @@ async function fetchSegment(ctx, i) {
     blocks: plan.blocks,
     label,
   });
+  const guard = stallGuard(signal, stallMs);
   try {
-    const res = await fetchImpl(url, { signal, headers: { Range: `bytes=${start + plan.base}-${end}` } });
+    guard.arm();
+    const res = await fetchImpl(url, { signal: guard.signal, headers: { Range: `bytes=${start + plan.base}-${end}` } });
+    guard.disarm();
     if (res.status === 200) {
       await res.body?.cancel();
       throw new RangeUnsupported();
@@ -279,15 +320,20 @@ async function fetchSegment(ctx, i) {
     }
     const reader = res.body.getReader();
     for (;;) {
+      guard.arm();
       const { done, value } = await reader.read();
+      guard.disarm();
       if (done) break;
       addBytes(await writer.feed(value));
     }
     if (!writer.complete) throw new Error(`分段大小不符（第 ${i + 1}/${n} 段）：${label}`);
   } catch (err) {
-    // 已收到的字节照常保存（网络中断、取消时也一样），下次从这里继续
+    // 已收到的字节照常保存（网络中断、卡住、取消时也一样），下次从这里继续
+    const e = guard.failure(err);
     await writer.flushPartial();
-    throw err;
+    throw e;
+  } finally {
+    guard.stop();
   }
 }
 
@@ -296,14 +342,24 @@ async function fetchSegment(ctx, i) {
  * 已完整的段跳过；未写满的块只写入超过已保存长度的部分（不计入进度的字节不会重复计数）。
  */
 async function fetchWhole(ctx) {
-  const { url, label, size, partBytes, parts, fetchImpl, signal, addBytes } = ctx;
+  const { url, label, size, partBytes, parts, fetchImpl, signal, addBytes, stallMs, onNote } = ctx;
   const st = await segmentStatus(parts, url, size, partBytes);
   const todo = [];
   for (let i = 0; i < st.n; i += 1) if (st.have[i] !== partRange(size, partBytes, i).length) todo.push(i);
   if (todo.length === 0) return;
 
-  const res = await fetchImpl(url, { signal });
+  const guard = stallGuard(signal, stallMs);
+  let res;
+  try {
+    guard.arm();
+    res = await fetchImpl(url, { signal: guard.signal });
+    guard.disarm();
+  } catch (err) {
+    guard.stop();
+    throw guard.failure(err);
+  }
   if (!res.ok) {
+    guard.stop();
     if (isPermanentStatus(res.status)) throw new PermanentDownloadError(`下载失败（HTTP ${res.status}）：${label}`);
     throw new Error(`服务器返回 ${res.status}：${label}`);
   }
@@ -314,6 +370,7 @@ async function fetchWhole(ctx) {
     writers.push({
       start,
       length,
+      skip: plan.base,
       w: createSegmentWriter({
         url,
         parts,
@@ -330,11 +387,16 @@ async function fetchWhole(ctx) {
     });
   }
 
+  if (writers.some((x) => x.skip > 0)) {
+    onNote?.('服务器不支持断点续传，正在从头读取，并跳过已保存的部分…');
+  }
   let pos = 0;
-  const reader = res.body.getReader();
   try {
+    const reader = res.body.getReader();
     for (;;) {
+      guard.arm();
       const { done, value } = await reader.read();
+      guard.disarm();
       if (done) break;
       const cEnd = pos + value.length;
       for (const { w, start, length } of writers) {
@@ -347,8 +409,11 @@ async function fetchWhole(ctx) {
     if (pos !== size) throw new Error(`下载不完整（已收到 ${pos} / ${size} 字节）：${label}`);
     for (const { w } of writers) if (!w.complete) throw new Error(`分段不完整：${label}`);
   } catch (err) {
+    const e = guard.failure(err);
     for (const { w } of writers) await w.flushPartial();
-    throw err;
+    throw e;
+  } finally {
+    guard.stop();
   }
 }
 
@@ -373,7 +438,7 @@ async function runPool(items, concurrency, fn) {
 }
 
 /** 把全部块按顺序拼接成完整文件放入最终缓存，然后删除分块。块不完整时抛出错误（已保存的部分保留）。 */
-async function assemble({ finalCache, parts, url, size, partBytes, n, label, blocks }) {
+async function assemble({ finalCache, parts, url, size, partBytes, n, label, blocks, onNote }) {
   const blk = blockBytesOf(partBytes);
   const list = [];
   for (let i = 0; i < n; i += 1) {
@@ -388,6 +453,17 @@ async function assemble({ finalCache, parts, url, size, partBytes, n, label, blo
   let idx = 0;
   let reader = null;
   let got = 0;
+  // 拼接是复制整个文件，较慢；每 5% 报告一次，避免进度条看起来停住
+  let copied = 0;
+  let lastPct = -1;
+  const report = () => {
+    const pct = Math.floor((copied / size) * 20) * 5;
+    if (pct !== lastPct) {
+      lastPct = pct;
+      onNote?.(`正在整理文件（${label}）：${pct}%，请稍候…`);
+    }
+  };
+  onNote?.(`正在整理文件（${label}）…`);
   const body = new ReadableStream({
     async pull(controller) {
       for (;;) {
@@ -415,6 +491,8 @@ async function assemble({ finalCache, parts, url, size, partBytes, n, label, blo
           continue;
         }
         got += value.length;
+        copied += value.length;
+        report();
         controller.enqueue(value);
         return;
       }
@@ -454,9 +532,11 @@ export async function downloadSegmentedFile({
   limit,
   retry,
   addBytes,
+  stallMs = STALL_MS,
+  onNote,
 }) {
   const n = partCount(size, partBytes);
-  const ctx = { url, label, size, partBytes, parts, fetchImpl, signal, addBytes, n };
+  const ctx = { url, label, size, partBytes, parts, fetchImpl, signal, addBytes, n, stallMs, onNote };
   const incomplete = (s) => {
     const list = [];
     for (let i = 0; i < s.n; i += 1) if (s.have[i] !== partRange(size, partBytes, i).length) list.push(i);
@@ -500,7 +580,7 @@ export async function downloadSegmentedFile({
   if (!after.complete) {
     throw new Error(`分段未齐全（缺少 ${after.n - after.completeCount} 段）：${label}`);
   }
-  await assemble({ finalCache, parts, url, size, partBytes, n: after.n, label, blocks: after.blocks });
+  await assemble({ finalCache, parts, url, size, partBytes, n: after.n, label, blocks: after.blocks, onNote });
 }
 
 /** 删除某文件的全部分块（含未完成下载的部分）。 */

@@ -2872,12 +2872,17 @@ async function downloadSelectedModel() {
   try {
     await downloadImageModel(model, {
       signal: ctl.signal,
-      onProgress: ({ done, total, bytes, totalBytes, retry }) => {
+      onProgress: ({ done, total, bytes, totalBytes, retry, note }) => {
         if (startBytes === null) startBytes = bytes;
         els.imageDownloadFill.style.width = `${totalBytes ? Math.round((bytes / totalBytes) * 100) : 0}%`;
         if (retry) {
           // 暂时性错误：下载会自动重试，这里只提示，不作为错误显示
           setImageStatus(`网络不稳定，${Math.round(retry.waitMs / 1000)} 秒后自动重试（第 ${retry.attempt} 次）。已下载的部分会保留，无需操作。`);
+          return;
+        }
+        if (note) {
+          // 拼接、跳过已保存部分等阶段：进度条保持在已保存的字节数，并说明正在做什么
+          setImageStatus(note);
           return;
         }
         const secs = (Date.now() - t0) / 1000;

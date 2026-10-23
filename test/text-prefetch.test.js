@@ -242,3 +242,54 @@ test('网络中断：分片已收到的字节保存，下次从断点用 Range �
   const res = await cache.match(BASE + 'params_shard_0.bin');
   assert.deepEqual(new Uint8Array(await res.arrayBuffer()), Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]));
 });
+
+test('连接卡住（既无数据也不报错）：超过 stallMs 后中止，已收到的字节保存，自动重试续传', async () => {
+  const storage = memoryCaches();
+  const full = Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  const calls = [];
+  let stalled = false;
+  const fetchImpl = async (url, opts = {}) => {
+    const name = url.slice(BASE.length);
+    const range = opts.headers?.Range || null;
+    if (name === 'tensor-cache.json') return new Response(JSON.stringify(manifest(1)), { status: 200 });
+    calls.push({ name, range });
+    if (!range && !stalled) {
+      stalled = true;
+      const body = new ReadableStream(
+        {
+          pull(c) {
+            if (!body.sent) {
+              body.sent = true;
+              c.enqueue(full.slice(0, 4));
+              return undefined;
+            }
+            return new Promise((_, reject) => {
+              opts.signal?.addEventListener('abort', () => {
+                c.error(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+                reject(new Error('aborted'));
+              });
+            });
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(body, { status: 200 });
+    }
+    const m = range ? /bytes=(\d+)-(\d+)/.exec(range) : null;
+    return new Response(m ? full.slice(Number(m[1]), Number(m[2]) + 1) : full.slice(), { status: m ? 206 : 200 });
+  };
+  const r = await prefetchTextModelShards({
+    modelUrl: BASE,
+    storage,
+    fetchImpl,
+    concurrency: 1,
+    sleep: instantSleep,
+    stallMs: 50,
+  });
+  assert.deepEqual(r.failed, []);
+  const ranges = calls.filter((c) => c.name === 'params_shard_0.bin').map((c) => c.range);
+  assert.deepEqual(ranges, [null, 'bytes=4-9'], '卡住前收到的 4 字节不重下');
+  const cache = await storage.open(TEXT_CACHE_SCOPE);
+  const res = await cache.match(BASE + 'params_shard_0.bin');
+  assert.deepEqual(new Uint8Array(await res.arrayBuffer()), full);
+});
