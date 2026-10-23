@@ -287,6 +287,39 @@ npm run build          # 构建纯静态版本到 web/dist
 npm test               # 运行测试
 ```
 
+## 图像生成（Stable Diffusion 1.5）
+
+### 方式一：网页版（生成在浏览器内完成，下载一次后可离线使用）
+
+```bash
+npm install
+npm run build                                # 产物在 web/dist
+python3 -m http.server 8000 -d web/dist      # 任意静态服务器均可
+```
+
+用支持 WebGPU 的浏览器（Edge、Chrome）打开 `http://localhost:8000`，切换到图像页，选择模型（fp16 约 2.56 GB，fp32 约 4.13 GB），点击“下载到本机”。下载需要联网；完成后模型保存在浏览器本地，之后生图直接读取本地副本。
+
+### 方式二：本机 Python 脚本（不依赖浏览器，可用 CPU / NVIDIA / DirectML）
+
+```bash
+pip install numpy onnxruntime regex          # GPU 可选：onnxruntime-gpu（NVIDIA）或 onnxruntime-directml（Windows）
+pip install huggingface_hub
+huggingface-cli download nmkd/stable-diffusion-1.5-onnx --local-dir ./sd15
+python3 scripts/image/sd15_local.py --models ./sd15 --prompt "a red fox in the snow" \
+    --width 512 --height 512 --steps 20 --guidance 7.5 --seed 42 --out fox.png
+```
+
+- `--models` 指向的目录需要包含以下文件（即 Hugging Face 仓库的目录结构）：
+  - `text_encoder/model.onnx`
+  - `unet/model.onnx` 与 `unet/weights.pb`
+  - `vae_decoder/model.onnx`
+  - `tokenizer/vocab.json` 与 `tokenizer/merges.txt`
+  - `scheduler/scheduler_config.json`
+- 整个目录请取自同一个仓库。fp16 版的 `text_encoder/model.onnx` 与网页版备选的 fp32 文件路径相同，混放会互相覆盖。
+- 尺寸须为 256–768 之间且为 8 的倍数；步数 2–50；`--provider cpu|cuda|dml` 选择运行设备（默认 cpu）。
+- 脚本的分词器、调度器、随机噪声与网页版使用同一算法，并已用网页版代码做交叉检查（分词、噪声、时间步、调度器每一步）。完整图像在真实模型上的逐像素一致性、画质与速度尚未验证。
+- 测试：`python3 -m unittest scripts/image/test_sd15_local.py`
+
 ## 嵌入到 Better Hydro 侧边栏
 
 ```html
@@ -333,7 +366,7 @@ web/                 前端（Vite + 原生 JS）
   public/_headers    Netlify / Cloudflare Pages 的响应头配置
   src/engines/       推理后端：webllm（浏览器内，默认）与 remote（服务端）
 server/              可选的服务端（登录鉴权、OpenAI 兼容接口流式代理）
-scripts/             口令设置脚本
+scripts/             口令设置脚本；scripts/image/ 本机生图脚本（Python，见上文）
 docs/                管理员操作指南（如何修改各个数值）
 training/            训练运行时：数据整理、LoRA 微调、打包为 .ojmodel（需要 GPU，见 training/README.md）
 test/                单元测试与服务端集成测试

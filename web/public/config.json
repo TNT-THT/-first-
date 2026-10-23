@@ -256,16 +256,15 @@
         "scheduler": {
           "path": "scheduler/scheduler_config.json",
           "size": 498
+        },
+        "textEncoderFallback": {
+          "path": "text_encoder/model.onnx",
+          "repo": "nmkd/stable-diffusion-1.5-onnx",
+          "revision": "main",
+          "size": 492582967
         }
       },
-      "note": "非官方 fp16 ONNX 转换版（nmkd）。已核对：仓库文件结构、调度器与分词器配置，以及 ONNX 接口名称（依据 diffusers 0.41 的 ONNX 管线源码）。未验证：真实模型的画质、显存占用与速度，需在有 WebGPU 的设备上测试。仓库不含安全检查器，生成内容不经过自动过滤。 文本编码器备选：主文件（fp16）无法创建会话时，生图时才从 nmkd/stable-diffusion-1.5-onnx 读取 fp32 版本（约 0.49 GB，不随“下载到本机”保存）。该文件的大小与路径已由 Hugging Face 元数据核对，接口与运行效果未验证。",
-      "textEncoderFallback": {
-        "repo": "nmkd/stable-diffusion-1.5-onnx",
-        "revision": "main",
-        "path": "text_encoder/model.onnx",
-        "size": 492582967,
-        "precision": "fp32"
-      }
+      "note": "非官方 fp16 ONNX 转换版（nmkd）。已核对：仓库文件结构、调度器与分词器配置，以及 ONNX 接口名称（依据 diffusers 0.41 的 ONNX 管线源码）。未验证：真实模型的画质、显存占用与速度，需在有 WebGPU 的设备上测试。仓库不含安全检查器，生成内容不经过自动过滤。 文本编码器备选（textEncoderFallback，fp32，约 0.49 GB）：主文件无法创建会话时使用，已包含在“下载到本机”中，离线可用。大小与路径已由 Hugging Face 元数据核对，接口与运行效果未验证。"
     },
     {
       "id": "sd15-nmkd-fp32",
