@@ -16,7 +16,7 @@ export function totalBytes(model) {
 }
 
 export function formatGB(bytes) {
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  return `${(bytes / 1e9).toFixed(2)} GB`; // 十进制 GB，与 Hugging Face 页面显示一致
 }
 
 /** Hugging Face 上某个文件的下载地址。 */
