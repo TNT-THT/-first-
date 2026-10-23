@@ -11,6 +11,7 @@ import {
 } from './webllm.js';
 import { loadLocalModels, localRecords } from '../local-models.js';
 import { composeSystemPrompt, getModelParams } from '../adaptation.js';
+import { presetOverrides } from '../presets.js';
 import { getThinkingPref, isReasoningModel, setThinkingPref } from '../reasoning.js';
 import { getSlidingPref, setSlidingPref } from '../sliding.js';
 import {
@@ -68,7 +69,15 @@ function createRemoteBackend() {
 }
 
 /**
- * 某个模型当前的窗口：管理员参数（本机）优先，否则使用配置默认值。
+ * 某个模型生效的数值覆盖：预设（按浏览器）< 管理员参数（本机，优先）。
+ * 没有覆盖的项沿用 config.json 的默认值。
+ */
+export function layeredOverrides(modelId) {
+  return { ...presetOverrides(), ...getModelParams(modelId) };
+}
+
+/**
+ * 某个模型当前的窗口：预设与管理员参数优先，否则使用配置默认值。
  * 引擎窗口 = 上下文窗口；只有推理模型且开启思考时才加上思考窗口。
  * 引擎窗口在加载时确定，所以切换思考开关后，下一次发送会按新窗口重新加载。
  */
@@ -84,7 +93,7 @@ function windowsFor(cfg, modelId, thinkingOn, sliding = getSlidingPref()) {
         slidingWindow: cfg.slidingWindowTokens,
         thinkingWindow: cfg.thinkingWindowTokens,
       },
-      overrides: getModelParams(modelId),
+      overrides: layeredOverrides(modelId),
       reserveThinking: thinkingActive,
       sliding,
     }),
@@ -161,7 +170,7 @@ function createWebLLMBackend(cfg) {
     async *stream({ messages, signal, onLoop }) {
       // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
       const system = { role: 'system', content: composeSystemPrompt(cfg.systemPrompt, modelId) };
-      const params = getModelParams(modelId);
+      const params = layeredOverrides(modelId);
       const repetitionPenalty = params.repetitionPenalty ?? cfg.repetitionPenalty ?? null;
       const thinkingOn = getThinkingPref();
       const w = windowsFor(cfg, modelId, thinkingOn);

@@ -3,14 +3,19 @@ import './style.css';
 import DOMPurify from 'dompurify';
 import { renderMarkdown } from './markdown.js';
 import { hasThinking, splitThinking } from './think.js';
-import { truncateThinking } from './reasoning.js';
+import { setThinkingPref, truncateThinking } from './reasoning.js';
 import { trimRepetition } from './repetition.js';
 import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
 import { getSavedDefaultModel, resolveStartupModel, saveDefaultModel } from './default-model.js';
 import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './answer-check.js';
-import { checkWebGPU, getModelRecords, WEBGPU_MISSING } from './engines/webllm.js';
+import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './engines/webllm.js';
+import { formatGB, imageModelsOf, isSelectable, sourceUrls, totalBytes } from './image/catalog.js';
+import { createImageClient } from './image/client.js';
+import { addImageHint, buildImagePrompt, clearImageParams, effectiveImageSettings, getImageSettings, parseImageParams, removeImageHint, setImageParams, stripImageParamLine } from './image/params.js';
+import { randomSeed } from './image/rng.js';
+import { DEFAULT_SIZE, RATIOS, sizeForRatio } from './image/sizes.js';
 import {
   buildModelFile,
   importModelFile,
@@ -27,6 +32,7 @@ import {
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
 import { pendingModels } from './pending-models.js';
+import { DEFAULT_PRESET_ID, findPreset, getPresetId, layerParams, PRESETS, presetOverrides, setPresetId } from './presets.js';
 import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
   adaptedModelIds,
@@ -82,6 +88,7 @@ const els = {
   brandName: $('#brandName'),
   loginTitle: $('#loginTitle'),
   modelSelect: $('#modelSelect'),
+  presetSelect: $('#presetSelect'),
   modelLabel: $('#modelLabel'),
   newChatBtn: $('#newChatBtn'),
   embedNewBtn: $('#embedNewBtn'),
@@ -145,6 +152,29 @@ const els = {
   exportParamsLabel: $('#exportParamsLabel'),
   adaptList: $('#adaptList'),
   migrateBox: $('#migrateBox'),
+  imageModeBtn: $('#imageModeBtn'),
+  imagePanel: $('#imagePanel'),
+  imageModelSelect: $('#imageModelSelect'),
+  imageRatio: $('#imageRatio'),
+  imageWidth: $('#imageWidth'),
+  imageHeight: $('#imageHeight'),
+  imageSteps: $('#imageSteps'),
+  imageGuidance: $('#imageGuidance'),
+  imageSeed: $('#imageSeed'),
+  imageEffective: $('#imageEffective'),
+  imageForm: $('#imageForm'),
+  imagePrompt: $('#imagePrompt'),
+  imageGenerateBtn: $('#imageGenerateBtn'),
+  imageCancelBtn: $('#imageCancelBtn'),
+  imageStatus: $('#imageStatus'),
+  imageProgress: $('#imageProgress'),
+  imageProgressFill: $('#imageProgressFill'),
+  imageGallery: $('#imageGallery'),
+  imageAdmin: $('#imageAdmin'),
+  imageHintInput: $('#imageHintInput'),
+  imageHintAdd: $('#imageHintAdd'),
+  imageParamsClear: $('#imageParamsClear'),
+  imageHintList: $('#imageHintList'),
 };
 
 // ---------- 运行参数 ----------
@@ -589,15 +619,25 @@ function questionBefore(session, target) {
 /** 某模型当前生效的参数：本机覆盖优先，否则使用配置默认值。 */
 function effectiveParams(modelId) {
   const d = state.appConfig.webllm;
-  return {
-    temperature: d.temperature,
-    repetitionPenalty: d.repetitionPenalty,
-    maxTokens: d.maxTokens,
-    contextWindow: d.contextWindowTokens,
-    slidingWindow: d.slidingWindowTokens,
-    thinkingWindow: d.thinkingWindowTokens,
-    ...getModelParams(modelId),
-  };
+  return layerParams(
+    {
+      temperature: d.temperature,
+      repetitionPenalty: d.repetitionPenalty,
+      maxTokens: d.maxTokens,
+      contextWindow: d.contextWindowTokens,
+      slidingWindow: d.slidingWindowTokens,
+      thinkingWindow: d.thinkingWindowTokens,
+    },
+    presetOverrides(),
+    getModelParams(modelId),
+  );
+}
+
+/** 当前生效的数值来源（用于参数详情）：管理员参数 > 预设 > 默认。 */
+function paramSourceOf(key, modelId) {
+  if (key in getModelParams(modelId)) return '本机覆盖';
+  if (key in presetOverrides()) return `预设：${findPreset(getPresetId())?.label || ''}`;
+  return '默认';
 }
 
 /** 参数变更的展示格式：key 原值→新值（原值为空时显示“默认”）。 */
@@ -1123,6 +1163,28 @@ function refreshSlidingToggle() {
 /** 当前生效的上下文窗口（滑动窗口开启时为滑动窗口大小，否则为上下文窗口）。 */
 function activeContextWindow(eff) {
   return state.backend?.slidingEnabled() ? eff.slidingWindow : eff.contextWindow;
+}
+
+/** 对话预设下拉框（按浏览器保存；所有用户可用）。 */
+function renderPresetOptions() {
+  if (!els.presetSelect) return;
+  els.presetSelect.replaceChildren(...PRESETS.map((p) => makeOption(p.id, p.label)));
+  els.presetSelect.value = getPresetId();
+  els.presetSelect.title = findPreset(getPresetId())?.note || '';
+}
+
+/**
+ * 选择预设：机械修改，立即生效，不调用模型。
+ * 思考开关是全局偏好，因此预设的 thinking 在这里写入偏好；之后仍可手动切换。
+ */
+function applyPreset(id) {
+  if (!setPresetId(id)) return;
+  const preset = findPreset(id) || findPreset(DEFAULT_PRESET_ID);
+  setThinkingPref(preset.thinking);
+  renderPresetOptions();
+  refreshThinkToggle();
+  refreshParamViews();
+  flashStatus(`已切换到预设「${preset.label}」：${preset.note} 下次发送时按新参数生效。`);
 }
 
 function renderModelOptions(selectId = state.backend.modelId) {
@@ -1794,7 +1856,7 @@ function renderParamDetails(list, modelId, overrides) {
   line.textContent =
     '当前生效：' +
     ['temperature', 'repetitionPenalty', 'maxTokens', 'contextWindow', 'slidingWindow', 'thinkingWindow']
-      .map((k) => `${k} = ${eff[k]}（${k in overrides ? '本机覆盖' : '默认'}）`)
+      .map((k) => `${k} = ${eff[k]}（${paramSourceOf(k, modelId)}）`)
       .join('｜');
   list.append(line);
 
@@ -2058,6 +2120,8 @@ els.slidingToggle.addEventListener('change', async () => {
   );
 });
 
+els.presetSelect?.addEventListener('change', () => applyPreset(els.presetSelect.value));
+
 els.modelSelect.addEventListener('change', () => {
   state.backend.setModel(els.modelSelect.value);
   // 切换模型即更改默认模型：保存在本浏览器，下次打开时使用
@@ -2167,6 +2231,393 @@ function notifyParentReady() {
 }
 
 // ---------- 启动 ----------
+// ---------- 生图模式（仅本机 WebLLM 模式）----------
+// 生图与聊天互斥：进入生图模式时释放聊天模型的显存；离开时终止生图 worker。
+// 生图模型只在第一次生成时加载，启动页面时不下载、不加载。
+const imageState = { active: false, busy: false, controller: null, client: null, gallery: [] };
+const IMAGE_GALLERY_MAX = 12;
+
+function imageModels() {
+  return imageModelsOf(state.appConfig);
+}
+
+function imageModelById(id) {
+  return imageModels().find((m) => m.id === id) || null;
+}
+
+function imageClient() {
+  if (!imageState.client) {
+    imageState.client = createImageClient({
+      createWorker: () => new Worker(new URL('./image/sd15-worker.js', import.meta.url), { type: 'module' }),
+    });
+  }
+  return imageState.client;
+}
+
+function setImageStatus(text, { error = false } = {}) {
+  els.imageStatus.textContent = text;
+  els.imageStatus.classList.toggle('error', error);
+}
+
+function setImageProgress(fraction) {
+  els.imageProgress.hidden = fraction === null;
+  if (fraction !== null) els.imageProgressFill.style.width = `${Math.round(fraction * 100)}%`;
+}
+
+function setImageBusy(busy) {
+  imageState.busy = busy;
+  els.imageGenerateBtn.disabled = busy;
+  els.imageCancelBtn.hidden = !busy;
+  els.imageModelSelect.disabled = busy;
+  if (!busy) setImageProgress(null);
+}
+
+function renderImageModelOptions() {
+  const models = imageModels();
+  els.imageModelSelect.replaceChildren(
+    ...models.map((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = isSelectable(m) ? m.label : `${m.label}（暂不可用）`;
+      opt.disabled = !isSelectable(m);
+      opt.title = m.note || '';
+      return opt;
+    }),
+  );
+  const first = models.find(isSelectable);
+  if (first) els.imageModelSelect.value = first.id;
+  fillImageControls(imageModelById(els.imageModelSelect.value));
+}
+
+/** 切换模型时，用该模型的默认值填充控件（只在切换模型时执行）。 */
+function fillImageControls(model) {
+  if (!model) return;
+  const d = { ...DEFAULT_SIZE, steps: 20, guidance: 7.5, ...(model.defaults || {}) };
+  els.imageWidth.value = d.width;
+  els.imageHeight.value = d.height;
+  els.imageSteps.value = d.steps;
+  els.imageGuidance.value = d.guidance;
+  els.imageSeed.value = '';
+  syncRatioSelect();
+  renderImageEffective();
+}
+
+function readImageControls() {
+  const seedRaw = els.imageSeed.value.trim();
+  return {
+    width: Number(els.imageWidth.value),
+    height: Number(els.imageHeight.value),
+    steps: Number(els.imageSteps.value),
+    guidance: Number(els.imageGuidance.value),
+    seed: seedRaw === '' ? null : Number(seedRaw),
+  };
+}
+
+/** 根据当前宽高选中匹配的比例；不匹配时为“自定义”。 */
+function syncRatioSelect() {
+  const w = Number(els.imageWidth.value);
+  const h = Number(els.imageHeight.value);
+  const match = RATIOS.find((r) => r.w * h === r.h * w);
+  els.imageRatio.value = match ? match.id : 'custom';
+}
+
+/** 生效值：界面控件 < 管理员参数。 */
+function currentImageSettings(model) {
+  return effectiveImageSettings(readImageControls(), getImageSettings(model.id).params);
+}
+
+function renderImageEffective() {
+  const model = imageModelById(els.imageModelSelect.value);
+  if (!model) {
+    els.imageEffective.textContent = '';
+    return;
+  }
+  const { params, hints } = getImageSettings(model.id);
+  const eff = effectiveImageSettings(readImageControls(), params);
+  const adminKeys = Object.keys(params);
+  const parts = [
+    `生效：${eff.width} × ${eff.height}，${eff.steps} 步，引导 ${eff.guidance}，种子 ${eff.seed ?? '随机'}`,
+  ];
+  if (adminKeys.length) parts.push(`管理员参数已覆盖：${adminKeys.map((k) => `${k}=${params[k]}`).join('，')}`);
+  if (hints.length) parts.push(`风格提示 ${hints.length} 条`);
+  if (isSelectable(model)) parts.push(`模型约 ${formatGB(totalBytes(model))}（首次使用需下载，之后由浏览器缓存）`);
+  els.imageEffective.textContent = parts.join('｜');
+}
+
+function renderImageAdmin() {
+  const model = imageModelById(els.imageModelSelect.value);
+  els.imageAdmin.hidden = !isAdmin() || !model;
+  if (!model) return;
+  const { hints } = getImageSettings(model.id);
+  els.imageHintList.replaceChildren();
+  for (const h of hints) {
+    const row = document.createElement('div');
+    row.className = 'local-row';
+    const text = document.createElement('div');
+    text.className = 'muted small local-meta';
+    text.textContent = h.text;
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'btn ghost small';
+    del.textContent = '删除';
+    del.addEventListener('click', () => {
+      if (!requireAdmin('删除风格提示')) return;
+      removeImageHint(model.id, h.id);
+      renderImageAdmin();
+      renderImageEffective();
+    });
+    row.append(text, del);
+    els.imageHintList.append(row);
+  }
+}
+
+function imageErrorText(err) {
+  const m = err?.message || String(err);
+  if (/out of memory|Failed to allocate|OOM|device lost|GPUDevice|buffer.*size/i.test(m)) {
+    return `显存不足或 GPU 资源丢失（${m}）。可以减小宽高、减少步数，或关闭占用显存的其他页面后重试。`;
+  }
+  if (/Failed to fetch|NetworkError|下载失败|network/i.test(m)) {
+    return `模型文件下载失败：${m}。请检查网络是否能访问 huggingface.co，然后重试。`;
+  }
+  return `生图失败：${m}`;
+}
+
+async function rgbaToPngBlob(rgba, width, height) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext('2d').putImageData(new ImageData(rgba, width, height), 0, 0);
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('无法生成图片文件'))), 'image/png');
+  });
+}
+
+function renderImageGallery() {
+  els.imageGallery.replaceChildren(
+    ...imageState.gallery.map((item) => {
+      const card = document.createElement('figure');
+      card.className = 'image-card';
+      const img = document.createElement('img');
+      img.src = item.url;
+      img.alt = item.prompt;
+      const cap = document.createElement('figcaption');
+      cap.className = 'muted small';
+      cap.textContent = `${item.width} × ${item.height}｜${item.steps} 步｜引导 ${item.guidance}｜种子 ${item.seed}\n${item.prompt}`;
+      cap.style.whiteSpace = 'pre-wrap';
+      const actions = document.createElement('div');
+      actions.className = 'image-admin-row';
+      const dl = document.createElement('a');
+      dl.className = 'btn ghost small';
+      dl.href = item.url;
+      dl.download = item.filename;
+      dl.textContent = '下载 PNG';
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'btn ghost small';
+      rm.textContent = '移除';
+      rm.addEventListener('click', () => {
+        URL.revokeObjectURL(item.url);
+        imageState.gallery = imageState.gallery.filter((x) => x !== item);
+        renderImageGallery();
+      });
+      actions.append(dl, rm);
+      card.append(img, cap, actions);
+      return card;
+    }),
+  );
+}
+
+function addImageResult(item) {
+  imageState.gallery = [item, ...imageState.gallery];
+  for (const old of imageState.gallery.slice(IMAGE_GALLERY_MAX)) URL.revokeObjectURL(old.url);
+  imageState.gallery = imageState.gallery.slice(0, IMAGE_GALLERY_MAX);
+  renderImageGallery();
+}
+
+async function enterImageMode() {
+  if (imageState.active) return;
+  if (state.streaming) {
+    flashStatus('请先等待当前回答结束或点击“停止”，再进入生图模式。');
+    return;
+  }
+  els.imageModeBtn.disabled = true;
+  flashStatus('正在释放聊天模型的显存…');
+  try {
+    await releaseEngine();
+  } finally {
+    els.imageModeBtn.disabled = false;
+  }
+  imageState.active = true;
+  els.body.classList.add('image-mode');
+  els.imagePanel.hidden = false;
+  els.imageModeBtn.textContent = '返回聊天';
+  els.imageModeBtn.setAttribute('aria-pressed', 'true');
+  renderImageModelOptions();
+  renderImageAdmin();
+  renderImageGallery();
+  renderImageEffective();
+  setImageStatus('已进入生图模式。聊天模型已释放；生图模型在第一次生成时加载。');
+}
+
+function exitImageMode() {
+  if (!imageState.active) return;
+  // 结束正在进行的生成，并终止生图 worker（释放显存）
+  imageState.controller?.abort();
+  imageState.client?.dispose();
+  imageState.active = false;
+  els.body.classList.remove('image-mode');
+  els.imagePanel.hidden = true;
+  els.imageModeBtn.textContent = '生图';
+  els.imageModeBtn.setAttribute('aria-pressed', 'false');
+  refreshThinkToggle();
+  flashStatus('已返回聊天。生图模型已释放；发送消息时将重新加载聊天模型。');
+}
+
+async function runImageGenerate(event) {
+  event.preventDefault();
+  if (imageState.busy) return;
+  const model = imageModelById(els.imageModelSelect.value);
+  if (!model || !isSelectable(model)) {
+    setImageStatus('请选择可用的模型。', { error: true });
+    return;
+  }
+  let text = els.imagePrompt.value;
+  let recorded = null;
+  // 管理员参数行：只记录，不作为提示词
+  if (isAdmin()) {
+    const params = parseImageParams(text);
+    if (params) {
+      recorded = setImageParams(model.id, params);
+      text = stripImageParamLine(text);
+      els.imagePrompt.value = text;
+    }
+  }
+  if (!text.trim()) {
+    if (recorded) {
+      setImageStatus('已记录管理员生图参数（仅本机）。');
+      renderImageAdmin();
+      renderImageEffective();
+    } else {
+      setImageStatus('请先输入画面描述。', { error: true });
+    }
+    return;
+  }
+  if (!(await checkWebGPU())) {
+    setImageStatus(WEBGPU_MISSING, { error: true });
+    return;
+  }
+  const { hints } = getImageSettings(model.id);
+  const eff = currentImageSettings(model);
+  if (eff.seed === null) eff.seed = randomSeed();
+  const prompt = buildImagePrompt(text, hints);
+  const controller = new AbortController();
+  imageState.controller = controller;
+  setImageBusy(true);
+  setImageStatus('正在准备生图模型（首次使用需下载约 ' + formatGB(totalBytes(model)) + '）…');
+  try {
+    const res = await imageClient().generate(
+      { prompt, width: eff.width, height: eff.height, steps: eff.steps, guidance: eff.guidance, seed: eff.seed },
+      {
+        urls: sourceUrls(model),
+        signal: controller.signal,
+        onProgress: (p) => {
+          if (p.stage === 'denoise' && p.total) {
+            setImageStatus(`去噪中：第 ${p.step} / ${p.total} 步`);
+            setImageProgress(p.step / p.total);
+          } else if (p.message) {
+            setImageStatus(p.message);
+          }
+        },
+      },
+    );
+    const blob = await rgbaToPngBlob(res.rgba, res.width, res.height);
+    addImageResult({
+      url: URL.createObjectURL(blob),
+      filename: `${model.family || 'image'}-${eff.seed}-${res.width}x${res.height}.png`,
+      prompt: text.trim(),
+      width: res.width,
+      height: res.height,
+      steps: eff.steps,
+      guidance: eff.guidance,
+      seed: eff.seed,
+    });
+    setImageStatus(`已生成 ${res.width} × ${res.height}，种子 ${eff.seed}。`);
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      setImageStatus('已取消。下次生成时会重新加载生图模型。');
+    } else {
+      setImageStatus(imageErrorText(err), { error: true });
+    }
+  } finally {
+    imageState.controller = null;
+    setImageBusy(false);
+    renderImageAdmin();
+  }
+}
+
+function initImageMode() {
+  const usable = imageModels().some(isSelectable);
+  els.imageModeBtn.hidden = !(MODE === 'webllm' && usable);
+  if (!usable) return;
+  els.imageModeBtn.addEventListener('click', () => (imageState.active ? exitImageMode() : enterImageMode()));
+  els.imageForm.addEventListener('submit', runImageGenerate);
+  els.imagePrompt.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      els.imageForm.requestSubmit();
+    }
+  });
+  els.imageCancelBtn.addEventListener('click', () => imageState.controller?.abort());
+  els.imageModelSelect.addEventListener('change', () => {
+    fillImageControls(imageModelById(els.imageModelSelect.value));
+    renderImageAdmin();
+  });
+  els.imageRatio.addEventListener('change', () => {
+    if (els.imageRatio.value === 'custom') return;
+    const long = Math.max(Number(els.imageWidth.value) || 0, Number(els.imageHeight.value) || 0);
+    const size = sizeForRatio(els.imageRatio.value, long);
+    els.imageWidth.value = size.width;
+    els.imageHeight.value = size.height;
+    renderImageEffective();
+  });
+  for (const el of [els.imageWidth, els.imageHeight]) {
+    el.addEventListener('change', () => {
+      syncRatioSelect();
+      renderImageEffective();
+    });
+  }
+  for (const el of [els.imageSteps, els.imageGuidance, els.imageSeed]) {
+    el.addEventListener('input', renderImageEffective);
+  }
+  const addHint = () => {
+    const model = imageModelById(els.imageModelSelect.value);
+    if (!model || !requireAdmin('添加风格提示')) return;
+    const hint = addImageHint(model.id, els.imageHintInput.value);
+    if (!hint) {
+      setImageStatus('风格提示为空，或与已有的提示相同。', { error: true });
+      return;
+    }
+    els.imageHintInput.value = '';
+    renderImageAdmin();
+    renderImageEffective();
+    setImageStatus('已添加风格提示（仅本机，之后每次生图都会附加）。');
+  };
+  els.imageHintAdd.addEventListener('click', addHint);
+  els.imageHintInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      addHint();
+    }
+  });
+  els.imageParamsClear.addEventListener('click', () => {
+    const model = imageModelById(els.imageModelSelect.value);
+    if (!model || !requireAdmin('清除管理员生图参数')) return;
+    clearImageParams(model.id);
+    renderImageEffective();
+    setImageStatus('已清除管理员生图参数（界面控件的值重新生效）。');
+  });
+}
+
 async function loadAppConfig() {
   if (MODE === 'remote') {
     const c = await fetchConfig();
@@ -2192,6 +2643,8 @@ async function init() {
   document.title = appName;
 
   state.backend = createBackend({ mode: MODE, appConfig: state.appConfig });
+  // 生图按钮与事件需要在配置加载之后绑定
+  initImageMode();
   if (MODE === 'webllm') {
     // 启动时使用用户上次保存的默认模型（若仍在下拉框中），否则使用配置中的 defaultModel
     const availableIds = [...new Set([...state.backend.models.map((m) => m.id), ...loadLocalModels().map((e) => e.id)])];
@@ -2203,6 +2656,8 @@ async function init() {
       }),
     );
     renderModelOptions(state.backend.modelId);
+    renderPresetOptions();
+    els.presetSelect.hidden = false;
     els.modelSelect.hidden = false;
     els.modelSelect.title = '✓ 表示模型已下载到本机，可离线使用';
     els.modelLabel.hidden = true;
@@ -2211,6 +2666,7 @@ async function init() {
   } else {
     els.modelLabel.textContent = state.appConfig.model ? `模型：${state.appConfig.model}` : '';
     els.roleBtn.hidden = true;
+    els.presetSelect.hidden = true; // 预设只作用于本机模型
   }
 
   if (state.store.sessions.length === 0) createSession(state.store);

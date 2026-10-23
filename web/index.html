@@ -41,6 +41,8 @@
           <header class="chat-head">
             <button id="historyBtn" type="button" class="btn ghost small history-toggle" aria-expanded="false">历史</button>
             <span id="chatTitle" class="chat-title"></span>
+            <select id="presetSelect" class="model-select preset-select" aria-label="对话预设" title="对话预设（按浏览器保存）" hidden></select>
+            <button id="imageModeBtn" type="button" class="btn ghost small" aria-pressed="false" title="切换到生图模式：会先释放聊天模型的显存" hidden>生图</button>
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
             <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
             <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
@@ -94,6 +96,43 @@
             <div class="status-text" id="statusText"></div>
             <div class="progress" id="statusProgress" hidden><i id="statusBarFill"></i></div>
           </div>
+
+          <section id="imagePanel" class="image-panel" aria-label="生图" hidden>
+            <div class="image-controls">
+              <label class="image-field">模型 <select id="imageModelSelect" class="model-select"></select></label>
+              <label class="image-field">比例 <select id="imageRatio">
+                <option value="custom">自定义</option>
+                <option value="1:1">1:1</option>
+                <option value="4:3">4:3</option>
+                <option value="3:4">3:4</option>
+                <option value="16:9">16:9</option>
+                <option value="9:16">9:16</option>
+              </select></label>
+              <label class="image-field">宽 <input id="imageWidth" type="number" min="256" max="768" step="8" /></label>
+              <label class="image-field">高 <input id="imageHeight" type="number" min="256" max="768" step="8" /></label>
+              <label class="image-field">步数 <input id="imageSteps" type="number" min="1" max="50" step="1" /></label>
+              <label class="image-field">引导 <input id="imageGuidance" type="number" min="1" max="20" step="0.5" /></label>
+              <label class="image-field">种子 <input id="imageSeed" type="number" min="0" max="4294967295" placeholder="留空随机" /></label>
+            </div>
+            <p id="imageEffective" class="muted small"></p>
+            <form id="imageForm" class="image-composer">
+              <textarea id="imagePrompt" rows="2" placeholder="描述想要的画面（英文通常效果更好）。Enter 生成，Shift+Enter 换行"></textarea>
+              <button id="imageGenerateBtn" type="submit" class="btn primary">生成</button>
+              <button id="imageCancelBtn" type="button" class="btn danger" hidden>取消</button>
+            </form>
+            <p id="imageStatus" class="muted small" role="status"></p>
+            <div id="imageProgress" class="progress" hidden><i id="imageProgressFill"></i></div>
+            <div id="imageGallery" class="image-gallery"></div>
+            <div id="imageAdmin" class="image-admin" hidden>
+              <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42”即可记录生图参数（仅本机，直到清除）。下方的风格提示会附加到每次生图的提示词末尾；CLIP 只读取前 77 个 token。</p>
+              <div class="image-admin-row">
+                <input id="imageHintInput" type="text" placeholder="风格提示，例如：水彩风格，柔和光线" aria-label="风格提示" />
+                <button id="imageHintAdd" type="button" class="btn ghost small">添加风格提示</button>
+                <button id="imageParamsClear" type="button" class="btn ghost small">清除管理员生图参数</button>
+              </div>
+              <div id="imageHintList" class="local-list"></div>
+            </div>
+          </section>
 
           <form id="composer" class="composer">
             <textarea id="input" rows="1" placeholder="描述题目或粘贴代码。Enter 发送，Shift+Enter 换行"></textarea>
