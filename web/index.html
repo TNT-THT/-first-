@@ -140,7 +140,7 @@
             </div>
             <div id="imageGallery" class="image-gallery"></div>
             <div id="imageAdmin" class="image-admin" hidden>
-              <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42, inputTokens=8192”即可记录生图参数（仅本机，直到清除；inputTokens 为描述输入上限，默认 4096，最高 16384）。也可以单独写一行“更正：……”（需管理员密钥验证）记录为该生图 AI 的更正。更正与知识库放在每次生图提示词的最前面，完整保留、不被截断：若它们自身超过 CLIP 的约 75 个 token（中文每字通常占多个 token），将拒绝生成，请精简。画面描述过长时，末尾会被截断（风格提示最先被截掉），并提示截断了多少 token。</p>
+              <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42, inputTokens=8192”即可记录生图参数（仅本机，直到清除；inputTokens 为描述输入上限，默认 4096，最高 16384）。也可以单独写一行“更正：……”（需管理员密钥验证）记录为该生图 AI 的更正。更正与知识库放在每次生图提示词的最前面，完整保留、不被截断：若它们自身超过单段 CLIP 的 75 个可用 token（中文每字通常占多个 token），将拒绝生成，请精简。画面描述超过 75 个 token 时会分段编码，最多 4 段（约 300 个 token）；超出部分末尾被截断（风格提示最先被截掉），并提示截断了多少 token。若某个模型不支持分段，会自动改用单段并在状态中说明。</p>
               <div class="image-admin-row">
                 <input id="imageHintInput" type="text" placeholder="风格提示，例如：水彩风格，柔和光线" aria-label="风格提示" />
                 <button id="imageHintAdd" type="button" class="btn ghost small">添加风格提示</button>

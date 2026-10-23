@@ -116,15 +116,19 @@ export async function createSd15Runtime({ ort, sources, executionProviders = ['w
       const out = await textEncoder.run({ input_ids: tensor(type, ids, [1, SD15_CONTEXT_LENGTH]) });
       return readFloat(firstOutput(textEncoder, out));
     },
-    /** UNet 单步：sample 为 [batch, 4, h8, w8]，context 为 [batch, 77, D]，返回同形状的噪声预测。 */
-    async unet({ sample, timestep, context, batch, h8, w8 }) {
-      const hidden = context.length / (batch * SD15_CONTEXT_LENGTH);
+    /**
+     * UNet 单步：sample 为 [batch, 4, h8, w8]，context 为 [batch, seqLength, D]，返回同形状的噪声预测。
+     * seqLength 默认 77（单段）；分段编码时为 77 × 段数。固定形状的模型（如测试用微型模型）会拒绝不同的 seqLength，
+     * 由调用方回退到单段。
+     */
+    async unet({ sample, timestep, context, batch, h8, w8, seqLength = SD15_CONTEXT_LENGTH }) {
+      const hidden = context.length / (batch * seqLength);
       const feeds = {
         sample: tensor(typeOf(unet, 'sample'), sample, [batch, 4, h8, w8]),
         timestep: tensor(typeOf(unet, 'timestep'), [timestep], [1]),
         encoder_hidden_states: tensor(typeOf(unet, 'encoder_hidden_states'), context, [
           batch,
-          SD15_CONTEXT_LENGTH,
+          seqLength,
           hidden,
         ]),
       };
