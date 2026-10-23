@@ -12,12 +12,19 @@
 import { isSelectable, sourceUrls } from './catalog.js';
 
 export const IMAGE_CACHE = 'oj-ai-image-models-v1';
+// 分段下载的临时数据（与完整文件分开保存；文件完整后移入 IMAGE_CACHE 并删除分段）
+export const IMAGE_PART_CACHE = 'oj-ai-image-parts-v1';
 export const IMAGE_MODEL_EXT = '.ojimage';
 export const IMAGE_FILE_FORMAT = 'oj-ai-image-model';
 export const IMAGE_FILE_VERSION = 1;
 const MAGIC = 'OJMD';
 const PREFIX_BYTES = 8;
 const MAX_HEADER_BYTES = 1024 * 1024;
+/** 超过此大小的文件按分段下载（每段 64 MB），中断后只需重下未完成的段。 */
+export const PART_BYTES = 64 * 1024 * 1024;
+/** 同一文件内同时下载的段数。 */
+export const PART_CONCURRENCY = 4;
+const PART_ORIGIN = 'https://cache.oj-ai.invalid/parts/';
 
 function safeName(id) {
   return String(id).replace(/[^A-Za-z0-9._-]+/g, '_');
@@ -31,54 +38,254 @@ async function openCache(storage) {
   return storage.open(IMAGE_CACHE);
 }
 
+async function openParts(storage) {
+  return storage.open(IMAGE_PART_CACHE);
+}
+
 async function cachedUrls(storage) {
   const cache = await openCache(storage);
   return new Set((await cache.keys()).map((req) => req.url));
 }
 
+function partPrefix(url) {
+  return `${PART_ORIGIN}${encodeURIComponent(url)}/`;
+}
+
+function partKey(url, index) {
+  return `${partPrefix(url)}${index}`;
+}
+
+function usesParts(size, partBytes) {
+  return size > partBytes;
+}
+
+function partRange(size, partBytes, index) {
+  const start = index * partBytes;
+  const end = Math.min(size, start + partBytes) - 1; // 含端点
+  return { start, end, length: end - start + 1 };
+}
+
+function partCount(size, partBytes) {
+  return Math.ceil(size / partBytes);
+}
+
+/** 已缓存的分段（仅统计长度与配置一致的段）。返回 { indices: Set, bytes }。 */
+async function cachedParts(parts, url, size, partBytes) {
+  const indices = new Set();
+  let bytes = 0;
+  for (let i = 0; i < partCount(size, partBytes); i += 1) {
+    const res = await parts.match(partKey(url, i));
+    if (!res) continue;
+    const len = Number(res.headers.get('content-length'));
+    if (len !== partRange(size, partBytes, i).length) continue;
+    indices.add(i);
+    bytes += len;
+  }
+  return { indices, bytes };
+}
+
 /**
  * 模型文件的缓存状态。
- * @returns {Promise<{total: number, cached: number, complete: boolean, missing: string[], bytes: number}>}
+ * - complete / cached / missing：完整文件的情况（与之前相同）。
+ * - partialBytes / partsCached：未完成文件中已保存的分段（可续传，不会重下）。
+ * - doneBytes：已完成文件与已保存分段的字节数合计，用于显示进度。
+ * @returns {Promise<{total: number, cached: number, complete: boolean, missing: string[], bytes: number, partialBytes: number, partsCached: number, doneBytes: number}>}
  */
-export async function imageCacheStatus(model, { storage = globalThis.caches } = {}) {
+export async function imageCacheStatus(model, { storage = globalThis.caches, partBytes = PART_BYTES } = {}) {
   const urls = sourceUrls(model);
   const keys = Object.keys(urls);
   const have = await cachedUrls(storage);
   const missing = keys.filter((k) => !have.has(urls[k]));
-  const bytes = keys.reduce((n, k) => n + (Number(model.files[k]?.size) || 0), 0);
-  return { total: keys.length, cached: keys.length - missing.length, complete: missing.length === 0, missing, bytes };
+  const sizeOf = (k) => Number(model.files[k]?.size) || 0;
+  const bytes = keys.reduce((n, k) => n + sizeOf(k), 0);
+  let partialBytes = 0;
+  let partsCached = 0;
+  const parts = await openParts(storage);
+  for (const k of missing) {
+    if (!usesParts(sizeOf(k), partBytes)) continue;
+    const got = await cachedParts(parts, urls[k], sizeOf(k), partBytes);
+    partialBytes += got.bytes;
+    partsCached += got.indices.size;
+  }
+  const doneBytes = keys.filter((k) => !missing.includes(k)).reduce((n, k) => n + sizeOf(k), 0) + partialBytes;
+  return {
+    total: keys.length,
+    cached: keys.length - missing.length,
+    complete: missing.length === 0,
+    missing,
+    bytes,
+    partialBytes,
+    partsCached,
+    doneBytes,
+  };
 }
 
+/** 分段下载时服务器忽略了 Range 头（返回 200），改为整文件下载。 */
+class RangeUnsupported extends Error {}
+
 /**
- * 下载模型文件到本机缓存。已缓存的文件跳过；任一文件失败时抛出错误，已完成的文件保留（可以续传）。
+ * 下载模型文件到本机缓存。
+ * - 已完整的文件跳过；大文件的已完成分段也跳过，因此中断后再次点击会从断点继续（不会从头重下）。
+ * - 大文件按 PART_BYTES 分段，段之间并行下载，提高吞吐量。
+ * - 任一步失败时抛出错误；已完成的文件与分段保留。
  * @param {object} p
- * @param {(p: {done: number, total: number, key: string}) => void} [p.onProgress]
+ * @param {(p: {done: number, total: number, key: string|null, bytes: number, totalBytes: number}) => void} [p.onProgress]
+ *   done/total 为文件数；bytes/totalBytes 为字节数（包括上次已保存的部分）。开始时会先报告一次（key 为 null）。
  */
-export async function downloadImageModel(model, { storage = globalThis.caches, fetchImpl = globalThis.fetch, onProgress, signal } = {}) {
+export async function downloadImageModel(
+  model,
+  {
+    storage = globalThis.caches,
+    fetchImpl = globalThis.fetch,
+    onProgress,
+    signal,
+    partBytes = PART_BYTES,
+    concurrency = PART_CONCURRENCY,
+  } = {},
+) {
   if (!isSelectable(model)) throw new Error('该模型暂不可用，无法下载');
   const urls = sourceUrls(model);
-  const status = await imageCacheStatus(model, { storage });
+  const status = await imageCacheStatus(model, { storage, partBytes });
   const cache = await openCache(storage);
+  const parts = await openParts(storage);
+  const sizeOf = (k) => Number(model.files[k].size) || 0;
+  const totalBytes = status.bytes;
+  let bytes = status.doneBytes;
   let done = status.cached;
+  const total = status.total;
+  onProgress?.({ done, total, key: null, bytes, totalBytes });
+
+  // 每完成一段（或一个小文件）就报告一次字节进度
+  let current = null;
+  const addBytes = (n) => {
+    bytes += n;
+    onProgress?.({ done, total, key: current, bytes, totalBytes });
+  };
+
   for (const key of status.missing) {
     const url = urls[key];
-    const res = await fetchImpl(url, { signal });
-    if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）：${model.files[key].path}`);
-    await cache.put(url, res);
+    const size = sizeOf(key);
+    current = key;
+    if (usesParts(size, partBytes)) {
+      try {
+        await downloadInParts({ url, path: model.files[key].path, size, parts, cache, fetchImpl, signal, partBytes, concurrency, addBytes });
+      } catch (err) {
+        if (!(err instanceof RangeUnsupported)) throw err;
+        // 服务器不支持分段：整文件下载（此时无法断点续传，但仍然正确）
+        await downloadWhole({ url, path: model.files[key].path, cache, fetchImpl, signal });
+        addBytes(size);
+      }
+    } else {
+      await downloadWhole({ url, path: model.files[key].path, cache, fetchImpl, signal });
+      addBytes(size);
+    }
+    current = null;
     done += 1;
-    onProgress?.({ done, total: status.total, key });
+    onProgress?.({ done, total, key, bytes, totalBytes });
   }
-  const after = await imageCacheStatus(model, { storage });
+  const after = await imageCacheStatus(model, { storage, partBytes });
   if (!after.complete) throw new Error(`下载不完整，缺少 ${after.missing.length} 个文件`);
   return after;
 }
 
-/** 删除该模型在本机缓存中的全部文件。返回删除的文件数。 */
+async function downloadWhole({ url, path, cache, fetchImpl, signal }) {
+  const res = await fetchImpl(url, { signal });
+  if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）：${path}`);
+  await cache.put(url, res);
+}
+
+async function downloadInParts({ url, path, size, parts, cache, fetchImpl, signal, partBytes, concurrency, addBytes }) {
+  const n = partCount(size, partBytes);
+  const have = await cachedParts(parts, url, size, partBytes);
+  const todo = [];
+  for (let i = 0; i < n; i += 1) if (!have.indices.has(i)) todo.push(i);
+
+  // 用户取消时中止所有进行中的请求；某段失败时不再启动新段，但进行中的段仍会完成并保存（不浪费已下载的数据）
+  const inner = new AbortController();
+  const onAbort = () => inner.abort();
+  signal?.addEventListener('abort', onAbort);
+  const fetchPart = async (i) => {
+    const { start, end, length } = partRange(size, partBytes, i);
+    const res = await fetchImpl(url, { signal: inner.signal, headers: { Range: `bytes=${start}-${end}` } });
+    if (res.status === 200) {
+      await res.body?.cancel();
+      throw new RangeUnsupported();
+    }
+    if (res.status !== 206) throw new Error(`下载失败（HTTP ${res.status}）：${path}（第 ${i + 1}/${n} 段）`);
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (buf.length !== length) throw new Error(`分段大小不符（第 ${i + 1}/${n} 段）：${path}`);
+    await parts.put(partKey(url, i), new Response(buf, { headers: { 'content-length': String(length) } }));
+    addBytes(length);
+  };
+  let failure = null;
+  let next = 0;
+  const worker = async () => {
+    while (!failure && next < todo.length) {
+      const i = todo[next];
+      next += 1;
+      try {
+        await fetchPart(i);
+      } catch (err) {
+        failure ??= err;
+        return;
+      }
+    }
+  };
+  try {
+    const workers = Array.from({ length: Math.min(Math.max(1, concurrency), todo.length) }, worker);
+    await Promise.all(workers);
+  } finally {
+    signal?.removeEventListener('abort', onAbort);
+  }
+  if (failure) throw failure;
+
+  // 全部分段就绪：按顺序拼接成完整文件放入 IMAGE_CACHE，然后删除分段
+  let index = 0;
+  let reader = null;
+  const body = new ReadableStream({
+    async pull(controller) {
+      for (;;) {
+        if (!reader) {
+          if (index >= n) {
+            controller.close();
+            return;
+          }
+          const res = await parts.match(partKey(url, index));
+          if (!res) {
+            controller.error(new Error(`缓存分段丢失（第 ${index + 1}/${n} 段）：${path}`));
+            return;
+          }
+          reader = res.body.getReader();
+        }
+        const { done, value } = await reader.read();
+        if (done) {
+          reader = null;
+          index += 1;
+          continue;
+        }
+        controller.enqueue(value);
+        return;
+      }
+    },
+    cancel() {
+      reader?.cancel();
+    },
+  });
+  await cache.put(url, new Response(body, { headers: { 'content-length': String(size) } }));
+  for (let i = 0; i < n; i += 1) await parts.delete(partKey(url, i));
+}
+
+/** 删除该模型在本机缓存中的全部文件（含未完成下载的分段）。返回删除的完整文件数。 */
 export async function deleteImageModelFiles(model, { storage = globalThis.caches } = {}) {
   const cache = await openCache(storage);
+  const parts = await openParts(storage);
   let removed = 0;
   for (const url of Object.values(sourceUrls(model))) {
     if (await cache.delete(url)) removed += 1;
+    const prefix = partPrefix(url);
+    for (const req of await parts.keys()) {
+      if (req.url.startsWith(prefix)) await parts.delete(req.url);
+    }
   }
   return removed;
 }

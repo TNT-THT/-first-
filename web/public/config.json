@@ -272,7 +272,7 @@
       "family": "sd15",
       "repo": "nmkd/stable-diffusion-1.5-onnx",
       "revision": "main",
-      "status": "available",
+      "status": "unavailable",
       "license": "CreativeML OpenRAIL-M",
       "defaults": {
         "width": 512,
@@ -310,7 +310,7 @@
           "size": 493
         }
       },
-      "note": "非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB，内存占用明显高于 fp16 版。适用于 fp16 在本机无法创建会话的情况（例如浏览器的 WebGPU 缺少 fp16 算子支持）。文件路径与大小已由 Hugging Face 元数据核对；图结构、显存占用与生成效果未在浏览器中验证。仓库不含安全检查器，生成内容不经过自动过滤。"
+      "note": "非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB。网页版暂不可用：UNet 权重（约 3.4 GB）超过浏览器单个文件 2 GB 的上限，无法在网页中加载，因此也不提供下载。可使用本机 Python 脚本（scripts/image/sd15_local.py）运行，见 README。"
     },
     {
       "id": "flux2-klein-4b-onnx-webgpu",

@@ -32,5 +32,6 @@ test('其余文件仍使用模型自己的仓库', () => {
 
 test('fp32 模型不需要备选文件（它的文本编码器本身就是 fp32）', () => {
   assert.equal(fp32.files.textEncoderFallback, undefined);
-  assert.equal(isSelectable(fp32), true);
+  // 网页版 fp32 暂不可用（UNet 权重超过浏览器单文件上限），只保留给本机 Python 脚本
+  assert.equal(isSelectable(fp32), false);
 });

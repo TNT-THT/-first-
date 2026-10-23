@@ -24,11 +24,13 @@ function memoryCaches() {
           return [...m.keys()].map((url) => ({ url }));
         },
         async match(url) {
-          return m.has(url) ? new Response(m.get(url).slice(), { status: 200 }) : undefined;
+          if (!m.has(url)) return undefined;
+          const e = m.get(url);
+          return new Response(e.bytes.slice(), { status: 200, headers: e.headers });
         },
         async put(url, res) {
           if (!res.ok) throw new TypeError('bad response');
-          m.set(url, new Uint8Array(await res.arrayBuffer()));
+          m.set(url, { bytes: new Uint8Array(await res.arrayBuffer()), headers: Object.fromEntries(res.headers) });
         },
         async delete(url) {
           return m.delete(url);
@@ -89,7 +91,8 @@ test('下载：全部写入缓存，第二次下载不会重复请求（续传�
   const st = await downloadImageModel(model(), { storage, fetchImpl: f, onProgress: (p) => progress.push(p.done) });
   assert.equal(st.complete, true);
   assert.equal(f.calls.length, 3);
-  assert.deepEqual(progress, [1, 2, 3]);
+  // 进度包括字节级事件，done（已完成文件数）应按 0,1,2,3 递增，中间不回退
+  assert.deepEqual([...new Set(progress)], [0, 1, 2, 3], '开始时先报告 0，之后每个文件完成时递增');
   const again = fakeFetch();
   await downloadImageModel(model(), { storage, fetchImpl: again });
   assert.equal(again.calls.length, 0);
@@ -143,7 +146,7 @@ test('导出与导入：往返后缓存内容完全一致，文件名与头部�
   assert.equal(res.entryCount, 3);
   assert.equal((await imageCacheStatus(model(), { storage: dst })).complete, true);
   for (const url of Object.values(sourceUrls(model()))) {
-    assert.deepEqual(store(dst).get(url), store(src).get(url));
+    assert.deepEqual(store(dst).get(url).bytes, store(src).get(url).bytes);
   }
 });
 
