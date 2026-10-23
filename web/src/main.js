@@ -3003,6 +3003,11 @@ async function runImageGenerate(event) {
     setImageStatus('请选择可用的模型。', { error: true });
     return;
   }
+  // 下载进行中时不生成：生成会补下缺少的字节，与下载同时写同一份分段缓存会互相干扰
+  if (imageState.downloadCtl) {
+    setImageStatus('正在下载模型，请等待下载完成（或先取消下载）后再生成。', { error: true });
+    return;
+  }
   let text = els.imagePrompt.value;
   let recorded = null;
   // 管理员参数行：只记录，不作为提示词

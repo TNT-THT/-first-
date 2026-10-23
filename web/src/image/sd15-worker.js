@@ -22,7 +22,8 @@ import { createSd15Runtime } from './sd15-runtime.js';
 import { createClipTokenizer, parseMerges } from './clip-tokenizer.js';
 import { createScheduler, parseSchedulerConfig } from './schedulers.js';
 import { chwToRgba, generateSd15WithFallback } from './sd15.js';
-import { IMAGE_CACHE, oversizedFiles, MAX_BROWSER_FILE_BYTES } from './model-files.js';
+import { oversizedFiles, MAX_BROWSER_FILE_BYTES, createLimiter, PART_CONCURRENCY } from './model-files.js';
+import { openModelFile } from './model-source.js';
 import { rewritePowToMul } from './onnx-pow.js';
 import { loadFraction } from './load-progress.js';
 import { checkPromptBudget, MAX_PROMPT_CHUNKS } from './prompt-budget.js';
@@ -34,17 +35,18 @@ ort.env.wasm.wasmPaths = new URL('../ort/', self.location.href).href;
 let loadedKey = null;
 let state = null;
 
+// 所有文件的读取（包括生成时补下缺少的部分）共用同一并发上限
+const workerLimit = createLimiter(PART_CONCURRENCY);
+
 /**
- * 读取一个模型文件（字节）。优先使用本机缓存（下载或导入的文件），没有则从 Hugging Face 读取。
- * 按字节上报进度；expected 为配置中的大小，用于预分配内存。
+ * 读取一个模型文件（字节）。优先使用本机完整缓存；下载到一半的文件只补下缺少的字节（不重下已保存的部分）；
+ * 什么都没有则从 Hugging Face 读取。按字节上报进度；expected 为配置中的大小，用于预分配内存。
  */
 async function loadBytes(url, expected, onBytes) {
-  let res;
-  if (typeof caches !== 'undefined') {
-    const cache = await caches.open(IMAGE_CACHE);
-    res = await cache.match(url);
-  }
-  if (!res) res = await fetch(url);
+  const res = await openModelFile(url, expected, {
+    storage: typeof caches !== 'undefined' ? caches : null,
+    limit: workerLimit,
+  });
   if (!res.ok) throw new Error(`读取失败（${res.status}）：${url}`);
   if (!res.body) {
     const buf = new Uint8Array(await res.arrayBuffer());
