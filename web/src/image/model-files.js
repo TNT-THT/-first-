@@ -23,7 +23,8 @@ const MAX_HEADER_BYTES = 1024 * 1024;
 /** 超过此大小的文件按分段下载（每段 64 MB），中断后只需重下未完成的段。 */
 export const PART_BYTES = 64 * 1024 * 1024;
 /** 同一文件内同时下载的段数。 */
-export const PART_CONCURRENCY = 4;
+// 同时下载的请求数上限（文件与分段共用）。每段约 64 MB 会整段读入内存，峰值约 12 × 64 MB ≈ 768 MB。
+export const PART_CONCURRENCY = 12;
 const PART_ORIGIN = 'https://cache.oj-ai.invalid/parts/';
 
 function safeName(id) {
