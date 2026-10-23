@@ -80,7 +80,7 @@ function server(options = {}) {
     fn.maxInflight = Math.max(fn.maxInflight, inflight);
     try {
       if (options.delayMs) await new Promise((r) => setTimeout(r, options.delayMs));
-      const fault = options.faults?.[seq];
+      const fault = options.faultFor ? options.faultFor(name, range) : options.faults?.[seq];
       if (fault === 'network') throw new TypeError('network error');
       if (fault === 'abort') {
         options.ctl?.abort();
@@ -164,6 +164,7 @@ test('退避间隔按 2 的幂递增，并受上限限制', async () => {
       signal: ctl.signal,
       retryBaseMs: 1,
       retryMaxMs: 3,
+      concurrency: 1, // 单个文件的退避序列（并行时各文件各自退避）
       sleep: async (ms, signal) => {
         waits.push(ms);
         if (waits.length === 4) ctl.abort(); // 第 4 次等待后用户取消
@@ -199,8 +200,9 @@ test('永久错误（404）：不中断，其他文件照常下载；全部完�
 test('并行时某段永久错误：其他进行中的段仍会完成并保存，续传只重下失败的段', async () => {
   const storage = memoryCaches();
   // 三段同时发出（并行 4）；第 2 次请求（第 2 段）返回 404，第 1、3 段正常完成
+  // 只让 unetWeights 的第 2 段（bytes=4-7）返回 404
   await assert.rejects(
-    downloadImageModel(model(), { storage, fetchImpl: server({ faults: { 1: 404 }, delayMs: 5 }), partBytes: 4, concurrency: 4, sleep: instantSleep }),
+    downloadImageModel(model(), { storage, fetchImpl: server({ faultFor: (name, range) => (range === 'bytes=4-7' ? 404 : undefined), delayMs: 5 }), partBytes: 4, concurrency: 4, sleep: instantSleep }),
     /缓存校验未通过/,
   );
   const st = await imageCacheStatus(model(), { storage, partBytes: 4 });
@@ -301,7 +303,8 @@ test('取消：取消后立即停止（包括重试等待中），并抛出 Abor
     downloadImageModel(model(), { storage, fetchImpl: f, signal: ctl.signal, sleep }),
     (err) => err.name === 'AbortError',
   );
-  assert.equal(f.calls.length, 1, '等待中被取消，没有继续重试');
+  // 两个文件各发出一次请求（并行），取消后没有再重试
+  assert.equal(f.calls.length, 2, '取消后没有继续重试');
 });
 
 test('删除：同时删除未完成下载的分段', async () => {
@@ -327,4 +330,44 @@ test('删除：同时删除未完成下载的分段', async () => {
 test('不可用的模型（如网页版 fp32）拒绝下载', async () => {
   const storage = memoryCaches();
   await assert.rejects(downloadImageModel(model({ status: 'unavailable' }), { storage, fetchImpl: server() }), /暂不可用/);
+});
+
+test('文件并行：多个文件与分段共用同一并发上限（同时最多 concurrency 个请求，且不止 1 个）', async () => {
+  const storage = memoryCaches();
+  const data = {
+    'f1.bin': Uint8Array.from([1, 2]),
+    'f2.bin': Uint8Array.from([3, 4]),
+    'f3.bin': Uint8Array.from([5, 6]),
+    'f4.bin': Uint8Array.from([7, 8]),
+    'f5.bin': Uint8Array.from([9, 10]),
+    'big.bin': Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
+  };
+  let inflight = 0;
+  let maxInflight = 0;
+  const fetchImpl = async (url, opts = {}) => {
+    const name = Object.keys(data).find((p) => url.endsWith(`/${p}`));
+    if (!name) return new Response('nope', { status: 404 });
+    inflight += 1;
+    maxInflight = Math.max(maxInflight, inflight);
+    try {
+      await new Promise((r) => setTimeout(r, 5));
+      const range = opts.headers?.Range;
+      if (range) {
+        const m = /bytes=(\d+)-(\d+)/.exec(range);
+        return new Response(data[name].slice(Number(m[1]), Number(m[2]) + 1), { status: 206 });
+      }
+      return new Response(data[name].slice(), { status: 200 });
+    } finally {
+      inflight -= 1;
+    }
+  };
+  const files = Object.fromEntries(
+    Object.keys(data).map((p) => [p.replace('.bin', ''), { path: p, size: data[p].length }]),
+  );
+  const m = { id: 'parallel-files', label: '并行文件', family: 'sd15', repo: 'org/repo', revision: 'main', status: 'available', files };
+  const st = await downloadImageModel(m, { storage, fetchImpl, partBytes: 4, concurrency: 4, sleep: instantSleep });
+  assert.equal(st.complete, true);
+  assert.ok(maxInflight >= 2, `最大并行请求数为 ${maxInflight}，文件没有并行`);
+  assert.ok(maxInflight <= 4, `最大并行请求数为 ${maxInflight}，超过上限 4`);
+  assert.deepEqual(await cachedBytes(storage, sourceUrls(m).big), data['big.bin']);
 });
