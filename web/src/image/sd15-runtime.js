@@ -2,6 +2,13 @@
  * SD 1.5 的 ONNX Runtime 适配层：加载三个会话（文本编码器、UNet、VAE 解码器），
  * 按每个输入的实际数据类型（float32 / float16 / int32 / int64）创建张量，并检查输入名称。
  * ort 通过参数注入：浏览器 worker 使用 onnxruntime-web/webgpu，Node 测试使用同一个包的 wasm 后端。
+ *
+ * 会话创建的执行方案（sessionPlans）：
+ *   1. WebGPU，图优化级别 basic。WebGPU 执行提供程序在 extended / all 级别的图优化下有已知问题
+ *      （融合后的算子在 WebGPU 上输出异常或无法创建会话，见 microsoft/onnxruntime#32145）。
+ *   2. 失败时退回 CPU（wasm，图优化 all）。CPU 较慢，但能让同一个模型继续工作。
+ * 每个会话只使用单一执行提供程序，不再把 webgpu 与 wasm 混合（混合时 ORT 需要插入跨设备拷贝，
+ * 这一步在部分模型上会因算子未分配执行提供程序而失败）。
  */
 import { decodeFromType, encodeForType } from './tensor-types.js';
 
@@ -11,31 +18,72 @@ export const SD15_INPUTS = {
   vaeDecoder: ['latent_sample'],
 };
 export const SD15_CONTEXT_LENGTH = 77;
+export const SD15_SESSION_NAMES = { textEncoder: '文本编码器', unet: 'UNet', vaeDecoder: 'VAE 解码器' };
+
+/**
+ * 某个会话的执行方案（按顺序尝试）。executionProviders 含 'webgpu' 时先尝试 WebGPU，始终以 CPU 结尾。
+ * @returns {Array<{label: string, executionProviders: string[], graphOptimizationLevel: string}>}
+ */
+export function sessionPlans(executionProviders = ['wasm']) {
+  const plans = [];
+  if (executionProviders.includes('webgpu')) {
+    plans.push({ label: 'WebGPU', executionProviders: ['webgpu'], graphOptimizationLevel: 'basic' });
+  }
+  plans.push({ label: 'CPU', executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+  return plans;
+}
 
 /**
  * @param {object} p
  * @param {object} p.ort            onnxruntime-web 模块（需提供 InferenceSession 与 Tensor）
- * @param {object} p.sources        {textEncoder, unet, unetExternal?, vaeDecoder}：URL 字符串或 Uint8Array
- *                                  unetExternal 形如 {path: 'weights.pb', data: url|Uint8Array}
+ * @param {object} p.sources        {textEncoder, unet, unetExternal?, vaeDecoder}
+ *                                  每项可以是 URL 字符串、Uint8Array，或返回其中之一的函数（按需读取，读取一次）。
+ *                                  unetExternal 形如 {path: 'weights.pb', data: url|Uint8Array|function}
  * @param {string[]} [p.executionProviders]
+ * @param {(e: object) => void} [p.onSession] 会话进度：{phase: 'start'|'done'|'failed', key, label, plan, index, total, message?}
  */
-export async function createSd15Runtime({ ort, sources, executionProviders = ['wasm'] }) {
-  const base = { executionProviders, graphOptimizationLevel: 'all' };
+export async function createSd15Runtime({ ort, sources, executionProviders = ['wasm'], onSession }) {
   const sessions = [];
-  const open = async (src, extra = {}) => {
-    const s = await ort.InferenceSession.create(src, { ...base, ...extra });
-    sessions.push(s);
-    return s;
+  const plansUsed = {};
+  const keys = ['textEncoder', 'unet', 'vaeDecoder'];
+  const resolve = async (v) => (typeof v === 'function' ? v() : v);
+  const open = async (key, src, extra = {}, index) => {
+    const label = SD15_SESSION_NAMES[key];
+    const errors = [];
+    // 读取一次，之后的方案复用同一份数据
+    const data = await resolve(src);
+    for (const plan of sessionPlans(executionProviders)) {
+      onSession?.({ phase: 'start', key, label, plan: plan.label, index, total: keys.length });
+      try {
+        const s = await ort.InferenceSession.create(data, {
+          executionProviders: plan.executionProviders,
+          graphOptimizationLevel: plan.graphOptimizationLevel,
+          ...extra,
+        });
+        sessions.push(s);
+        plansUsed[key] = plan.label;
+        onSession?.({ phase: 'done', key, label, plan: plan.label, index, total: keys.length });
+        return s;
+      } catch (err) {
+        const message = err?.message || String(err);
+        errors.push(`${plan.label}：${message}`);
+        onSession?.({ phase: 'failed', key, label, plan: plan.label, index, total: keys.length, message });
+      }
+    }
+    throw new Error(`无法创建${label}会话。${errors.join('；')}`);
   };
+
   let textEncoder;
   let unet;
   let vaeDecoder;
   try {
-    textEncoder = await open(sources.textEncoder);
-    unet = await open(sources.unet, sources.unetExternal ? { externalData: [sources.unetExternal] } : {});
-    vaeDecoder = await open(sources.vaeDecoder);
+    textEncoder = await open('textEncoder', sources.textEncoder, {}, 0);
     expectInputs(textEncoder, SD15_INPUTS.textEncoder, '文本编码器');
+    const ext = sources.unetExternal;
+    const unetExtra = ext ? { externalData: [{ path: ext.path, data: await resolve(ext.data) }] } : {};
+    unet = await open('unet', sources.unet, unetExtra, 1);
     expectInputs(unet, SD15_INPUTS.unet, 'UNet');
+    vaeDecoder = await open('vaeDecoder', sources.vaeDecoder, {}, 2);
     expectInputs(vaeDecoder, SD15_INPUTS.vaeDecoder, 'VAE 解码器');
   } catch (err) {
     for (const s of sessions) s.release?.();
@@ -48,6 +96,8 @@ export async function createSd15Runtime({ ort, sources, executionProviders = ['w
   const readFloat = (t) => decodeFromType(t.type, t.data);
 
   return {
+    /** 每个会话实际使用的方案（WebGPU 或 CPU）。 */
+    plans: plansUsed,
     /** 文本编码：ids 为 [77] 的 int32，返回 [77 × D] 的 Float32Array。 */
     async encode(ids) {
       const type = typeOf(textEncoder, 'input_ids');

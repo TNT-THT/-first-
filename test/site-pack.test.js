@@ -123,3 +123,41 @@ test('启动文件：源文件存在，且中文文件名与权限位正确写�
   assert.equal(modes['start-windows.bat'], 0o100644);
   assert.equal(readZip(zip)['使用说明.txt'].toString('utf8'), 'x');
 });
+
+test('网站包：生图模块源码在打包范围内，模型文件被排除', () => {
+  const entries = [
+    { path: 'web/src/image/sd15-worker.js', size: 1000 },
+    { path: 'web/src/image/model-files.js', size: 1000 },
+    { path: 'web/src/image/gallery-store.js', size: 1000 },
+    { path: 'web/src/image/zip.js', size: 1000 },
+    { path: 'web/src/image/gallery-archive.js', size: 1000 },
+    { path: 'web/dist/assets/sd15-worker.js', size: 1000 },
+    { path: 'web/public/models/example.ojimage', size: 1000 },
+    { path: 'web/public/models/example.ojmodel', size: 1000 },
+  ];
+  const { included, excluded } = selectSiteFiles(entries);
+  assert.ok(included.includes('web/src/image/sd15-worker.js'));
+  assert.ok(included.includes('web/src/image/model-files.js'));
+  assert.ok(included.includes('web/src/image/gallery-store.js'));
+  assert.ok(included.includes('web/src/image/zip.js'));
+  assert.ok(included.includes('web/src/image/gallery-archive.js'));
+  assert.ok(included.includes('web/dist/assets/sd15-worker.js'));
+  assert.equal(exclusionReason('web/public/models/example.ojimage'), '模型或权重文件');
+  assert.equal(exclusionReason('web/public/models/example.ojmodel'), '模型或权重文件');
+  assert.deepEqual(excluded.map((e) => e.path).sort(), ['web/public/models/example.ojimage', 'web/public/models/example.ojmodel']);
+});
+
+test('网站包：超过 20 MB 的运行库（ORT wasm）不打包', () => {
+  assert.equal(exclusionReason('web/public/ort/ort-wasm-simd-threaded.jsep.wasm', 28_300_000), '文件过大');
+});
+
+test('网站包：生图运行库（dist/ort）可以超过 20 MB，但有 40 MB 上限；其他文件仍为 20 MB', () => {
+  const wasm = 'web/dist/ort/ort-wasm-simd-threaded.jsep.wasm';
+  const { included } = selectSiteFiles([
+    { path: wasm, size: 28_300_000 },
+    { path: 'web/dist/ort/ort-wasm-simd-threaded.jsep.mjs', size: 60_000 },
+  ]);
+  assert.ok(included.includes(wasm));
+  assert.equal(exclusionReason(wasm, 45 * 1024 * 1024), '文件过大');
+  assert.equal(exclusionReason('web/dist/assets/big.js', 21 * 1024 * 1024), '文件过大');
+});

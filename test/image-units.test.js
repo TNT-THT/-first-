@@ -12,13 +12,18 @@ import { floatToHalfBits, halfBitsToFloat, encodeForType, decodeFromType } from 
 import {
   IMAGE_STORAGE_KEY,
   MAX_IMAGE_HINTS,
+  addImageCorrection,
   addImageHint,
+  addImageKnowledge,
   buildImagePrompt,
   clearImageParams,
   effectiveImageSettings,
   getImageSettings,
+  imageLeadTexts,
   parseImageParams,
+  removeImageCorrection,
   removeImageHint,
+  removeImageKnowledge,
   setImageParams,
   stripImageParamLine,
 } from '../web/src/image/params.js';
@@ -284,7 +289,34 @@ test('参数存储：按模型分别保存，清除只影响该模型', () => {
 
 test('参数存储：损坏的 JSON 视为空', () => {
   const storage = memoryStorage({ [IMAGE_STORAGE_KEY]: '{not json' });
-  assert.deepEqual(getImageSettings('x', { storage }), { params: {}, hints: [] });
+  assert.deepEqual(getImageSettings('x', { storage }), { params: {}, hints: [], corrections: [], knowledge: [] });
+});
+
+test('更正与知识库：按生图模型分别保存、去重、可删除，且不影响风格提示', () => {
+  const storage = memoryStorage();
+  const now = 1700000000000;
+  assert.ok(addImageCorrection('sd', '猫是橘色的', { storage, now }));
+  assert.equal(addImageCorrection('sd', '猫是橘色的', { storage, now }), null, '重复的更正不再保存');
+  assert.equal(addImageCorrection('sd', '   ', { storage, now }), null, '空文本不保存');
+  const kb = addImageKnowledge('sd', '白天的天空是蓝色', { storage, now });
+  assert.ok(kb);
+  addImageHint('sd', '水彩风格', { storage, now });
+  const s = getImageSettings('sd', { storage });
+  assert.deepEqual(s.corrections.map((n) => n.text), ['猫是橘色的']);
+  assert.deepEqual(s.knowledge.map((n) => n.text), ['白天的天空是蓝色']);
+  assert.deepEqual(s.hints.map((h) => h.text), ['水彩风格']);
+  assert.deepEqual(getImageSettings('other', { storage }).corrections, [], '其他模型不受影响');
+  assert.equal(removeImageCorrection('sd', kb.id, { storage }), false, '删除的 id 必须属于更正列表');
+  assert.equal(removeImageKnowledge('sd', kb.id, { storage }), true);
+  assert.deepEqual(getImageSettings('sd', { storage }).knowledge, []);
+});
+
+test('提示词：更正与知识库放在最前面；不传前置内容时与旧格式相同', () => {
+  const hints = [{ text: '水彩风格' }];
+  assert.equal(buildImagePrompt('一只猫', hints), '一只猫, 水彩风格');
+  assert.equal(buildImagePrompt('一只猫', hints, []), '一只猫, 水彩风格');
+  assert.equal(buildImagePrompt('一只猫', hints, ['猫是橘色的', ' 白天 ']), '猫是橘色的, 白天, 一只猫, 水彩风格');
+  assert.equal(imageLeadTexts({ corrections: [{ text: 'A' }], knowledge: [{ text: 'B' }] }).join('|'), 'A|B');
 });
 
 test('生效设置：管理员参数覆盖界面控件，尺寸取整', () => {

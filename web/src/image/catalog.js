@@ -30,3 +30,10 @@ export function sourceUrls(model) {
   for (const [key, f] of Object.entries(model.files || {})) out[key] = fileUrl(model, f.path);
   return out;
 }
+
+/** 每个运行时文件的大小（字节），键与 sourceUrls 相同；用于加载进度。 */
+export function sourceSizes(model) {
+  const out = {};
+  for (const [key, f] of Object.entries(model.files || {})) out[key] = Number(f.size) || 0;
+  return out;
+}

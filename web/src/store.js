@@ -136,3 +136,30 @@ export function trimSessionMessages(messages, max = MAX_MESSAGES_PER_SESSION, ch
   return remove;
 }
 
+
+/**
+ * 撤回的位置：末尾是“问题 + 回复”（或只有问题，如回复失败）时返回问题的下标；否则返回 -1。
+ * 只撤回最后一轮；之前的轮次不受影响。
+ */
+export function undoableTurnIndex(session) {
+  const msgs = session?.messages || [];
+  if (msgs.length === 0) return -1;
+  const last = msgs.length - 1;
+  const userIdx = msgs[last].role === 'assistant' ? last - 1 : last;
+  if (userIdx < 0 || msgs[userIdx].role !== 'user') return -1;
+  return userIdx;
+}
+
+/**
+ * 撤回最后一轮：从会话中删除末尾的问题及其后的回复。
+ * 返回 {question, recorded}：question 为原问题（用于放回输入框），recorded 表示该轮曾记录过反馈或更正；
+ * 没有可撤回的轮次时返回 null。撤回不会回滚已记录的参数、更正与知识库（它们保存在适应记录中）。
+ */
+export function undoLastTurn(session) {
+  const idx = undoableTurnIndex(session);
+  if (idx < 0) return null;
+  const user = session.messages[idx];
+  session.messages.splice(idx);
+  if (session.messages.length === 0) session.title = '新会话';
+  return { question: user.content || '', recorded: !!user.recorded };
+}

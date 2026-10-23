@@ -3,15 +3,18 @@
  *
  * - 管理员参数行：“参数：width=768, height=512, steps=25, guidance=6, seed=42”。
  *   只接受下表中的键，数值夹到范围内；width/height 取整到 8 的倍数。
- * - 管理员的风格提示（hints）：附加到提示词末尾，与用户提示词一起交给文本编码器。
- *   CLIP 只读取前 77 个 token，超出部分不会参与生图。
+ * - 管理员的风格提示（hints）：附加到提示词末尾。
+ * - 管理员的更正（corrections，需管理员密钥验证）与本地知识库（knowledge）：
+ *   作为该生图 AI 的底层设定，放在提示词最前面（优先保证被文本编码器读取）。
+ *   注意：CLIP 只读取前 77 个 token（中文通常每字占多个 token），超出部分不会参与生图。
  * - 生效优先级：界面控件（默认值）< 管理员参数。
- * 存储键 oj-ai.image.v1，按图片模型分别保存。
+ * 存储键 oj-ai.image.v1，按图片模型分别保存（与聊天模型的适应记录 oj-ai.adapt.v1 分开）。
  */
 import { normalizeSize, snapSize } from './sizes.js';
 
 export const IMAGE_STORAGE_KEY = 'oj-ai.image.v1';
 export const MAX_IMAGE_HINTS = 30;
+export const MAX_IMAGE_NOTES = 30;
 
 export const IMAGE_PARAM_LIMITS = {
   width: [256, 768],
@@ -68,9 +71,11 @@ function writeAll(data, storage) {
 }
 
 function entryFor(data, modelId) {
-  const e = data.models[modelId] || { params: {}, hints: [] };
+  const e = data.models[modelId] || { params: {}, hints: [], corrections: [], knowledge: [] };
   e.params = e.params || {};
   e.hints = Array.isArray(e.hints) ? e.hints : [];
+  e.corrections = Array.isArray(e.corrections) ? e.corrections : [];
+  e.knowledge = Array.isArray(e.knowledge) ? e.knowledge : [];
   data.models[modelId] = e;
   return e;
 }
@@ -80,7 +85,49 @@ export function getImageSettings(modelId, { storage = globalThis.localStorage } 
   return {
     params: e?.params && typeof e.params === 'object' ? e.params : {},
     hints: Array.isArray(e?.hints) ? e.hints : [],
+    corrections: Array.isArray(e?.corrections) ? e.corrections : [],
+    knowledge: Array.isArray(e?.knowledge) ? e.knowledge : [],
   };
+}
+
+/** 添加一条更正（底层设定）。调用方须已通过管理员密钥验证。空文本或重复时返回 null。 */
+export function addImageCorrection(modelId, text, { storage = globalThis.localStorage, now = Date.now() } = {}) {
+  return addNote(modelId, 'corrections', text, { storage, now });
+}
+
+/** 添加一条本地知识库条目（仅本机）。空文本或重复时返回 null。 */
+export function addImageKnowledge(modelId, text, { storage = globalThis.localStorage, now = Date.now() } = {}) {
+  return addNote(modelId, 'knowledge', text, { storage, now });
+}
+
+export function removeImageCorrection(modelId, id, { storage = globalThis.localStorage } = {}) {
+  return removeNote(modelId, 'corrections', id, { storage });
+}
+
+export function removeImageKnowledge(modelId, id, { storage = globalThis.localStorage } = {}) {
+  return removeNote(modelId, 'knowledge', id, { storage });
+}
+
+function addNote(modelId, field, text, { storage, now }) {
+  const body = String(text || '').trim();
+  if (!modelId || !body) return null;
+  const data = readAll(storage);
+  const entry = entryFor(data, modelId);
+  if (entry[field].some((n) => n.text === body)) return null;
+  const note = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now };
+  entry[field] = [...entry[field], note].slice(-MAX_IMAGE_NOTES);
+  writeAll(data, storage);
+  return note;
+}
+
+function removeNote(modelId, field, id, { storage }) {
+  const data = readAll(storage);
+  const entry = data.models[modelId];
+  if (!entry) return false;
+  const before = entry[field].length;
+  entry[field] = entry[field].filter((n) => n.id !== id);
+  writeAll(data, storage);
+  return entry[field].length !== before;
 }
 
 /** 合并管理员参数（只保留合法键）。返回本次写入后的全部管理员参数。 */
@@ -139,9 +186,18 @@ export function clearImageHints(modelId, { storage = globalThis.localStorage } =
   return true;
 }
 
-/** 提示词 = 用户描述 + 风格提示（逗号分隔）。 */
-export function buildImagePrompt(userPrompt, hints = []) {
-  return [String(userPrompt || '').trim(), ...hints.map((h) => h.text)].filter(Boolean).join(', ');
+/**
+ * 提示词 = 前置内容（更正、知识库，按给定顺序）+ 用户描述 + 风格提示（逗号分隔）。
+ * lead 为字符串数组；没有前置内容时结果与旧版本相同。
+ */
+export function buildImagePrompt(userPrompt, hints = [], lead = []) {
+  const leading = lead.map((t) => String(t || '').trim()).filter(Boolean);
+  return [...leading, String(userPrompt || '').trim(), ...hints.map((h) => h.text)].filter(Boolean).join(', ');
+}
+
+/** 管理员设定的前置内容：更正在前，其次是知识库。 */
+export function imageLeadTexts(settings) {
+  return [...(settings?.corrections || []), ...(settings?.knowledge || [])].map((n) => n.text);
 }
 
 /**

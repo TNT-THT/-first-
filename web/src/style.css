@@ -698,3 +698,9 @@ body.embed .role-section { display: none !important; }
 .image-admin-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .image-mode .messages, .image-mode .status-bar, .image-mode .composer, .image-mode .history-panel { display: none !important; }
 .image-mode .image-panel { flex: 1 1 auto; max-height: none; }
+
+/* 生图：模型文件与画廊工具 */
+.image-files { display: flex; flex-direction: column; gap: 6px; border: 1px dashed var(--border, #d8dbe0); border-radius: 8px; padding: 8px 10px; }
+.image-file-label { cursor: pointer; }
+.image-gallery-tools { margin-top: 2px; }
+.image-card .image-admin-row { gap: 4px; }

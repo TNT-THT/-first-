@@ -4,13 +4,20 @@
  * 采用白名单：只收录网站源码、构建产物和说明文件。
  * 模型权重、导出的 .ojmodel、训练数据、环境变量与密钥一律排除。
  * 网站本身不包含任何 AI 模型：模型由浏览器从 Hugging Face 下载并缓存，
- * 或由管理员单独导出一个 .ojmodel 文件。
+ * 或由管理员单独导出一个 .ojmodel（聊天）/ .ojimage（生图）文件。
+ * 生图模块的源码（web/src/image/）属于网站源码，包含在网站包中。
  */
 
 export const SITE_ROOT_FILES = ['package.json', 'package-lock.json', 'README.md'];
 export const SITE_DIRS = ['web/'];
 export const SITE_ZIP_NAME = 'web/dist/site.zip';
 export const MAX_SITE_FILE_BYTES = 20 * 1024 * 1024;
+/**
+ * 生图运行库（ONNX Runtime 的 wasm 文件，见 vite.config.js）允许更大：
+ * ort-wasm-simd-threaded.asyncify.wasm 约 27 MB，随网站包分发后，生图功能不需要联网下载运行库。
+ */
+export const RUNTIME_DIR = 'web/dist/ort/';
+export const MAX_RUNTIME_FILE_BYTES = 40 * 1024 * 1024;
 
 /**
  * 网站包根目录的本机启动文件（双击即可运行）。来源：scripts/launcher/。
@@ -29,6 +36,7 @@ const EXCLUDED_SEGMENTS = new Set(['node_modules', '.git']);
 const EXCLUDED_EXTENSIONS = [
   '.ojmodel',
   '.ojmodel.part',
+  '.ojimage',
   '.safetensors',
   '.gguf',
   '.ggml',
@@ -51,7 +59,8 @@ export function exclusionReason(path, size = 0) {
   if (/^\.env(\.|$)/.test(base)) return '环境变量或密钥文件';
   if (p === SITE_ZIP_NAME) return '网站包本身';
   if (EXCLUDED_EXTENSIONS.some((ext) => base.toLowerCase().endsWith(ext))) return '模型或权重文件';
-  if (size > MAX_SITE_FILE_BYTES) return '文件过大';
+  const limit = p.startsWith(RUNTIME_DIR) ? MAX_RUNTIME_FILE_BYTES : MAX_SITE_FILE_BYTES;
+  if (size > limit) return '文件过大';
   return null;
 }
 
