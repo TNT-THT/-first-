@@ -18,6 +18,7 @@ import { createClipTokenizer, parseMerges } from './clip-tokenizer.js';
 import { createPndmScheduler } from './pndm.js';
 import { chwToRgba, generateSd15 } from './sd15.js';
 import { IMAGE_CACHE } from './model-files.js';
+import { rewritePowToMul } from './onnx-pow.js';
 
 // ONNX Runtime 的 wasm 运行库由构建时随网站一起输出到 dist/ort/（见 vite.config.js），
 // 因此网站包离线也能运行；路径相对于本 worker 文件计算（dist/assets/ → dist/ort/）。
@@ -63,6 +64,18 @@ async function loadBytes(url, expected, onBytes) {
   return n === out.length ? out : out.slice(0, n);
 }
 
+/**
+ * 读取一个计算图文件（ONNX 图，不含外部权重），把指数为 2 的 Pow 改写为 Mul(x, x)。
+ * 原因与改写方法见 onnx-pow.js：分解后的 LayerNorm 中的 fp16 Pow 在 WebGPU 与 CPU 上可能没有内核。
+ */
+async function loadGraph(url, expected, onBytes) {
+  const bytes = await loadBytes(url, expected, onBytes);
+  const r = rewritePowToMul(bytes);
+  if (r.rewritten) console.info(`[sd15] ${url.split('/').slice(-2).join('/')}：已把 ${r.rewritten} 个 Pow(x, 2) 改写为 Mul(x, x)`);
+  if (r.kept) console.warn(`[sd15] ${url.split('/').slice(-2).join('/')}：仍有 ${r.kept} 个 Pow 的指数不是常量 2，保持不变`);
+  return r.bytes;
+}
+
 async function loadText(url, expected, onBytes) {
   return new TextDecoder().decode(await loadBytes(url, expected, onBytes));
 }
@@ -103,10 +116,10 @@ async function ensureLoaded(id, urls, sizes) {
     ort,
     executionProviders: ['webgpu'],
     sources: {
-      textEncoder: () => loadBytes(urls.textEncoder, sizes.textEncoder, onBytes),
-      unet: () => loadBytes(urls.unet, sizes.unet, onBytes),
+      textEncoder: () => loadGraph(urls.textEncoder, sizes.textEncoder, onBytes),
+      unet: () => loadGraph(urls.unet, sizes.unet, onBytes),
       unetExternal: { path: 'weights.pb', data: () => loadBytes(urls.unetWeights, sizes.unetWeights, onBytes) },
-      vaeDecoder: () => loadBytes(urls.vaeDecoder, sizes.vaeDecoder, onBytes),
+      vaeDecoder: () => loadGraph(urls.vaeDecoder, sizes.vaeDecoder, onBytes),
     },
     onSession: (e) => {
       const done = e.phase === 'done' ? e.index + 1 : e.index;
