@@ -11,7 +11,7 @@ import { createBackend } from './engines/backend.js';
 import { getSavedDefaultModel, resolveStartupModel, saveDefaultModel } from './default-model.js';
 import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './answer-check.js';
 import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './engines/webllm.js';
-import { formatGB, imageModelsOf, isSelectable, sourceSizes, sourceUrls, totalBytes } from './image/catalog.js';
+import { formatGB, imageModelsOf, isSelectable, runtimeSizes, runtimeUrls, totalBytes } from './image/catalog.js';
 import { createImageClient } from './image/client.js';
 import {
   addImageCorrection,
@@ -2899,8 +2899,8 @@ async function runImageGenerate(event) {
     const res = await imageClient().generate(
       { prompt, width: eff.width, height: eff.height, steps: eff.steps, guidance: eff.guidance, seed: eff.seed },
       {
-        urls: sourceUrls(model),
-        sizes: sourceSizes(model),
+        urls: runtimeUrls(model),
+        sizes: runtimeSizes(model),
         // 运行库目录以页面地址为准：开发服务器为 /ort/，网站包为 index.html 同级的 ort/
         wasmBase: new URL('ort/', document.baseURI).href,
         signal: controller.signal,

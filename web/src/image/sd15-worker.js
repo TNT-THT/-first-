@@ -76,6 +76,22 @@ async function loadGraph(url, expected, onBytes) {
   return r.bytes;
 }
 
+/**
+ * 读取文本编码器的备选文件（如 fp32）。仅在主文件的会话创建全部失败时调用。
+ * 大小必须与配置一致，否则报错（避免用错误文件创建会话）。
+ */
+async function loadFallbackGraph(url, expected, onBytes, onStart) {
+  onStart?.(expected);
+  const bytes = await loadBytes(url, expected, onBytes);
+  if (expected > 0 && bytes.length !== expected) {
+    throw new Error(`备选文本编码器大小与配置不一致（实际 ${bytes.length}，应为 ${expected}）：${url}`);
+  }
+  const r = rewritePowToMul(bytes);
+  if (r.rewritten) console.info(`[sd15] 备选文本编码器：已把 ${r.rewritten} 个 Pow(x, 2) 改写为 Mul(x, x)`);
+  if (r.kept) console.warn(`[sd15] 备选文本编码器：仍有 ${r.kept} 个 Pow 的指数不是常量 2，保持不变`);
+  return r.bytes;
+}
+
 async function loadText(url, expected, onBytes) {
   return new TextDecoder().decode(await loadBytes(url, expected, onBytes));
 }
@@ -85,7 +101,7 @@ async function ensureLoaded(id, urls, sizes) {
   if (state && loadedKey === key) return state;
   release();
 
-  const total = Object.values(sizes).reduce((a, b) => a + (Number(b) || 0), 0);
+  let total = Object.values(sizes).reduce((a, b) => a + (Number(b) || 0), 0);
   let loaded = 0;
   let lastPost = 0;
   const onBytes = (n) => {
@@ -117,9 +133,20 @@ async function ensureLoaded(id, urls, sizes) {
     executionProviders: ['webgpu'],
     sources: {
       textEncoder: () => loadGraph(urls.textEncoder, sizes.textEncoder, onBytes),
+      // 备选文本编码器（仅在主文件失败时读取，见 sd15-runtime.js）
+      textEncoderFallback: urls.textEncoderFallback
+        ? () =>
+            loadFallbackGraph(urls.textEncoderFallback, sizes.textEncoderFallback, onBytes, (n) => {
+              total += Number(n) || 0; // 备选文件的字节计入进度条总量
+            })
+        : undefined,
       unet: () => loadGraph(urls.unet, sizes.unet, onBytes),
       unetExternal: { path: 'weights.pb', data: () => loadBytes(urls.unetWeights, sizes.unetWeights, onBytes) },
       vaeDecoder: () => loadGraph(urls.vaeDecoder, sizes.vaeDecoder, onBytes),
+    },
+    onFallback: ({ message }) => {
+      console.warn(`[sd15] 主文本编码器无法创建会话，改用备选文件（fp32）：${message}`);
+      post({ id, type: 'progress', stage: 'session', fraction: LOAD_SHARE, message: '主文本编码器无法创建会话，正在改用备选文件（约 0.5 GB）…' });
     },
     onSession: (e) => {
       const done = e.phase === 'done' ? e.index + 1 : e.index;
@@ -143,6 +170,7 @@ async function ensureLoaded(id, urls, sizes) {
       }
     },
   });
+  if (runtime.textEncoderSource === 'fallback') console.info('[sd15] 文本编码器使用备选文件（fp32）');
   state = { runtime, tokenizer, scheduler };
   loadedKey = key;
   return state;
