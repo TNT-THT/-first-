@@ -18,6 +18,8 @@ import {
   addImageHint,
   addImageKnowledge,
   buildImagePrompt,
+  copyIntoImageModel,
+  imageAdminModelIds,
   clearImageParams,
   effectiveImageSettings,
   getImageSettings,
@@ -30,6 +32,7 @@ import {
   stripImageParamLine,
 } from './image/params.js';
 import { randomSeed } from './image/rng.js';
+import { joinLeadTexts } from './image/prompt-budget.js';
 import { addGalleryImage, clearGallery, deleteGalleryImage, listGallery } from './image/gallery-store.js';
 import { buildGalleryArchive, readGalleryArchive } from './image/gallery-archive.js';
 import {
@@ -200,6 +203,7 @@ const els = {
   imageProgressFill: $('#imageProgressFill'),
   imageGallery: $('#imageGallery'),
   imageModelFiles: $('#imageModelFiles'),
+  imageMigrateBox: $('#imageMigrateBox'),
   imageFilesStatus: $('#imageFilesStatus'),
   imageDownloadBtn: $('#imageDownloadBtn'),
   imageExportModelBtn: $('#imageExportModelBtn'),
@@ -1274,7 +1278,13 @@ function applyPreset(id) {
 }
 
 function renderModelOptions(selectId = state.backend.modelId) {
-  const children = state.backend.models.map((m) => makeOption(m.id, m.label));
+  // 官方模型的备注（参数量级、显存估计）放在悬停提示中，来自 config.json 的 webllm.models[].note
+  const notes = new Map((state.appConfig?.webllm?.models || []).map((m) => [m.id, m.note || '']));
+  const children = state.backend.models.map((m) => {
+    const opt = makeOption(m.id, m.label);
+    if (notes.get(m.id)) opt.title = notes.get(m.id);
+    return opt;
+  });
   // 待转换的第三方模型：禁用（尚不能运行），与官方模型分组显示，备注放在悬停提示中
   const pending = pendingModels(state.appConfig?.webllm);
   if (pending.length) {
@@ -1639,19 +1649,15 @@ function refreshRoleUI() {
   renderParamOverrides();
 }
 
-/** 跨模型迁移的选择状态（仅本页面会话有效，不保存）。 */
+/** 跨模型迁移的选择状态（仅本页面会话有效，不保存）。聊天页与生图管理员面板各自一份。 */
 const migrateState = { source: '', target: '' };
+const imageMigrateState = { source: '', target: '' };
 
 function migrateEl(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
-}
-
-/** 下拉框中的全部 AI（官方、待转换、新建AI），都可以作为迁移目标。 */
-function allModelOptions() {
-  return [...els.modelSelect.options].map((o) => ({ id: o.value, label: o.dataset.label || o.value }));
 }
 
 function makeMigrateSelect(items, value, onChange) {
@@ -1668,6 +1674,71 @@ function makeMigrateSelect(items, value, onChange) {
   return sel;
 }
 
+/** 下拉框中的全部聊天 AI（官方、待转换、新建AI）。 */
+function allModelOptions() {
+  return [...els.modelSelect.options].map((o) => ({ id: o.value, label: o.dataset.label || o.value }));
+}
+
+/** 全部生图 AI 作为迁移目标（带前缀，便于与聊天 AI 区分）。 */
+function imageTargetOptions() {
+  return imageModels().map((m) => ({ id: m.id, label: `[生图] ${m.label}` }));
+}
+
+function isImageAdminId(id) {
+  return !!imageModelById(id);
+}
+
+/** 迁移中显示的 AI 名称：生图 AI 用其名称，聊天 AI 用其显示名。 */
+function adminDisplayName(id) {
+  const im = imageModelById(id);
+  return im ? `[生图] ${im.label}` : modelDisplayName(id);
+}
+
+/** 可作为来源的 AI：有更正、知识库或说明的聊天 AI，以及有更正、知识库或风格提示的生图 AI。 */
+function migrationSourceIds() {
+  return [...new Set([...adaptedModelIds(), ...imageAdminModelIds()])];
+}
+
+/**
+ * 来源可选的目标：来自生图 AI 的只能迁入生图 AI（风格提示等只属于生图）；
+ * 来自聊天 AI 的可迁入聊天 AI 或生图 AI（说明会作为生图 AI 的知识库条目）。
+ */
+function migrationTargetChoices(sourceId) {
+  if (isImageAdminId(sourceId)) return imageTargetOptions().filter((o) => o.id !== sourceId);
+  return [...allModelOptions(), ...imageTargetOptions()].filter((o) => o.id !== sourceId);
+}
+
+/** 来源 AI 中可迁移的条目，按类别分组。 */
+function migratableItems(sourceId) {
+  if (isImageAdminId(sourceId)) {
+    const s = getImageSettings(sourceId);
+    return {
+      corrections: s.corrections.map((c) => ({ kind: 'correction', id: c.id, text: c.text })),
+      knowledge: s.knowledge.map((k) => ({ kind: 'knowledge', id: k.id, text: k.text })),
+      notes: [],
+      hints: s.hints.map((h) => ({ kind: 'hint', id: h.id, text: h.text })),
+    };
+  }
+  return {
+    corrections: listCorrections(sourceId).map((c) => ({
+      kind: 'correction',
+      id: c.id,
+      text: c.text,
+      question: c.question,
+      from: c.from,
+    })),
+    knowledge: listKnowledge(sourceId).map((k) => ({
+      kind: 'knowledge',
+      id: k.id,
+      text: k.text,
+      question: k.question,
+      from: k.from,
+    })),
+    notes: listAdaptation(sourceId).notes.map((n) => ({ kind: 'note', id: n.id, text: n.text })),
+    hints: [],
+  };
+}
+
 function migrateItemRow({ kind, id, text, question, from }) {
   const row = migrateEl('label', 'local-row migrate-item');
   const box = document.createElement('input');
@@ -1675,7 +1746,13 @@ function migrateItemRow({ kind, id, text, question, from }) {
   box.checked = true;
   box.dataset.kind = kind;
   box.dataset.id = id;
-  const label = migrateEl('div', 'muted small local-meta', `${kind === 'correction' ? '更正' : '知识库'}：${text}`);
+  const names = {
+    correction: '更正',
+    knowledge: '知识库',
+    note: '说明（迁入生图 AI 后作为知识库条目）',
+    hint: '风格提示',
+  };
+  const label = migrateEl('div', 'muted small local-meta', `${names[kind] || kind}：${text}`);
   const tags = [question ? '含训练样本' : '', from ? `迁入自 ${modelDisplayName(from)}` : ''].filter(Boolean);
   if (tags.length) label.textContent += `（${tags.join('，')}）`;
   row.append(box, label);
@@ -1683,132 +1760,199 @@ function migrateItemRow({ kind, id, text, question, from }) {
 }
 
 /**
- * 跨模型迁移（仅管理员、仅本机）：选择源 AI 与目标 AI，勾选要迁移的更正与知识库条目。
- * 复制而非移动；迁移更正需要管理员密钥验证（更正会成为目标 AI 的底层设定）。
+ * 迁移框（聊天页与生图管理员面板共用，仅管理员、仅本机）。
+ * st：选择状态 {source, target}。fixedTarget：生图管理员面板中给出的目标生图 AI（目标固定，不显示目标下拉框）。
+ * notify(text, {error})：显示结果的方式（聊天页用状态栏，生图页用生图状态）。onDone：迁移完成后的刷新。
  */
-function renderMigrateBox() {
-  const box = els.migrateBox;
-  if (!box) return;
+function renderMigrateInto(box, st, { fixedTarget = '', notify = showStatus, onDone = () => {} } = {}) {
   box.replaceChildren();
-  const show = MODE === 'webllm' && isAdmin();
-  box.hidden = !show;
-  if (!show) return;
-
-  const sources = adaptedModelIds();
-  const options = allModelOptions();
-  if (!sources.includes(migrateState.source)) migrateState.source = sources[0] || '';
-  if (!options.some((o) => o.id === migrateState.target && o.id !== migrateState.source)) {
-    migrateState.target = options.find((o) => o.id !== migrateState.source)?.id || '';
-  }
-
+  const sources = migrationSourceIds().filter((id) => id !== fixedTarget);
   box.append(
     migrateEl(
       'p',
       'muted small local-meta',
-      '跨模型迁移（仅本机，不上传）：把源 AI 中勾选的更正与知识库条目复制到目标 AI。复制而非移动，源 AI 的记录保持不变。迁移更正需输入管理员密钥验证。',
+      fixedTarget
+        ? '从其他 AI 迁移到本生图 AI（仅本机，不上传）：把来源 AI 中勾选的更正、知识库、说明或风格提示复制过来，源 AI 保持不变。迁入的更正与知识库会放在本生图 AI 提示词的最前面。迁移更正需输入管理员密钥验证。'
+        : '跨模型迁移（仅本机，不上传）：把源 AI 中勾选的条目复制到目标 AI，目标可以是聊天 AI，也可以是生图 AI。复制而非移动，源 AI 的记录保持不变。迁移更正需输入管理员密钥验证。',
     ),
   );
   if (!sources.length) {
-    box.append(migrateEl('p', 'muted small', '暂无可迁移的适应记录。'));
+    box.append(migrateEl('p', 'muted small', '暂无可迁移的记录。'));
     return;
   }
+  if (!sources.includes(st.source)) st.source = sources[0];
+  const choices = fixedTarget ? [] : migrationTargetChoices(st.source);
+  if (!fixedTarget && !choices.some((o) => o.id === st.target)) st.target = choices[0]?.id || '';
+  const target = fixedTarget || st.target;
+  const targetIsImage = isImageAdminId(target);
 
-  const onSource = (v) => {
-    migrateState.source = v;
-    renderMigrateBox();
-  };
-  const onTarget = (v) => {
-    migrateState.target = v;
-    renderMigrateBox();
-  };
+  const rerender = () => renderMigrateInto(box, st, { fixedTarget, notify, onDone });
   const srcRow = migrateEl('div', 'migrate-row');
   srcRow.append(
     migrateEl('span', 'muted small', '源 AI：'),
     makeMigrateSelect(
-      sources.map((id) => ({ id, label: modelDisplayName(id) })),
-      migrateState.source,
-      onSource,
+      sources.map((id) => ({ id, label: adminDisplayName(id) })),
+      st.source,
+      (v) => {
+        st.source = v;
+        st.target = '';
+        rerender();
+      },
     ),
   );
-  const tgtRow = migrateEl('div', 'migrate-row');
-  tgtRow.append(
-    migrateEl('span', 'muted small', '目标 AI：'),
-    makeMigrateSelect(
-      options.filter((o) => o.id !== migrateState.source),
-      migrateState.target,
-      onTarget,
-    ),
-  );
-  box.append(srcRow, tgtRow);
+  box.append(srcRow);
+  if (!fixedTarget) {
+    const tgtRow = migrateEl('div', 'migrate-row');
+    tgtRow.append(
+      migrateEl('span', 'muted small', '目标 AI：'),
+      makeMigrateSelect(choices, st.target, (v) => {
+        st.target = v;
+        rerender();
+      }),
+    );
+    box.append(tgtRow);
+  }
 
+  const items = migratableItems(st.source);
   const list = migrateEl('div', 'local-list');
-  const corr = listCorrections(migrateState.source);
-  const kb = listKnowledge(migrateState.source);
-  for (const c of corr) list.append(migrateItemRow({ kind: 'correction', id: c.id, text: c.text, question: c.question, from: c.from }));
-  for (const k of kb) list.append(migrateItemRow({ kind: 'knowledge', id: k.id, text: k.text, question: k.question, from: k.from }));
-  if (!corr.length && !kb.length) list.append(migrateEl('p', 'muted small', '该 AI 没有可迁移的更正或知识库条目。'));
+  const sourceIsImage = isImageAdminId(st.source);
+  const shown = [
+    ...items.corrections,
+    ...items.knowledge,
+    // 说明只迁入生图 AI（作为知识库条目）；聊天 AI 之间的迁移仍只包含更正与知识库
+    ...(targetIsImage && !sourceIsImage ? items.notes : []),
+    // 风格提示只在生图 AI 之间迁移
+    ...(targetIsImage && sourceIsImage ? items.hints : []),
+  ];
+  for (const it of shown) list.append(migrateItemRow({ ...it, from: it.from }));
+  if (!shown.length) list.append(migrateEl('p', 'muted small', '该 AI 没有可迁移的条目。'));
   box.append(list);
 
-  const training = document.createElement('label');
-  training.className = 'migrate-training';
-  const trainBox = document.createElement('input');
-  trainBox.type = 'checkbox';
-  trainBox.id = 'migrateTraining';
-  trainBox.checked = true;
-  training.append(trainBox, document.createTextNode(' 同时迁移对话训练样本（问题→回答，之后可在目标 AI 导出固化数据；取消则只作为提示词内容）'));
-  box.append(training);
+  if (!targetIsImage) {
+    const training = document.createElement('label');
+    training.className = 'migrate-training';
+    const trainBox = document.createElement('input');
+    trainBox.type = 'checkbox';
+    trainBox.id = 'migrateTraining';
+    trainBox.checked = true;
+    training.append(trainBox, document.createTextNode(' 同时迁移对话训练样本（问题→回答，之后可在目标 AI 导出固化数据；取消则只作为提示词内容）'));
+    box.append(training);
+  }
 
   const go = document.createElement('button');
   go.type = 'button';
   go.className = 'btn ghost small';
   go.dataset.action = 'migrate-run';
   go.textContent = '迁移所选到目标 AI';
-  go.disabled = !migrateState.target;
-  go.addEventListener('click', () => runMigration());
+  go.disabled = !target || !shown.length;
+  go.addEventListener('click', () => runMigration(box, st, { fixedTarget, notify, onDone }));
   box.append(go);
 }
 
+/** 聊天页的迁移框。 */
+function renderMigrateBox() {
+  const box = els.migrateBox;
+  if (!box) return;
+  const show = MODE === 'webllm' && isAdmin();
+  box.hidden = !show;
+  box.replaceChildren();
+  if (!show) return;
+  renderMigrateInto(box, migrateState, { notify: showStatus, onDone: () => renderAdaptList() });
+}
+
+/** 生图管理员面板中的迁移框（目标为当前生图 AI）。 */
+function renderImageMigrateBox() {
+  const box = els.imageMigrateBox;
+  if (!box) return;
+  const model = imageModelById(els.imageModelSelect.value);
+  const show = isAdmin() && !!model;
+  box.hidden = !show;
+  box.replaceChildren();
+  if (!show) return;
+  renderMigrateInto(box, imageMigrateState, {
+    fixedTarget: model.id,
+    notify: setImageStatus,
+    onDone: () => {
+      renderImageAdmin();
+      renderImageEffective();
+    },
+  });
+}
+
 /** 执行迁移：勾选了更正时先做管理员密钥验证。 */
-async function runMigration() {
+async function runMigration(box, st, { fixedTarget = '', notify = showStatus, onDone = () => {} } = {}) {
   if (!requireAdmin('跨模型迁移')) return;
-  const { source, target } = migrateState;
+  const source = st.source;
+  const target = fixedTarget || st.target;
   if (!source || !target || source === target) {
-    showStatus('请选择不同的源 AI 与目标 AI。', { error: true });
+    notify('请选择不同的源 AI 与目标 AI。', { error: true });
     return;
   }
-  const checked = [...els.migrateBox.querySelectorAll('input[data-kind]:checked')];
-  const corrections = checked.filter((i) => i.dataset.kind === 'correction').map((i) => i.dataset.id);
-  const knowledge = checked.filter((i) => i.dataset.kind === 'knowledge').map((i) => i.dataset.id);
-  if (!corrections.length && !knowledge.length) {
-    showStatus('请先勾选要迁移的条目。', { error: true });
+  const checked = [...box.querySelectorAll('input[data-kind]:checked')];
+  const pick = (kind) => checked.filter((i) => i.dataset.kind === kind).map((i) => i.dataset.id);
+  const wanted = { correction: pick('correction'), knowledge: pick('knowledge'), note: pick('note'), hint: pick('hint') };
+  const total = Object.values(wanted).reduce((n, ids) => n + ids.length, 0);
+  if (!total) {
+    notify('请先勾选要迁移的条目。', { error: true });
     return;
   }
-  const includeTraining = !!els.migrateBox.querySelector('#migrateTraining')?.checked;
-  const from = modelDisplayName(source);
-  const to = modelDisplayName(target);
-  if (corrections.length) {
-    const texts = listCorrections(source).filter((c) => corrections.includes(c.id)).map((c) => `- ${c.text}`);
+  const items = migratableItems(source);
+  const chosen = (kind) => items[kind === 'correction' ? 'corrections' : kind === 'knowledge' ? 'knowledge' : kind === 'note' ? 'notes' : 'hints'].filter((x) => wanted[kind].includes(x.id));
+  const pickedCorr = chosen('correction');
+  const from = adminDisplayName(source);
+  const to = adminDisplayName(target);
+  if (pickedCorr.length) {
+    const texts = pickedCorr.map((c) => `- ${c.text}`);
     const ok = await verifyCorrectionKey(
-      `迁移 ${corrections.length} 条更正（${from} → ${to}）：\n${texts.join('\n')}`,
+      `迁移 ${pickedCorr.length} 条更正（${from} → ${to}）：\n${texts.join('\n')}`,
       `这些更正将成为「${to}」的底层设定（无条件采纳）。输入管理员密钥验证后执行；取消则不迁移。`,
     );
     if (!ok) return;
   }
+
+  if (isImageAdminId(target)) {
+    let result;
+    try {
+      result = copyIntoImageModel(
+        target,
+        {
+          corrections: pickedCorr.map((c) => ({ text: c.text, from: source })),
+          knowledge: [...chosen('knowledge'), ...chosen('note')].map((k) => ({ text: k.text, from: source })),
+          hints: chosen('hint').map((h) => ({ text: h.text, from: source })),
+        },
+        { allowCorrections: pickedCorr.length > 0 },
+      );
+    } catch (err) {
+      notify(`迁移失败：${err.message}`, { error: true });
+      return;
+    }
+    const over = result.overflow ? `，超过上限未写入 ${result.overflow} 条` : '';
+    notify(
+      `已从「${from}」迁移到「${to}」：更正 ${result.corrections} 条，知识库 ${result.knowledge} 条，风格提示 ${result.hints} 条，重复跳过 ${result.duplicate} 条${over}。`,
+    );
+    onDone();
+    return;
+  }
+
+  // 聊天 AI 之间的迁移（原有逻辑）
+  const includeTraining = !!box.querySelector('#migrateTraining')?.checked;
   let result;
   try {
-    result = migrateAdaptation(source, target, { corrections, knowledge }, {
-      includeTraining,
-      allowCorrections: corrections.length > 0,
-    });
+    result = migrateAdaptation(
+      source,
+      target,
+      { corrections: wanted.correction, knowledge: wanted.knowledge },
+      { includeTraining, allowCorrections: pickedCorr.length > 0 },
+    );
   } catch (err) {
-    showStatus(`迁移失败：${err.message}`, { error: true });
+    notify(`迁移失败：${err.message}`, { error: true });
     return;
   }
   const missing = result.missing ? `，源中已不存在 ${result.missing} 条` : '';
-  showStatus(
+  notify(
     `已从「${from}」迁移到「${to}」：更正 ${result.corrections} 条，知识库 ${result.knowledge} 条，重复跳过 ${result.duplicate} 条${missing}。`,
   );
-  renderAdaptList();
+  onDone();
 }
 
 /** AI 适应记录：管理员可查看、删除（仅本机）。 */
@@ -2470,6 +2614,7 @@ function renderImageAdmin() {
   els.imageKnowledgeList.replaceChildren(
     ...knowledge.map((k) => imageNoteRow(`知识：${k.text}`, () => removeImageKnowledge(model.id, k.id), '删除知识库条目')),
   );
+  renderImageMigrateBox();
 }
 
 /**
@@ -2897,7 +3042,9 @@ async function runImageGenerate(event) {
   const { hints, corrections, knowledge } = getImageSettings(model.id);
   const eff = currentImageSettings(model);
   if (eff.seed === null) eff.seed = randomSeed();
-  const prompt = buildImagePrompt(text, hints, imageLeadTexts({ corrections, knowledge }));
+  // 管理员前置内容（更正、知识库）放在最前面；lead 单独传给 worker 做预算检查（超出则拒绝，不截断）
+  const leadTexts = imageLeadTexts({ corrections, knowledge });
+  const prompt = buildImagePrompt(text, hints, leadTexts);
   const controller = new AbortController();
   imageState.controller = controller;
   setImageBusy(true);
@@ -2911,16 +3058,28 @@ async function runImageGenerate(event) {
     setImageProgress(0);
     let top = 0; // 本次生成已显示的最高进度
     const res = await imageClient().generate(
-      { prompt, width: eff.width, height: eff.height, steps: eff.steps, guidance: eff.guidance, seed: eff.seed },
+      {
+        prompt,
+        lead: joinLeadTexts(leadTexts),
+        width: eff.width,
+        height: eff.height,
+        steps: eff.steps,
+        guidance: eff.guidance,
+        seed: eff.seed,
+      },
       {
         urls: sourceUrls(model),
         sizes: sourceSizes(model),
+        // 潜变量缩放由模型配置给出（缺省为 SD 1.x 的 0.18215）
+        latentScale: model.latentScale,
         // 运行库目录以页面地址为准：开发服务器为 /ort/，网站包为 index.html 同级的 ort/
         wasmBase: new URL('ort/', document.baseURI).href,
         signal: controller.signal,
         onProgress: (p) => {
-          // 进度条只前进不后退：文件读取与会话创建交错进行时，两类进度的映射不同
+          // 进度条只前进不后退。读取与会话创建交错进行，worker 给出的 fraction 已是整体进度
+          // （读取占 90%、会话占 10%，见 load-progress.js）
           const raise = (v) => {
+            if (!Number.isFinite(v)) return;
             top = Math.max(top, v);
             setImageProgress(top);
           };
@@ -2928,11 +3087,9 @@ async function runImageGenerate(event) {
             setImageStatus(`去噪中：第 ${p.step} / ${p.total} 步`);
             raise(p.step / p.total);
           } else if (p.stage === 'load' && p.total) {
-            // 模型读取占进度条的前 90%（与 worker 中 LOAD_SHARE 一致）
-            raise((0.9 * p.loaded) / p.total);
+            raise(p.fraction);
             setImageStatus(p.message);
           } else if (p.stage === 'session') {
-            // 会话创建占进度条的后 10%，fraction 已是整体进度
             raise(p.fraction);
             setImageStatus(p.message);
           } else if (p.message) {
@@ -2955,7 +3112,11 @@ async function runImageGenerate(event) {
       model: model.id,
       createdAt: Date.now(),
     });
-    if (!item.unsaved) setImageStatus(`已生成 ${res.width} × ${res.height}，种子 ${eff.seed}，已保存到画廊。`);
+    // 描述过长时末尾被截断（风格提示最先被截掉）；管理员内容不会被截断（超出时已在 worker 中拒绝）
+    const cut = res.truncatedTokens
+      ? `；提示词超出 CLIP 上限，末尾 ${res.truncatedTokens} 个 token 未参与生图，请缩短描述`
+      : '';
+    if (!item.unsaved) setImageStatus(`已生成 ${res.width} × ${res.height}，种子 ${eff.seed}，已保存到画廊${cut}。`);
   } catch (err) {
     if (err.name === 'AbortError') {
       setImageStatus('已取消。下次生成时会重新加载生图模型。');

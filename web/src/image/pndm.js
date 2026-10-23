@@ -2,7 +2,7 @@
  * PNDM 调度器（纯逻辑），对应 diffusers 的 PNDMScheduler，仅实现 SD 1.5 用到的配置：
  *   skip_prk_steps = true、prediction_type = epsilon、timestep_spacing = leading。
  * 其他配置会直接报错，而不是静默给出不同的结果。
- * 时间步、step_plms 与 _get_prev_sample 的公式与 diffusers 0.41.0 逐项对应（见 test/image-pndm.test.js）。
+ * 时间步、step_plms 与 _get_prev_sample 的公式与 diffusers 0.41.0 逐项对应（见 test/image-units.test.js）。
  * 注意：PLMS 的时间步数为 推理步数 + 1（与 diffusers 一致），即 UNet 会被调用 步数 + 1 次。
  */
 export function createPndmScheduler(config = {}) {
@@ -63,6 +63,12 @@ export function createPndmScheduler(config = {}) {
 
   return {
     initNoiseSigma: 1.0,
+    /** PLMS 至少需要 2 步（与 setTimesteps 的检查一致）。 */
+    minSteps: 2,
+    /** PNDM 不缩放 UNet 输入。 */
+    scaleModelInput(sample) {
+      return sample;
+    },
     get timesteps() {
       return timesteps;
     },
