@@ -121,7 +121,14 @@ function fakeRuntime(seen) {
     },
   };
 }
-const fakeTokenizer = { encode: () => new Int32Array(77) };
+// 假分词器：提供与 CLIP 分词器相同的接口（rawTokenize / bos / eos / pad），内容无关紧要
+const fakeTokenizer = {
+  bos: 0,
+  eos: 1,
+  pad: 1,
+  encode: () => new Int32Array(77),
+  rawTokenize: () => [0, 1],
+};
 
 test('生成流程可以使用 DPM-Solver++、DEIS、Euler（含一步模型）', async () => {
   for (const c of fixture.cases.filter((x) => x.steps <= 4)) {

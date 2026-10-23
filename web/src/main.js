@@ -33,7 +33,7 @@ import {
   stripImageParamLine,
 } from './image/params.js';
 import { randomSeed } from './image/rng.js';
-import { joinLeadTexts } from './image/prompt-budget.js';
+import { joinLeadTexts, MAX_PROMPT_CHUNKS } from './image/prompt-budget.js';
 import { addGalleryImage, clearGallery, deleteGalleryImage, listGallery } from './image/gallery-store.js';
 import { buildGalleryArchive, readGalleryArchive } from './image/gallery-archive.js';
 import {
@@ -2573,7 +2573,7 @@ function renderImageEffective() {
     `生效：${eff.width} × ${eff.height}，${eff.steps} 步，引导 ${eff.guidance}，种子 ${eff.seed ?? '随机'}`,
   ];
   if (adminKeys.length) parts.push(`管理员参数已覆盖：${adminKeys.map((k) => `${k}=${params[k]}`).join('，')}`);
-  parts.push(`描述输入上限 ${effectiveInputLimit(params)} tokens（CLIP 实际读取约 75 个）`);
+  parts.push(`描述输入上限 ${effectiveInputLimit(params)} tokens（超过则拒绝生成；CLIP 每段读取 75 个，描述最多分 ${MAX_PROMPT_CHUNKS} 段，约 ${MAX_PROMPT_CHUNKS * 75} 个 token 参与生图）`);
   if (corrections.length) parts.push(`更正 ${corrections.length} 条（提示词最前面）`);
   if (knowledge.length) parts.push(`知识库 ${knowledge.length} 条（提示词最前面）`);
   if (hints.length) parts.push(`风格提示 ${hints.length} 条`);
@@ -3119,9 +3119,14 @@ async function runImageGenerate(event) {
     });
     // 描述过长时末尾被截断（风格提示最先被截掉）；管理员内容不会被截断（超出时已在 worker 中拒绝）
     const cut = res.truncatedTokens
-      ? `；提示词超出 CLIP 上限，末尾 ${res.truncatedTokens} 个 token 未参与生图，请缩短描述`
+      ? `；提示词超出 CLIP 可用长度（最多 ${MAX_PROMPT_CHUNKS} 段，约 ${MAX_PROMPT_CHUNKS * 75} 个 token），末尾 ${res.truncatedTokens} 个 token 未参与生图，请缩短描述`
       : '';
-    if (!item.unsaved) setImageStatus(`已生成 ${res.width} × ${res.height}，种子 ${eff.seed}，已保存到画廊${cut}。`);
+    const chunkNote = res.chunkFallback
+      ? `；长提示词分段编码失败（${res.chunkError || '模型不支持'}），已改用单段，仅前 75 个 token 参与生图`
+      : res.promptChunks > 1
+        ? `；提示词分为 ${res.promptChunks} 段编码`
+        : '';
+    if (!item.unsaved) setImageStatus(`已生成 ${res.width} × ${res.height}，种子 ${eff.seed}，已保存到画廊${chunkNote}${cut}。`);
   } catch (err) {
     if (err.name === 'AbortError') {
       setImageStatus('已取消。下次生成时会重新加载生图模型。');

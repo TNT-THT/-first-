@@ -10,19 +10,22 @@
  *                    （两者的 fraction 均为整体进度 0–1，见 load-progress.js）
  *                    { id, type: 'progress', stage: 'denoise', step, total }
  *                    { id, type: 'progress', stage: 'decode' | 'load', message }
- *                    { id, type: 'result', width, height, rgba, truncatedTokens }   （rgba 通过 transfer 传输）
- *   request.lead：管理员前置内容（更正与知识库）。超出 CLIP 预算时在下载大文件之前报错，不截断。
+ *                    { id, type: 'result', width, height, rgba, truncatedTokens, promptChunks, chunkFallback, chunkError }
+ *                    （rgba 通过 transfer 传输；promptChunks 为实际分段数；chunkFallback 表示分段失败后改用单段）
+ *   request.input：用户在文本框中的描述，超过 request.maxInputTokens（默认 4096）时在下载大文件之前报错。
+ *   request.lead：管理员前置内容（更正与知识库）。超出单段 CLIP 预算时在下载大文件之前报错，不截断。
+ *   描述最多分 MAX_PROMPT_CHUNKS 段编码（约 300 个 token），超出部分截断并在 truncatedTokens 中报告。
  *                    { id, type: 'error', message }
  */
 import * as ort from 'onnxruntime-web/webgpu';
 import { createSd15Runtime } from './sd15-runtime.js';
 import { createClipTokenizer, parseMerges } from './clip-tokenizer.js';
 import { createScheduler, parseSchedulerConfig } from './schedulers.js';
-import { chwToRgba, generateSd15 } from './sd15.js';
+import { chwToRgba, generateSd15WithFallback } from './sd15.js';
 import { IMAGE_CACHE, oversizedFiles, MAX_BROWSER_FILE_BYTES } from './model-files.js';
 import { rewritePowToMul } from './onnx-pow.js';
 import { loadFraction } from './load-progress.js';
-import { checkPromptBudget } from './prompt-budget.js';
+import { checkPromptBudget, MAX_PROMPT_CHUNKS } from './prompt-budget.js';
 
 // ONNX Runtime 的 wasm 运行库由构建时随网站一起输出到 dist/ort/（见 vite.config.js），
 // 因此网站包离线也能运行；路径相对于本 worker 文件计算（dist/assets/ → dist/ort/）。
@@ -229,15 +232,16 @@ self.onmessage = async (event) => {
     if (wasmBase) ort.env.wasm.wasmPaths = wasmBase;
     // 先读取分词器并检查预算（管理员内容超出时直接报错，不下载大文件）
     const tokenizer = await ensureTokenizer(urls, sizes || {});
-    const budget = checkPromptBudget(tokenizer, {
+    const budgetInput = {
       input: typeof request.input === 'string' ? request.input : null,
       maxInputTokens: request.maxInputTokens,
       lead: request.lead || '',
       prompt: request.prompt,
-    });
+    };
+    checkPromptBudget(tokenizer, { ...budgetInput, maxChunks: MAX_PROMPT_CHUNKS });
     const { runtime, scheduler } = await ensureLoaded(id, urls, sizes || {}, tokenizer);
     post({ id, type: 'progress', stage: 'denoise', step: 0, total: request.steps, message: '开始生成' });
-    const { width, height, chw } = await generateSd15({
+    const { width, height, chw, promptChunks, chunkFallback, chunkError } = await generateSd15WithFallback({
       runtime,
       tokenizer,
       scheduler,
@@ -249,11 +253,20 @@ self.onmessage = async (event) => {
       guidance: request.guidance,
       seed: request.seed,
       latentScale,
+      maxChunks: MAX_PROMPT_CHUNKS,
       onStep: ({ step, total }) => post({ id, type: 'progress', stage: 'denoise', step, total }),
     });
+    // 单段回退时，实际参与生图的只有第一段，截断数需按单段重新计算
+    const truncatedTokens = checkPromptBudget(tokenizer, {
+      ...budgetInput,
+      maxChunks: chunkFallback ? 1 : MAX_PROMPT_CHUNKS,
+    }).truncatedTokens;
     post({ id, type: 'progress', stage: 'decode', message: '正在解码图像…' });
     const rgba = chwToRgba(chw, width, height);
-    post({ id, type: 'result', width, height, rgba, truncatedTokens: budget.truncatedTokens }, [rgba.buffer]);
+    post(
+      { id, type: 'result', width, height, rgba, truncatedTokens, promptChunks, chunkFallback, chunkError },
+      [rgba.buffer],
+    );
   } catch (err) {
     post({ id, type: 'error', message: err?.message || String(err) });
   }
