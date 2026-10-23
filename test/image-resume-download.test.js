@@ -482,3 +482,108 @@ test('服务器忽略 Range 时中断：已收到的字节保存，重试后结�
   assert.equal(midPartial.partialBytes, 6, '第一段完整（4 字节）+ 第二段已收到 2 字节');
   assert.deepEqual(await cachedBytes(storage, sourceUrls(model()).unetWeights), DATA['unet/weights.pb']);
 });
+
+const MB = 1024 * 1024;
+
+function patternData(size) {
+  const data = new Uint8Array(size);
+  for (let i = 0; i < size; i += 1) data[i] = i % 251;
+  return data;
+}
+
+test('写入频率：每写满 1 MB 即保存；下载未结束、未出错时，已写满的块也已经保存', async () => {
+  const storage = memoryCaches();
+  const SIZE = 3 * MB; // 文件 3 MB，网络只送到 2.5 MB 就停住
+  const SENT = 2.5 * MB;
+  const data = patternData(SIZE);
+  const big = {
+    id: 'freq-test',
+    label: '写入频率测试',
+    family: 'sd15',
+    repo: 'org/repo',
+    revision: 'main',
+    status: 'available',
+    files: { big: { path: 'big.bin', size: SIZE } },
+  };
+  const ctl = new AbortController();
+  const fetchImpl = async () => {
+    let pos = 0;
+    const stream = new ReadableStream(
+      {
+        start(c) {
+          ctl.signal.addEventListener('abort', () => c.error(abortError()));
+        },
+        pull(c) {
+          if (pos < SENT) {
+            const n = Math.min(256 * 1024, SENT - pos);
+            c.enqueue(data.slice(pos, pos + n));
+            pos += n;
+            return undefined;
+          }
+          return new Promise(() => {}); // 之后一直没有数据（网络很慢）
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(stream, { status: 200 });
+  };
+  const p = downloadImageModel(big, { storage, fetchImpl, signal: ctl.signal, sleep: instantSleep });
+  let st = null;
+  for (let k = 0; k < 400; k += 1) {
+    st = await imageCacheStatus(big, { storage });
+    if (st.partialBytes >= 2 * MB) break;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(st.partialBytes, 2 * MB, '已写满的两块（2 MB）已保存，未写满的 0.5 MB 尚未保存');
+  ctl.abort();
+  await assert.rejects(p, (err) => err.name === 'AbortError');
+  const after = await imageCacheStatus(big, { storage });
+  assert.equal(after.partialBytes, SENT, '取消时未写满的块也保存（共 2.5 MB）');
+});
+
+test('块级续传：中断时已写满的块与未写满的部分都保存，续传从断点开始', async () => {
+  const storage = memoryCaches();
+  const SIZE = 3 * MB;
+  const DROP = 1.5 * MB;
+  const data = patternData(SIZE);
+  const big = {
+    id: 'block-resume',
+    label: '块级续传测试',
+    family: 'sd15',
+    repo: 'org/repo',
+    revision: 'main',
+    status: 'available',
+    files: { big: { path: 'big.bin', size: SIZE } },
+  };
+  const calls = [];
+  let dropped = false;
+  const fetchImpl = async (url, opts = {}) => {
+    const range = opts.headers?.Range;
+    calls.push(range || null);
+    const start = range ? Number(/bytes=(\d+)-/.exec(range)[1]) : 0;
+    const drop = !dropped;
+    if (drop) dropped = true;
+    const end = drop ? DROP : SIZE;
+    let sent = false;
+    const stream = new ReadableStream(
+      {
+        pull(c) {
+          if (!sent) {
+            sent = true;
+            c.enqueue(data.slice(start, end));
+            if (!drop) c.close();
+            return;
+          }
+          if (drop) c.error(new TypeError('network error'));
+          else c.close();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(stream, { status: range ? 206 : 200 });
+  };
+  const st = await downloadImageModel(big, { storage, fetchImpl, sleep: instantSleep });
+  assert.equal(st.complete, true);
+  assert.deepEqual(calls, [null, `bytes=${DROP}-${SIZE - 1}`], '第一次整文件请求；续传从 1.5 MB 处开始');
+  assert.deepEqual(await cachedBytes(storage, sourceUrls(big).big), data);
+});
