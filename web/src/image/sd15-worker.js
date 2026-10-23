@@ -5,26 +5,28 @@
  *
  * 消息协议：
  *   主线程 → worker：{ id, type: 'generate', urls, sizes, request }
- *   worker → 主线程：{ id, type: 'progress', stage: 'load', loaded, total, message }      模型文件读取进度（字节）
- *                    { id, type: 'progress', stage: 'session', fraction, message }        会话创建进度（0–1）
+ *   worker → 主线程：{ id, type: 'progress', stage: 'load', loaded, total, fraction, message }  模型文件读取进度（字节）
+ *                    { id, type: 'progress', stage: 'session', fraction, message }             会话创建进度
+ *                    （两者的 fraction 均为整体进度 0–1，见 load-progress.js）
  *                    { id, type: 'progress', stage: 'denoise', step, total }
  *                    { id, type: 'progress', stage: 'decode' | 'load', message }
- *                    { id, type: 'result', width, height, rgba }   （rgba 通过 transfer 传输）
+ *                    { id, type: 'result', width, height, rgba, truncatedTokens }   （rgba 通过 transfer 传输）
+ *   request.lead：管理员前置内容（更正与知识库）。超出 CLIP 预算时在下载大文件之前报错，不截断。
  *                    { id, type: 'error', message }
  */
 import * as ort from 'onnxruntime-web/webgpu';
 import { createSd15Runtime } from './sd15-runtime.js';
 import { createClipTokenizer, parseMerges } from './clip-tokenizer.js';
-import { createPndmScheduler } from './pndm.js';
+import { createScheduler, parseSchedulerConfig } from './schedulers.js';
 import { chwToRgba, generateSd15 } from './sd15.js';
 import { IMAGE_CACHE, oversizedFiles, MAX_BROWSER_FILE_BYTES } from './model-files.js';
 import { rewritePowToMul } from './onnx-pow.js';
+import { loadFraction } from './load-progress.js';
+import { checkPromptBudget } from './prompt-budget.js';
 
 // ONNX Runtime 的 wasm 运行库由构建时随网站一起输出到 dist/ort/（见 vite.config.js），
 // 因此网站包离线也能运行；路径相对于本 worker 文件计算（dist/assets/ → dist/ort/）。
 ort.env.wasm.wasmPaths = new URL('../ort/', self.location.href).href;
-
-const LOAD_SHARE = 0.9; // 进度条中，模型读取占 90%，会话创建占 10%
 
 let loadedKey = null;
 let state = null;
@@ -96,7 +98,20 @@ async function loadText(url, expected, onBytes) {
   return new TextDecoder().decode(await loadBytes(url, expected, onBytes));
 }
 
-async function ensureLoaded(id, urls, sizes) {
+// 分词器（词表与合并规则，约 1.6 MB）单独缓存：生成前先检查提示词预算，超出时不去读取大模型文件。
+let tokenizerCache = null;
+
+async function ensureTokenizer(urls, sizes) {
+  const key = `${urls.vocab}|${urls.merges}`;
+  if (tokenizerCache && tokenizerCache.key === key) return tokenizerCache.tokenizer;
+  const vocab = JSON.parse(await loadText(urls.vocab, sizes.vocab, () => {}));
+  const merges = parseMerges(await loadText(urls.merges, sizes.merges, () => {}));
+  const tokenizer = createClipTokenizer({ vocab, merges, maxLength: 77 });
+  tokenizerCache = { key, tokenizer };
+  return tokenizer;
+}
+
+async function ensureLoaded(id, urls, sizes, tokenizer) {
   const key = urls.textEncoder;
   if (state && loadedKey === key) return state;
   release();
@@ -110,9 +125,17 @@ async function ensureLoaded(id, urls, sizes) {
     );
   }
 
-  let total = Object.values(sizes).reduce((a, b) => a + (Number(b) || 0), 0);
+  // 进度总量只计入一定会读取的文件；备选文本编码器仅在主文件失败时读取，开始读取时再计入（见 onStart 回调）。
+  // 词表与合并规则由 ensureTokenizer 读取，这里不再计入。
+  const sessionTotal = 3;
+  let sessionsDone = 0;
+  let total = Object.entries(sizes).reduce(
+    (a, [k, b]) => (k === 'textEncoderFallback' || k === 'vocab' || k === 'merges' ? a : a + (Number(b) || 0)),
+    0,
+  );
   let loaded = 0;
   let lastPost = 0;
+  const overall = () => loadFraction({ loaded, total, sessionsDone, sessionTotal });
   const onBytes = (n) => {
     loaded += n;
     const now = Date.now();
@@ -125,18 +148,16 @@ async function ensureLoaded(id, urls, sizes) {
       stage: 'load',
       loaded,
       total,
+      fraction: overall(),
       message: `正在读取模型文件 ${pct}%（${(loaded / 1e9).toFixed(2)} / ${(total / 1e9).toFixed(2)} GB）`,
     });
   };
 
-  post({ id, type: 'progress', stage: 'load', loaded: 0, total, message: '正在读取分词器与调度器配置…' });
-  const vocab = JSON.parse(await loadText(urls.vocab, sizes.vocab, onBytes));
-  const merges = parseMerges(await loadText(urls.merges, sizes.merges, onBytes));
-  const scheduler = createPndmScheduler(JSON.parse(await loadText(urls.scheduler, sizes.scheduler, onBytes)));
-  const tokenizer = createClipTokenizer({ vocab, merges, maxLength: 77 });
+  post({ id, type: 'progress', stage: 'load', loaded: 0, total, fraction: 0, message: '正在读取调度器配置…' });
+  // 调度器由配置的 _class_name 决定（PNDM、DPM-Solver++、DEIS、Euler）；不支持的配置直接报错
+  const scheduler = createScheduler(parseSchedulerConfig(await loadText(urls.scheduler, sizes.scheduler, onBytes)));
 
   // 会话按顺序创建：每个会话创建后即释放其文件数据，峰值内存只取决于最大的一个文件。
-  const sessionTotal = 3;
   const runtime = await createSd15Runtime({
     ort,
     executionProviders: ['webgpu'],
@@ -146,36 +167,41 @@ async function ensureLoaded(id, urls, sizes) {
       textEncoderFallback: urls.textEncoderFallback
         ? () =>
             loadFallbackGraph(urls.textEncoderFallback, sizes.textEncoderFallback, onBytes, (n) => {
-              total += Number(n) || 0; // 备选文件的字节计入进度条总量
+              total += Number(n) || 0; // 备选文件开始读取时才计入进度总量
             })
         : undefined,
       unet: () => loadGraph(urls.unet, sizes.unet, onBytes),
-      unetExternal: { path: 'weights.pb', data: () => loadBytes(urls.unetWeights, sizes.unetWeights, onBytes) },
+      // 外部权重可选：单文件 UNet（如 bk-sdm、tiny-sd）没有 weights.pb
+      unetExternal: urls.unetWeights
+        ? { path: 'weights.pb', data: () => loadBytes(urls.unetWeights, sizes.unetWeights, onBytes) }
+        : undefined,
       vaeDecoder: () => loadGraph(urls.vaeDecoder, sizes.vaeDecoder, onBytes),
     },
     onFallback: ({ message }) => {
       console.warn(`[sd15] 主文本编码器无法创建会话，改用备选文件（fp32）：${message}`);
-      post({ id, type: 'progress', stage: 'session', fraction: LOAD_SHARE, message: '主文本编码器无法创建会话，正在改用备选文件（约 0.5 GB）…' });
+      post({ id, type: 'progress', stage: 'session', fraction: overall(), message: '主文本编码器无法创建会话，正在改用备选文件（约 0.5 GB）…' });
     },
     onSession: (e) => {
-      const done = e.phase === 'done' ? e.index + 1 : e.index;
-      const fraction = LOAD_SHARE + ((1 - LOAD_SHARE) * done) / sessionTotal;
-      if (e.phase === 'start') {
-        post({
-          id,
-          type: 'progress',
-          stage: 'session',
-          fraction,
-          message: `正在创建${e.label}会话（${e.plan === 'WebGPU' ? 'WebGPU，首次需要编译 GPU 程序，可能要几十秒' : 'CPU，速度较慢'}）…`,
-        });
-      } else if (e.phase === 'failed') {
-        post({
-          id,
-          type: 'progress',
-          stage: 'session',
-          fraction,
-          message: `${e.label}在 ${e.plan} 上无法创建，${e.plan === 'WebGPU' ? '改用 CPU 继续（较慢）' : '加载失败'}：${e.message}`,
-        });
+      if (e.phase === 'done') sessionsDone += 1;
+      if (e.phase === 'start' || e.phase === 'failed') {
+        const fraction = overall();
+        if (e.phase === 'start') {
+          post({
+            id,
+            type: 'progress',
+            stage: 'session',
+            fraction,
+            message: `正在创建${e.label}会话（${e.plan === 'WebGPU' ? 'WebGPU，首次需要编译 GPU 程序，可能要几十秒' : 'CPU，速度较慢'}）…`,
+          });
+        } else {
+          post({
+            id,
+            type: 'progress',
+            stage: 'session',
+            fraction,
+            message: `${e.label}在 ${e.plan} 上无法创建，${e.plan === 'WebGPU' ? '改用 CPU 继续（较慢）' : '加载失败'}：${e.message}`,
+          });
+        }
       }
     },
   });
@@ -196,12 +222,20 @@ function post(message, transfer = []) {
 }
 
 self.onmessage = async (event) => {
-  const { id, type, urls, sizes, wasmBase, request } = event.data || {};
+  const { id, type, urls, sizes, wasmBase, request, latentScale } = event.data || {};
   if (type !== 'generate') return;
   try {
     // 运行库目录由页面给出（开发服务器与网站包的路径不同），优先于上面的默认值
     if (wasmBase) ort.env.wasm.wasmPaths = wasmBase;
-    const { runtime, tokenizer, scheduler } = await ensureLoaded(id, urls, sizes || {});
+    // 先读取分词器并检查预算（管理员内容超出时直接报错，不下载大文件）
+    const tokenizer = await ensureTokenizer(urls, sizes || {});
+    const budget = checkPromptBudget(tokenizer, {
+      input: typeof request.input === 'string' ? request.input : null,
+      maxInputTokens: request.maxInputTokens,
+      lead: request.lead || '',
+      prompt: request.prompt,
+    });
+    const { runtime, scheduler } = await ensureLoaded(id, urls, sizes || {}, tokenizer);
     post({ id, type: 'progress', stage: 'denoise', step: 0, total: request.steps, message: '开始生成' });
     const { width, height, chw } = await generateSd15({
       runtime,
@@ -214,11 +248,12 @@ self.onmessage = async (event) => {
       steps: request.steps,
       guidance: request.guidance,
       seed: request.seed,
+      latentScale,
       onStep: ({ step, total }) => post({ id, type: 'progress', stage: 'denoise', step, total }),
     });
     post({ id, type: 'progress', stage: 'decode', message: '正在解码图像…' });
     const rgba = chwToRgba(chw, width, height);
-    post({ id, type: 'result', width, height, rgba }, [rgba.buffer]);
+    post({ id, type: 'result', width, height, rgba, truncatedTokens: budget.truncatedTokens }, [rgba.buffer]);
   } catch (err) {
     post({ id, type: 'error', message: err?.message || String(err) });
   }

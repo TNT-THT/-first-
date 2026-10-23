@@ -301,6 +301,8 @@ python3 -m http.server 8000 -d web/dist      # 任意静态服务器均可
 
 下载过程中遇到网络中断或服务器暂时出错，会自动重试（间隔 1 秒起，逐步加长，最长 30 秒），不会中断下载。全部文件下载完成后再从本机缓存校验。手动取消后，已保存的部分会保留：再次点击“继续下载”会从断点继续，不会重下已完成的文件和分段（大文件按 64 MB 分段并行下载）。
 
+除 SD 1.5 外，网页版还列出 4 个同为 SD 1.x 结构的模型：BK-SDM Small 2M、Tiny SD、Small SD、SDXS-512 DreamShaper。它们与 SD 1.5 使用相同的分词器与 ONNX 接口，但调度器不同，网页中已分别实现 PNDM、DPM-Solver++、DEIS 与 Euler（SDXS 为一步模型）。调度器的逐步结果与 diffusers 0.41.0 对照测试通过（数据由 `scripts/image/scheduler_fixtures.py` 生成，需要 torch 与 diffusers==0.41.0）；真实模型文件的接口与画质尚未在浏览器中测试。
+
 fp32 版（约 4.13 GB）在网页版中暂不可用：其 UNet 权重约 3.4 GB，超过浏览器单个文件约 2 GB 的上限，因此不提供下载。请使用下面的本机 Python 脚本运行 fp32。
 
 ### 方式二：本机 Python 脚本（不依赖浏览器，可用 CPU / NVIDIA / DirectML）
@@ -320,6 +322,7 @@ python3 scripts/image/sd15_local.py --models ./sd15 --prompt "a red fox in the s
   - `tokenizer/vocab.json` 与 `tokenizer/merges.txt`
   - `scheduler/scheduler_config.json`
 - 整个目录请取自同一个仓库。fp16 版的 `text_encoder/model.onnx` 与网页版备选的 fp32 文件路径相同，混放会互相覆盖。
+- 本机脚本只实现 PNDM，目前只支持 nmkd 的 SD 1.5 仓库，其他模型请在网页版中使用。
 - 尺寸须为 256–768 之间且为 8 的倍数；步数 2–50；`--provider cpu|cuda|dml` 选择运行设备（默认 cpu）。
 - 脚本的分词器、调度器、随机噪声与网页版使用同一算法，并已用网页版代码做交叉检查（分词、噪声、时间步、调度器每一步）。完整图像在真实模型上的逐像素一致性、画质与速度尚未验证。
 - 测试：`python3 -m unittest scripts/image/test_sd15_local.py`

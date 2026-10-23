@@ -3,8 +3,9 @@
  * 与 diffusers 的 OnnxStableDiffusionPipeline 对齐：
  *   - 文本编码：先编码提示词、再编码负面提示词（各自 batch=1）；
  *   - 无分类器引导（CFG）：guidance > 1 时 UNet 输入为 [无条件, 条件] 两份，输出 noise = u + g·(c − u)；
- *   - 调度器：PNDM；初始噪声乘以 init_noise_sigma（PNDM 为 1）；
- *   - 解码：latent / 0.18215，再映射到 [0, 1]。
+ *   - 调度器：由 createScheduler 决定（PNDM、DPM-Solver++、DEIS、Euler，见 schedulers.js）；
+ *     初始噪声乘以 initNoiseSigma，UNet 输入经 scaleModelInput 缩放（Euler 需要）；
+ *   - 解码：latent / latentScale（SD 1.x 为 0.18215；TAESD 为 1.0），输出约在 [-1, 1]。
  * 运行时（ONNX 会话）通过 runtime 参数注入，便于用假模型测试。
  */
 import { gaussianNoise } from './rng.js';
@@ -12,12 +13,15 @@ import { sizeProblem } from './sizes.js';
 
 export const SD15_LATENT_SCALE = 0.18215;
 export const SD15_MAX_STEPS = 50;
+/** 调度器未声明 minSteps 时的下限（PNDM 需要至少 2 步）。 */
+const DEFAULT_MIN_STEPS = 2;
 
 /**
  * @param {object} p
  * @param {{encode(ids:Int32Array):Promise<Float32Array>, unet(args:object):Promise<Float32Array>, decode(latent:Float32Array,h8:number,w8:number):Promise<Float32Array>}} p.runtime
  * @param {{encode(text:string):Int32Array}} p.tokenizer
- * @param {{setTimesteps(n:number):number[], step(out:ArrayLike<number>,t:number,sample:ArrayLike<number>):Float64Array, initNoiseSigma:number}} p.scheduler
+ * @param {{setTimesteps(n:number):number[], step(out:ArrayLike<number>,t:number,sample:ArrayLike<number>):Float64Array, initNoiseSigma:number, minSteps?:number, scaleModelInput?(sample:ArrayLike<number>,t:number):ArrayLike<number>}} p.scheduler
+ * @param {number} [p.latentScale] 解码前除以的潜变量缩放（默认 SD 1.x 的 0.18215；SDXS 的 TAESD 为 1.0）
  * @returns {Promise<{width:number,height:number,chw:Float32Array}>} chw 为 [3, H, W]，取值约在 [-1, 1]
  */
 export async function generateSd15({
@@ -31,14 +35,17 @@ export async function generateSd15({
   steps = 20,
   guidance = 7.5,
   seed,
+  latentScale = SD15_LATENT_SCALE,
   onStep,
   signal,
 }) {
   const problem = sizeProblem(width, height);
   if (problem) throw new Error(problem);
-  if (!Number.isInteger(steps) || steps < 2 || steps > SD15_MAX_STEPS) {
-    throw new Error(`步数必须是 2–${SD15_MAX_STEPS} 之间的整数`);
+  const minSteps = scheduler.minSteps ?? DEFAULT_MIN_STEPS;
+  if (!Number.isInteger(steps) || steps < minSteps || steps > SD15_MAX_STEPS) {
+    throw new Error(`步数必须是 ${minSteps}–${SD15_MAX_STEPS} 之间的整数`);
   }
+  if (!(latentScale > 0)) throw new Error('潜变量缩放必须是正数');
   if (!Number.isFinite(guidance) || guidance < 0) throw new Error('引导系数必须是非负数字');
   if (!Number.isInteger(seed) || seed < 0) throw new Error('种子必须是非负整数');
   const h8 = height / 8;
@@ -55,12 +62,14 @@ export async function generateSd15({
     context = concat(uncondition, condition);
   }
 
-  let latents = Float64Array.from(gaussianNoise(seed, latentLen), (v) => v * scheduler.initNoiseSigma);
+  // 先设置时间步：Euler 等调度器的初始噪声乘数取决于时间步
   const timesteps = scheduler.setTimesteps(steps);
+  let latents = Float64Array.from(gaussianNoise(seed, latentLen), (v) => v * scheduler.initNoiseSigma);
   for (let i = 0; i < timesteps.length; i += 1) {
     throwIfAborted(signal);
     const t = timesteps[i];
-    const sample = useCfg ? concat(latents, latents) : latents;
+    const model = scheduler.scaleModelInput ? scheduler.scaleModelInput(latents, t) : latents;
+    const sample = useCfg ? concat(model, model) : model;
     const noise = await runtime.unet({
       sample: Float32Array.from(sample),
       timestep: t,
@@ -83,7 +92,7 @@ export async function generateSd15({
   }
 
   throwIfAborted(signal);
-  const scaled = Float32Array.from(latents, (v) => v / SD15_LATENT_SCALE);
+  const scaled = Float32Array.from(latents, (v) => v / latentScale);
   const chw = await runtime.decode(scaled, h8, w8);
   if (chw.length !== 3 * height * width) throw new Error(`解码结果尺寸不正确：${chw.length}`);
   return { width, height, chw };

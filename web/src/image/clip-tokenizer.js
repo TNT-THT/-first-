@@ -104,8 +104,8 @@ export function createClipTokenizer({ vocab, merges, bosToken = '<|startoftext|>
     eos,
     pad,
     maxLength,
-    /** 文本 → token id 数组（不含补齐），包含 BOS 与 EOS，超长时截断并保留 EOS。 */
-    tokenize(text) {
+    /** 文本 → 完整的 token id 数组（包含 BOS 与 EOS，不截断），用于计算占用的 token 数。 */
+    rawTokenize(text) {
       const clean = String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
       const ids = [bos];
       for (const m of clean.matchAll(PATTERN)) {
@@ -122,6 +122,11 @@ export function createClipTokenizer({ vocab, merges, bosToken = '<|startoftext|>
         }
       }
       ids.push(eos);
+      return ids;
+    },
+    /** 文本 → token id 数组（不含补齐），包含 BOS 与 EOS，超长时截断并保留 EOS。 */
+    tokenize(text) {
+      const ids = this.rawTokenize(text);
       if (ids.length > maxLength) {
         return [...ids.slice(0, maxLength - 1), eos];
       }

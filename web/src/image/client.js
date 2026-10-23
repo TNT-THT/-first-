@@ -71,7 +71,7 @@ export function createImageClient({ createWorker, scriptUrl = '' }) {
      * urls: 模型文件地址（见 catalog.sourceUrls）；wasmBase: ONNX Runtime 运行库的目录地址（绝对地址）。
      * 返回 {width, height, rgba}。
      */
-    generate(request, { urls, sizes, wasmBase, onProgress, signal } = {}) {
+    generate(request, { urls, sizes, wasmBase, latentScale, onProgress, signal } = {}) {
       if (signal?.aborted) return Promise.reject(abortError());
       const id = nextId;
       nextId += 1;
@@ -93,7 +93,7 @@ export function createImageClient({ createWorker, scriptUrl = '' }) {
           },
         });
         try {
-          ensureWorker().postMessage({ id, type: 'generate', urls, sizes, wasmBase, request });
+          ensureWorker().postMessage({ id, type: 'generate', urls, sizes, wasmBase, latentScale, request });
         } catch (err) {
           pending.delete(id);
           reject(err);

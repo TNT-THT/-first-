@@ -14,146 +14,178 @@
     "models": [
       {
         "id": "Qwen2.5-3B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5 3B（非推理·小·纯文本·默认·需约 2.4 GB 显存）"
+        "label": "Qwen2.5 3B（非推理·小·纯文本·默认·需约 2.4 GB 显存）",
+        "note": "参数量级：约 3B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 2.4 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen2.5-3B-Instruct-q4f32_1-MLC",
-        "label": "Qwen2.5 3B q4f32（非推理·小·纯文本·高精度·需约 2.8 GB 显存）"
+        "label": "Qwen2.5 3B q4f32（非推理·小·纯文本·高精度·需约 2.8 GB 显存）",
+        "note": "参数量级：约 3B（按模型名称推算）。4 位量化（fp32 计算，显存比 q4f16 多）。显存：标签中约 2.8 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen3-4B-q4f16_1-MLC",
         "label": "Qwen3 4B（推理·小·纯文本·需约 3.4 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 4B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 3.4 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen3-4B-q4f32_1-MLC",
         "label": "Qwen3 4B q4f32（推理·小·纯文本·高精度·需约 4.2 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 4B（按模型名称推算）。4 位量化（fp32 计算，显存比 q4f16 多）。显存：标签中约 4.2 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen3-1.7B-q4f16_1-MLC",
         "label": "Qwen3 1.7B（推理·小·纯文本·需约 2.0 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 1.7B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 2.0 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen2.5-Coder-3B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 3B（非推理·小·纯文本·需约 2.4 GB 显存）"
+        "label": "Qwen2.5-Coder 3B（非推理·小·纯文本·需约 2.4 GB 显存）",
+        "note": "参数量级：约 3B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 2.4 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Ministral-3-3B-Instruct-2512-BF16-q4f16_1-MLC",
-        "label": "Ministral 3 3B Instruct（非推理·小·纯文本·需约 2.8 GB 显存）"
+        "label": "Ministral 3 3B Instruct（非推理·小·纯文本·需约 2.8 GB 显存）",
+        "note": "参数量级：约 3B（按模型名称推算）。4 位量化（原模型为 BF16）。显存：标签中约 2.8 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen2.5-Coder-7B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5-Coder 7B（非推理·中·纯文本·需约 5.0 GB 显存）"
+        "label": "Qwen2.5-Coder 7B（非推理·中·纯文本·需约 5.0 GB 显存）",
+        "note": "参数量级：约 7B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 5.0 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen2.5-Coder-7B-Instruct-q4f32_1-MLC",
-        "label": "Qwen2.5-Coder 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）"
+        "label": "Qwen2.5-Coder 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）",
+        "note": "参数量级：约 7B（按模型名称推算）。4 位量化（fp32 计算，显存比 q4f16 多）。显存：标签中约 5.8 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen2.5-7B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5 7B（非推理·中·纯文本·需约 5.0 GB 显存）"
+        "label": "Qwen2.5 7B（非推理·中·纯文本·需约 5.0 GB 显存）",
+        "note": "参数量级：约 7B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 5.0 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen2.5-7B-Instruct-q4f32_1-MLC",
-        "label": "Qwen2.5 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）"
+        "label": "Qwen2.5 7B q4f32（非推理·中·纯文本·高精度·需约 5.8 GB 显存）",
+        "note": "参数量级：约 7B（按模型名称推算）。4 位量化（fp32 计算，显存比 q4f16 多）。显存：标签中约 5.8 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen3-8B-q4f16_1-MLC",
         "label": "Qwen3 8B（推理·中·纯文本·需约 5.6 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 8B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 5.6 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen3-8B-q4f32_1-MLC",
         "label": "Qwen3 8B q4f32（推理·中·纯文本·高精度·需约 6.7 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 8B（按模型名称推算）。4 位量化（fp32 计算，显存比 q4f16 多）。显存：标签中约 6.7 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Phi-4-mini-instruct-q4f16_1-MLC",
-        "label": "Phi-4 mini 3.8B（非推理·小·纯文本·需约 3.4 GB 显存）"
+        "label": "Phi-4 mini 3.8B（非推理·小·纯文本·需约 3.4 GB 显存）",
+        "note": "参数量级：约 3.8B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 3.4 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Phi-4-mini-instruct-q4f32_1-MLC",
-        "label": "Phi-4 mini 3.8B q4f32（非推理·中·纯文本·高精度·需约 4.1 GB 显存）"
+        "label": "Phi-4 mini 3.8B q4f32（非推理·中·纯文本·高精度·需约 4.1 GB 显存）",
+        "note": "参数量级：约 3.8B（按模型名称推算）。4 位量化（fp32 计算，显存比 q4f16 多）。显存：标签中约 4.1 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "gemma3-1b-it-q4f16_1-MLC",
-        "label": "Gemma 3 1B（非推理·极小·纯文本·需约 0.7 GB 显存）"
+        "label": "Gemma 3 1B（非推理·极小·纯文本·需约 0.7 GB 显存）",
+        "note": "参数量级：约 1B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 0.7 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen2.5-0.5B-Instruct-q4f16_1-MLC",
-        "label": "Qwen2.5 0.5B（非推理·极小·纯文本·需约 0.9 GB 显存）"
+        "label": "Qwen2.5 0.5B（非推理·极小·纯文本·需约 0.9 GB 显存）",
+        "note": "参数量级：约 0.5B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 0.9 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen3-0.6B-q4f16_1-MLC",
         "label": "Qwen3 0.6B（推理·小·纯文本·需约 1.4 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 0.6B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 1.4 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Qwen3.5-0.8B-q4f16_1-MLC",
         "label": "Qwen3.5 0.8B（推理·小·纯文本·需约 1.6 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 0.8B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 1.6 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。Qwen3.5 系列的参数量与显存均为估计，尚未在本项目中实测。"
       },
       {
         "id": "Qwen3.5-2B-q4f16_1-MLC",
         "label": "Qwen3.5 2B（推理·小·纯文本·需约 2.2 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 2B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 2.2 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。Qwen3.5 系列的参数量与显存均为估计，尚未在本项目中实测。"
       },
       {
         "id": "Qwen3.5-4B-q4f16_1-MLC",
         "label": "Qwen3.5 4B（推理·中·纯文本·需约 3.8 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 4B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 3.8 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。Qwen3.5 系列的参数量与显存均为估计，尚未在本项目中实测。"
       },
       {
         "id": "Qwen3.5-9B-q4f16_1-MLC",
         "label": "Qwen3.5 9B（推理·中·纯文本·需约 6.3 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 9B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 6.3 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。Qwen3.5 系列的参数量与显存均为估计，尚未在本项目中实测。"
       },
       {
         "id": "gemma-2-9b-it-q4f16_1-MLC",
-        "label": "Gemma 2 9B（非推理·中·纯文本·需约 6.3 GB 显存）"
+        "label": "Gemma 2 9B（非推理·中·纯文本·需约 6.3 GB 显存）",
+        "note": "参数量级：约 9B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 6.3 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "gemma-2-9b-it-q4f32_1-MLC",
-        "label": "Gemma 2 9B q4f32（非推理·大·纯文本·高精度·需约 8.2 GB 显存）"
+        "label": "Gemma 2 9B q4f32（非推理·大·纯文本·高精度·需约 8.2 GB 显存）",
+        "note": "参数量级：约 9B（按模型名称推算）。4 位量化（fp32 计算，显存比 q4f16 多）。显存：标签中约 8.2 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "DeepSeek-R1-Distill-Llama-8B-q4f16_1-MLC",
         "label": "DeepSeek-R1 8B（推理·中·纯文本·需约 4.9 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 8B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 4.9 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "DeepSeek-R1-Distill-Qwen-7B-q4f16_1-MLC",
         "label": "DeepSeek-R1 7B（推理·中·纯文本·需约 5.0 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 7B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 5.0 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Llama-2-13b-chat-hf-q4f16_1-MLC",
-        "label": "Llama 2 13B（非推理·大·纯文本·需约 11.5 GB 显存）"
+        "label": "Llama 2 13B（非推理·大·纯文本·需约 11.5 GB 显存）",
+        "note": "参数量级：约 13B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 11.5 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Llama-3.1-70B-Instruct-q3f16_1-MLC",
-        "label": "Llama 3.1 70B（非推理·超大·纯文本·需约 30.4 GB 显存）"
+        "label": "Llama 3.1 70B（非推理·超大·纯文本·需约 30.4 GB 显存）",
+        "note": "参数量级：约 70B（按模型名称推算）。3 位量化（fp16 计算）。显存：标签中约 30.4 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Llama-3-70B-Instruct-q3f16_1-MLC",
-        "label": "Llama 3 70B（非推理·超大·纯文本·需约 30.4 GB 显存）"
+        "label": "Llama 3 70B（非推理·超大·纯文本·需约 30.4 GB 显存）",
+        "note": "参数量级：约 70B（按模型名称推算）。3 位量化（fp16 计算）。显存：标签中约 30.4 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。"
       },
       {
         "id": "Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC",
         "label": "Qwen3.5 4B 去审查·慧辉版（推理·中·纯文本·第三方·需约 3.8 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 4B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 3.8 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。第三方微调版，参数量与原版相同；输出质量未经本项目核对。"
       },
       {
         "id": "Leyten-Qwen3.5-9B-compute-q4f16_1-MLC",
         "label": "Qwen3.5 9B 去审查·Heretical 版（推理·中·纯文本·第三方·需约 6.3 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 9B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 6.3 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。第三方微调版，参数量与原版相同；输出质量未经本项目核对。"
       },
       {
         "id": "Huihui-Qwen3.5-2B-abliterated-q4f16_1-MLC",
         "label": "Qwen3.5 2B 去审查·慧辉版（推理·小·纯文本·第三方·需约 2.2 GB 显存）",
-        "reasoning": true
+        "reasoning": true,
+        "note": "参数量级：约 2B（按模型名称推算）。4 位量化（fp16 计算）。显存：标签中约 2.2 GB（估计，含默认窗口的 KV 缓存，未在本项目实测）。第三方微调版，参数量与原版相同；输出质量未经本项目核对。"
       }
     ],
     "temperature": 0.3,
@@ -216,7 +248,7 @@
   "imageModels": [
     {
       "id": "sd15-nmkd-fp16",
-      "label": "Stable Diffusion 1.5（512 · fp16 ONNX · 浏览器内生图）",
+      "label": "Stable Diffusion 1.5（512 · fp16 ONNX · 浏览器内生图 · 约 1.0B 参数 · 显存估计 2.6–3.6 GB）",
       "family": "sd15",
       "repo": "nmkd/stable-diffusion-1.5-onnx-fp16",
       "revision": "main",
@@ -264,11 +296,11 @@
           "size": 492582967
         }
       },
-      "note": "非官方 fp16 ONNX 转换版（nmkd）。已核对：仓库文件结构、调度器与分词器配置，以及 ONNX 接口名称（依据 diffusers 0.41 的 ONNX 管线源码）。未验证：真实模型的画质、显存占用与速度，需在有 WebGPU 的设备上测试。仓库不含安全检查器，生成内容不经过自动过滤。 文本编码器备选（textEncoderFallback，fp32，约 0.49 GB）：主文件无法创建会话时使用，已包含在“下载到本机”中，离线可用。大小与路径已由 Hugging Face 元数据核对，接口与运行效果未验证。"
+      "note": "参数量级：约 1.0B（UNet 0.86B、文本编码器 0.12B、解码器 0.05B，由文件大小推算）。显存：权重约 2.1 GB，浏览器内运行约 2.6–3.6 GB（估计，未实测）。文本编码器备选（fp32）仅在主文件无法创建会话时读取，不计入上述权重。非官方 fp16 ONNX 转换版（nmkd）。已核对：仓库文件结构、调度器与分词器配置，以及 ONNX 接口名称（依据 diffusers 0.41 的 ONNX 管线源码）。未验证：真实模型的画质、显存占用与速度，需在有 WebGPU 的设备上测试。仓库不含安全检查器，生成内容不经过自动过滤。 文本编码器备选（textEncoderFallback，fp32，约 0.49 GB）：主文件无法创建会话时使用，已包含在“下载到本机”中，离线可用。大小与路径已由 Hugging Face 元数据核对，接口与运行效果未验证。"
     },
     {
       "id": "sd15-nmkd-fp32",
-      "label": "Stable Diffusion 1.5（512 · fp32 ONNX · 浏览器内生图）",
+      "label": "Stable Diffusion 1.5（512 · fp32 ONNX · 浏览器内生图 · 约 1.0B 参数 · 显存估计 4.6–5.6 GB，网页版不可用）",
       "family": "sd15",
       "repo": "nmkd/stable-diffusion-1.5-onnx",
       "revision": "main",
@@ -310,20 +342,189 @@
           "size": 493
         }
       },
-      "note": "非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB。网页版暂不可用：UNet 权重（约 3.4 GB）超过浏览器单个文件 2 GB 的上限，无法在网页中加载，因此也不提供下载。可使用本机 Python 脚本（scripts/image/sd15_local.py）运行，见 README。"
+      "note": "参数量级：约 1.0B（fp32 存储，由文件大小推算）。显存：权重约 4.1 GB，本机运行约 4.6–5.6 GB（估计，未实测）；网页版因单文件上限无法加载。非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB。网页版暂不可用：UNet 权重（约 3.4 GB）超过浏览器单个文件 2 GB 的上限，无法在网页中加载，因此也不提供下载。可使用本机 Python 脚本（scripts/image/sd15_local.py）运行，见 README。"
+    },
+    {
+      "id": "bk-sdm-small-2m-onnx-webgpu",
+      "label": "BK-SDM Small 2M（512 · fp16 ONNX · 精简 UNet · 20 步 · 约 0.65B 参数 · 显存估计 1.9–2.9 GB）",
+      "family": "bk-sdm",
+      "repo": "danyalmalik/bk-sdm-small-2m-ONNX-WebGPU",
+      "revision": "main",
+      "status": "available",
+      "license": "CreativeML OpenRAIL-M",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 20,
+        "guidance": 7.5
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 246323042
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 965284722
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 198078716
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 313
+        }
+      },
+      "note": "参数量级：约 0.65B（UNet 约 0.48B，文本编码器 0.12B，解码器 0.05B，由文件大小推算）。显存：权重约 1.4 GB，浏览器内运行约 1.9–2.9 GB（估计，未实测）。BK-SDM（nota-ai/bk-sdm-small-2m 的 ONNX 转换，UNet 去掉了部分模块，单文件 965 MB）。调度器为 PNDM，与其他 SD 1.5 模型相同。已核对：仓库文件结构与大小（Hugging Face API）、调度器配置（与 diffusers 0.41 的参数逐项对照，并用 diffusers 生成的数据测试逐步结果），分词器与 SD 1.5 相同。未核对：真实 ONNX 的输入名称与数据类型、画质、显存与速度，需在有 WebGPU 的设备上测试；接口不符时会在加载时报错，不会静默出图。许可证为 CreativeML OpenRAIL-M，附带使用限制（许可证附带使用限制，见原许可证）。"
+    },
+    {
+      "id": "tiny-sd-onnx-webgpu",
+      "label": "Tiny SD（512 · fp16 ONNX · DPM-Solver++ · 20 步 · 约 0.5B 参数 · 显存估计 1.6–2.6 GB）",
+      "family": "tiny-sd",
+      "repo": "danyalmalik/tiny-sd-ONNX-WebGPU",
+      "revision": "main",
+      "status": "available",
+      "license": "CreativeML OpenRAIL-M",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 20,
+        "guidance": 7.5
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 246323042
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 647336426
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 198078716
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 691
+        }
+      },
+      "note": "参数量级：约 0.5B（UNet 约 0.32B，文本编码器 0.12B，解码器 0.05B，由文件大小推算）。显存：权重约 1.1 GB，浏览器内运行约 1.6–2.6 GB（估计，未实测）。Tiny SD（segmind/tiny-sd 的 ONNX 转换，UNet 单文件 647 MB）。调度器为 DPM-Solver++（2 阶，midpoint，末步低阶），已在网页中实现并与 diffusers 逐步对照。已核对：仓库文件结构与大小（Hugging Face API）、调度器配置（与 diffusers 0.41 的参数逐项对照，并用 diffusers 生成的数据测试逐步结果），分词器与 SD 1.5 相同。未核对：真实 ONNX 的输入名称与数据类型、画质、显存与速度，需在有 WebGPU 的设备上测试；接口不符时会在加载时报错，不会静默出图。许可证为 CreativeML OpenRAIL-M，附带使用限制（许可证附带使用限制，见原许可证）。"
+    },
+    {
+      "id": "small-sd-onnx-webgpu",
+      "label": "Small SD（512 · fp16 ONNX · DEIS · 20 步 · 约 0.75B 参数 · 显存估计 2.1–3.1 GB）",
+      "family": "small-sd",
+      "repo": "danyalmalik/small-sd-ONNX-WebGPU",
+      "revision": "main",
+      "status": "available",
+      "license": "CreativeML OpenRAIL-M",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 20,
+        "guidance": 7.5
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 246323042
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 1159426870
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 198078716
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 617
+        }
+      },
+      "note": "参数量级：约 0.75B（UNet 约 0.58B，文本编码器 0.12B，解码器 0.05B，由文件大小推算）。显存：权重约 1.6 GB，浏览器内运行约 2.1–3.1 GB（估计，未实测）。Small SD（segmind/small-sd 的 ONNX 转换，UNet 单文件 1.16 GB，仍在 2 GB 以内）。调度器为 DEIS（2 阶，logrho），已在网页中实现并与 diffusers 逐步对照。已核对：仓库文件结构与大小（Hugging Face API）、调度器配置（与 diffusers 0.41 的参数逐项对照，并用 diffusers 生成的数据测试逐步结果），分词器与 SD 1.5 相同。未核对：真实 ONNX 的输入名称与数据类型、画质、显存与速度，需在有 WebGPU 的设备上测试；接口不符时会在加载时报错，不会静默出图。许可证为 CreativeML OpenRAIL-M，附带使用限制（许可证附带使用限制，见原许可证）。"
+    },
+    {
+      "id": "sdxs-512-dreamshaper-onnx-webgpu",
+      "label": "SDXS-512 DreamShaper（512 · fp16 ONNX · 1 步 · 约 0.44B 参数 · 显存估计 1.4–2.4 GB）",
+      "family": "sdxs",
+      "repo": "danyalmalik/sdxs-512-dreamshaper-ONNX-WebGPU",
+      "revision": "main",
+      "status": "available",
+      "license": "CreativeML Open RAIL++-M",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 1,
+        "guidance": 1
+      },
+      "latentScale": 1,
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 246323042
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 631897533
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 4912820
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 480
+        }
+      },
+      "note": "参数量级：约 0.44B（UNet 约 0.32B，文本编码器 0.12B，TAESD 解码器很小，由文件大小推算）。显存：权重约 0.9 GB，浏览器内运行约 1.4–2.4 GB（估计，未实测）。SDXS-512-DreamShaper（IDKiro，一步生成，UNet 单文件 632 MB）。解码器为 TAESD，潜变量不做 0.18215 缩放（scaling_factor = 1.0），解码输出为 [-1, 1]。调度器为 Euler（trailing），已在网页中实现并与 diffusers 逐步对照。默认 1 步、引导 1（引导为 1 时不做无分类器引导，与模型要求的 CFG 关闭一致）。已核对：仓库文件结构与大小（Hugging Face API）、调度器配置（与 diffusers 0.41 的参数逐项对照，并用 diffusers 生成的数据测试逐步结果），分词器与 SD 1.5 相同。未核对：真实 ONNX 的输入名称与数据类型、画质、显存与速度，需在有 WebGPU 的设备上测试；接口不符时会在加载时报错，不会静默出图。许可证为 Open RAIL++-M，附带使用限制。"
     },
     {
       "id": "flux2-klein-4b-onnx-webgpu",
-      "label": "FLUX.2 Klein 4B",
+      "label": "FLUX.2 Klein 4B（约 4B 参数 · 显存需求高，估计超过 8 GB）",
       "family": "flux2",
       "repo": "cgb/flux2-klein-4b-onnx-webgpu",
       "status": "planned",
       "license": "Apache-2.0",
-      "note": "尚未接入：推理管线（Qwen3 分词与聊天模板、潜变量打包与解包、VAE 输入约定）还未完成，等 SD 1.5 验证后再接入。"
+      "note": "参数量级：扩散 Transformer 约 4B（按模型名称推算）；文本编码器的规模与文件清单尚未核对。显存：仅按参数量估计，fp16 权重约 8 GB 加上文本编码器，超过常见 8 GB 显卡（估计，未核对）。尚未接入：推理管线（Qwen3 分词与聊天模板、潜变量打包与解包、VAE 输入约定）还未完成，等 SD 1.5 验证后再接入。"
     },
     {
       "id": "sd-turbo-ort-web",
-      "label": "SD-Turbo（512 · fp16 ONNX · 1–4 步）",
+      "label": "SD-Turbo（512 · fp16 ONNX · 1–4 步 · 约 1.3B 参数 · 显存估计 3.0–4.0 GB）",
       "family": "sd-turbo",
       "repo": "schmuell/sd-turbo-ort-web",
       "revision": "main",
@@ -361,11 +562,11 @@
           "size": 583
         }
       },
-      "note": "SD-Turbo（基于 SD 2.1 蒸馏，单步或少步出图，无需分类器引导）。ONNX 文件来自微软 ONNX Runtime Web 示例使用的仓库，大小已由 Hugging Face 元数据核对（约 2.5 GB）。尚未接入：需要新的调度器（Euler ancestral，trailing 时间表）、文本编码器的隐藏维度与 SD 1.5 不同，以及 UNet 的输入约定需要核对。未在浏览器中验证。"
+      "note": "参数量级：约 1.3B（UNet 约 0.87B、文本编码器 0.34B、解码器 0.05B，由文件大小推算）。显存：权重约 2.5 GB，浏览器内运行约 3.0–4.0 GB（估计，未实测）。SD-Turbo（基于 SD 2.1 蒸馏，单步或少步出图，无需分类器引导）。ONNX 文件来自微软 ONNX Runtime Web 示例使用的仓库，大小已由 Hugging Face 元数据核对（约 2.5 GB）。尚未接入：需要新的调度器（Euler ancestral，trailing 时间表）、文本编码器的隐藏维度与 SD 1.5 不同，以及 UNet 的输入约定需要核对。未在浏览器中验证。"
     },
     {
       "id": "z-image-turbo-webnn",
-      "label": "Z-Image-Turbo（6B · 4-bit ONNX · 9 步）",
+      "label": "Z-Image-Turbo（6B · 4-bit ONNX · 9 步 · 约 10B 参数 · 显存估计 6.5–7.5 GB，8 GB 显卡可能不足）",
       "family": "z-image",
       "repo": "webnn/Z-Image-Turbo",
       "revision": "main",
@@ -408,17 +609,17 @@
           "size": 3902
         }
       },
-      "note": "Z-Image-Turbo（阿里通义 6B 扩散 Transformer，文本编码器为 Qwen3-4B，9 步）。ONNX 文件来自 webnn/Z-Image-Turbo，列出的文件大小已由 Hugging Face 元数据核对（约 6 GB，不含分词器）。尚未接入：需要 Qwen3 分词与聊天模板、流匹配调度、潜变量打包，并处理分片的外部权重。未在浏览器中验证。"
+      "note": "参数量级：约 10B（扩散 Transformer 约 6B，文本编码器 Qwen3-4B 约 4B，按名称与文件大小估计）。显存：4 位权重约 6.0 GB，运行约 6.5–7.5 GB（估计，未实测），8 GB 显卡可能不足。Z-Image-Turbo（阿里通义 6B 扩散 Transformer，文本编码器为 Qwen3-4B，9 步）。ONNX 文件来自 webnn/Z-Image-Turbo，列出的文件大小已由 Hugging Face 元数据核对（约 6 GB，不含分词器）。尚未接入：需要 Qwen3 分词与聊天模板、流匹配调度、潜变量打包，并处理分片的外部权重。未在浏览器中验证。"
     },
     {
       "id": "janus-pro-1b-onnx",
-      "label": "Janus-Pro-1B（多模态 · ONNX）",
+      "label": "Janus-Pro-1B（多模态 · ONNX · 约 1B 参数 · 显存估计 2.7–3.7 GB）",
       "family": "janus",
       "repo": "onnx-community/Janus-Pro-1B-ONNX",
       "revision": "main",
       "status": "planned",
       "license": "以原模型页面为准",
-      "note": "DeepSeek Janus-Pro-1B（自回归的多模态模型，文字生成图像能力有限）。ONNX 版在 onnx-community/Janus-Pro-1B-ONNX，演示页面称约 2.24 GB。尚未接入：需要自回归采样、图像令牌解码与 Transformers.js 风格的管线，且没有种子和尺寸控制。未核对文件清单，未在浏览器中验证。"
+      "note": "参数量级：约 1B（按模型名称推算）。显存：演示页面的文件约 2.2 GB，运行约 2.7–3.7 GB（估计，未核对文件清单，未实测）。DeepSeek Janus-Pro-1B（自回归的多模态模型，文字生成图像能力有限）。ONNX 版在 onnx-community/Janus-Pro-1B-ONNX，演示页面称约 2.24 GB。尚未接入：需要自回归采样、图像令牌解码与 Transformers.js 风格的管线，且没有种子和尺寸控制。未核对文件清单，未在浏览器中验证。"
     }
   ]
 }

@@ -11,6 +11,7 @@
  * 存储键 oj-ai.image.v1，按图片模型分别保存（与聊天模型的适应记录 oj-ai.adapt.v1 分开）。
  */
 import { normalizeSize, snapSize } from './sizes.js';
+import { DEFAULT_INPUT_TOKENS, MAX_INPUT_TOKENS, MIN_INPUT_TOKENS } from './prompt-budget.js';
 
 export const IMAGE_STORAGE_KEY = 'oj-ai.image.v1';
 export const MAX_IMAGE_HINTS = 30;
@@ -19,11 +20,13 @@ export const MAX_IMAGE_NOTES = 30;
 export const IMAGE_PARAM_LIMITS = {
   width: [256, 768],
   height: [256, 768],
-  steps: [2, 50],
+  steps: [1, 50], // 下限由调度器决定（PNDM 至少 2 步，SDXS 等一步模型为 1 步），见 sd15.js
   guidance: [1, 20],
   seed: [0, 4294967295],
+  // 描述输入上限（token）：仅管理员可通过参数行修改；默认 4096，硬上限 16384（见 prompt-budget.js）
+  inputTokens: [MIN_INPUT_TOKENS, MAX_INPUT_TOKENS],
 };
-const INTEGER_KEYS = new Set(['width', 'height', 'steps', 'seed']);
+const INTEGER_KEYS = new Set(['width', 'height', 'steps', 'seed', 'inputTokens']);
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 
 /** 解析参数行；没有有效参数时返回 null。 */
@@ -186,6 +189,58 @@ export function clearImageHints(modelId, { storage = globalThis.localStorage } =
   return true;
 }
 
+/** 有管理员记录（更正、知识库或风格提示）的生图 AI 的 id 列表（仅本机）。 */
+export function imageAdminModelIds({ storage = globalThis.localStorage } = {}) {
+  const models = readAll(storage).models;
+  return Object.keys(models).filter((id) => {
+    const e = models[id];
+    return ['corrections', 'knowledge', 'hints'].some((k) => Array.isArray(e?.[k]) && e[k].length > 0);
+  });
+}
+
+/**
+ * 把条目复制到某个生图 AI（仅本机；复制而非移动）。
+ * items = {corrections, knowledge, hints}，每项为 [{text, from?}]。
+ * - 更正会成为该生图 AI 的底层设定（放在提示词最前面），因此必须 allowCorrections（调用方已通过管理员密钥验证）。
+ * - 完全相同文字的条目跳过（duplicate）；每类不超过上限，超出的不写入（overflow），不丢弃已有条目。
+ * - 没有写入任何内容时不改动存储。
+ * 返回 {corrections, knowledge, hints, duplicate, overflow}：各类实际新增条数。
+ */
+export function copyIntoImageModel(
+  modelId,
+  items = {},
+  { storage = globalThis.localStorage, now = Date.now(), allowCorrections = false } = {},
+) {
+  if (!modelId) throw new Error('请选择目标生图 AI');
+  if ((items.corrections || []).length && !allowCorrections) throw new Error('迁移更正需要先通过管理员密钥验证');
+  const limits = { corrections: MAX_IMAGE_NOTES, knowledge: MAX_IMAGE_NOTES, hints: MAX_IMAGE_HINTS };
+  const data = readAll(storage);
+  const entry = entryFor(data, modelId);
+  const counts = { corrections: 0, knowledge: 0, hints: 0, duplicate: 0, overflow: 0 };
+  for (const field of ['corrections', 'knowledge', 'hints']) {
+    const known = new Set(entry[field].map((n) => n.text));
+    for (const src of items[field] || []) {
+      const text = String(src?.text ?? '').trim();
+      if (!text) continue;
+      if (known.has(text)) {
+        counts.duplicate += 1;
+        continue;
+      }
+      if (entry[field].length >= limits[field]) {
+        counts.overflow += 1;
+        continue;
+      }
+      known.add(text);
+      const note = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text, ts: now };
+      if (src.from) note.from = String(src.from);
+      entry[field] = [...entry[field], note];
+      counts[field] += 1;
+    }
+  }
+  if (counts.corrections || counts.knowledge || counts.hints) writeAll(data, storage);
+  return counts;
+}
+
 /**
  * 提示词 = 前置内容（更正、知识库，按给定顺序）+ 用户描述 + 风格提示（逗号分隔）。
  * lead 为字符串数组；没有前置内容时结果与旧版本相同。
@@ -193,6 +248,12 @@ export function clearImageHints(modelId, { storage = globalThis.localStorage } =
 export function buildImagePrompt(userPrompt, hints = [], lead = []) {
   const leading = lead.map((t) => String(t || '').trim()).filter(Boolean);
   return [...leading, String(userPrompt || '').trim(), ...hints.map((h) => h.text)].filter(Boolean).join(', ');
+}
+
+/** 生效的描述输入上限（token）：管理员参数优先，否则为默认值 4096；结果夹到 [1, 16384]。 */
+export function effectiveInputLimit(params = {}) {
+  const v = Number(params?.inputTokens);
+  return Number.isFinite(v) ? clampParam('inputTokens', v) : DEFAULT_INPUT_TOKENS;
 }
 
 /** 管理员设定的前置内容：更正在前，其次是知识库。 */

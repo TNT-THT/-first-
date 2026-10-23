@@ -267,7 +267,7 @@ test('参数行：解析、夹取范围与取整', () => {
     guidance: 6,
     seed: 42,
   });
-  assert.deepEqual(parseImageParams('设置: steps=0, width=1000, guidance=99'), { steps: 2, width: 768, guidance: 20 });
+  assert.deepEqual(parseImageParams('设置: steps=0, width=1000, guidance=99'), { steps: 1, width: 768, guidance: 20 });
   assert.equal(parseImageParams('参数：foo=1, bar=2'), null);
   assert.equal(parseImageParams('没有参数行'), null);
 });
