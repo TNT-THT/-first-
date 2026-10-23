@@ -36,8 +36,8 @@ export async function generateSd15({
 }) {
   const problem = sizeProblem(width, height);
   if (problem) throw new Error(problem);
-  if (!Number.isInteger(steps) || steps < 1 || steps > SD15_MAX_STEPS) {
-    throw new Error(`步数必须是 1–${SD15_MAX_STEPS} 之间的整数`);
+  if (!Number.isInteger(steps) || steps < 2 || steps > SD15_MAX_STEPS) {
+    throw new Error(`步数必须是 2–${SD15_MAX_STEPS} 之间的整数`);
   }
   if (!Number.isFinite(guidance) || guidance < 0) throw new Error('引导系数必须是非负数字');
   if (!Number.isInteger(seed) || seed < 0) throw new Error('种子必须是非负整数');

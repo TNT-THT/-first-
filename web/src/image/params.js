@@ -16,7 +16,7 @@ export const MAX_IMAGE_HINTS = 30;
 export const IMAGE_PARAM_LIMITS = {
   width: [256, 768],
   height: [256, 768],
-  steps: [1, 50],
+  steps: [2, 50],
   guidance: [1, 20],
   seed: [0, 4294967295],
 };
