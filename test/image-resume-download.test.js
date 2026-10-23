@@ -371,3 +371,114 @@ test('文件并行：多个文件与分段共用同一并发上限（同时最�
   assert.ok(maxInflight <= 4, `最大并行请求数为 ${maxInflight}，超过上限 4`);
   assert.deepEqual(await cachedBytes(storage, sourceUrls(m).big), data['big.bin']);
 });
+
+/**
+ * 模拟网络中断：第一次请求 unet/weights.pb 时，先送出 dropAt 个字节，然后断开。
+ * mode: 'network'（网络错误，可重试）| 'abort'（模拟用户取消）| 'norange'（忽略 Range，整文件 200）
+ */
+function flakyServer({ dropAt, mode = 'network' }) {
+  const calls = [];
+  let dropped = false;
+  const fn = async (url, opts = {}) => {
+    const name = Object.keys(DATA).find((p) => url.endsWith(`/${p}`));
+    if (!name) return new Response('nope', { status: 404 });
+    const range = opts.headers?.Range;
+    calls.push({ name, range: range || null });
+    const data = DATA[name];
+    let start = 0;
+    let end = data.length - 1;
+    const useRange = Boolean(range) && mode !== 'norange';
+    if (useRange) {
+      const m = /bytes=(\d+)-(\d+)/.exec(range);
+      start = Number(m[1]);
+      end = Number(m[2]);
+    }
+    const slice = data.slice(start, end + 1);
+    // norange 模式下中断落在整文件请求上（Range 请求只会收到 200 并被放弃）
+    const drop = !dropped && name === 'unet/weights.pb' && dropAt !== undefined && (mode !== 'norange' || !range);
+    if (drop) dropped = true;
+    let sent = false;
+    const stream = new ReadableStream(
+      {
+        pull(c) {
+          if (!drop) {
+            c.enqueue(slice);
+            c.close();
+            return;
+          }
+          if (!sent) {
+            sent = true;
+            c.enqueue(slice.slice(0, dropAt));
+            return;
+          }
+          if (mode === 'abort') c.error(abortError());
+          else c.error(new TypeError('network error'));
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(stream, { status: useRange ? 206 : 200 });
+  };
+  fn.calls = calls;
+  return fn;
+}
+
+test('网络中断：已收到的字节保存，下次从断点用 Range 续传（不重下已收到的部分）', async () => {
+  const storage = memoryCaches();
+  const f = flakyServer({ dropAt: 2 });
+  const st = await downloadImageModel(model(), { storage, fetchImpl: f, partBytes: 4, concurrency: 1, sleep: instantSleep });
+  assert.equal(st.complete, true);
+  const ranges = f.calls.filter((c) => c.name === 'unet/weights.pb').map((c) => c.range);
+  assert.deepEqual(ranges, ['bytes=0-3', 'bytes=2-3', 'bytes=4-7', 'bytes=8-9'], '中断处之后从第 2 个字节继续');
+  assert.deepEqual(await cachedBytes(storage, sourceUrls(model()).unetWeights), DATA['unet/weights.pb']);
+});
+
+test('网络中断后等待重试期间，状态已包含中断前收到的字节', async () => {
+  const storage = memoryCaches();
+  const f = flakyServer({ dropAt: 3 });
+  let midPartial = null;
+  await downloadImageModel(model(), {
+    storage,
+    fetchImpl: f,
+    partBytes: 4,
+    concurrency: 1,
+    sleep: async () => {
+      midPartial = await imageCacheStatus(model(), { storage, partBytes: 4 });
+    },
+  });
+  assert.equal(midPartial.partialBytes, 3, '断开时已保存 3 个字节');
+});
+
+test('用户取消时，已收到的字节同样保存', async () => {
+  const storage = memoryCaches();
+  const f = flakyServer({ dropAt: 2, mode: 'abort' });
+  await assert.rejects(
+    downloadImageModel(model(), { storage, fetchImpl: f, partBytes: 4, concurrency: 1, sleep: instantSleep }),
+    (err) => err.name === 'AbortError',
+  );
+  const st = await imageCacheStatus(model(), { storage, partBytes: 4 });
+  assert.equal(st.partialBytes, 2, '取消时已收到的 2 个字节被保存');
+  const retry = flakyServer({});
+  await downloadImageModel(model(), { storage, fetchImpl: retry, partBytes: 4, concurrency: 1, sleep: instantSleep });
+  const ranges = retry.calls.filter((c) => c.name === 'unet/weights.pb').map((c) => c.range);
+  assert.equal(ranges[0], 'bytes=2-3', '续传从第 2 个字节开始');
+  assert.deepEqual(await cachedBytes(storage, sourceUrls(model()).unetWeights), DATA['unet/weights.pb']);
+});
+
+test('服务器忽略 Range 时中断：已收到的字节保存，重试后结果正确', async () => {
+  const storage = memoryCaches();
+  const f = flakyServer({ dropAt: 6, mode: 'norange' });
+  let midPartial = null;
+  const st = await downloadImageModel(model(), {
+    storage,
+    fetchImpl: f,
+    partBytes: 4,
+    concurrency: 1,
+    sleep: async () => {
+      midPartial = await imageCacheStatus(model(), { storage, partBytes: 4 });
+    },
+  });
+  assert.equal(st.complete, true);
+  assert.equal(midPartial.partialBytes, 6, '第一段完整（4 字节）+ 第二段已收到 2 字节');
+  assert.deepEqual(await cachedBytes(storage, sourceUrls(model()).unetWeights), DATA['unet/weights.pb']);
+});
