@@ -315,7 +315,7 @@
     },
     {
       "id": "flux2-klein-4b-onnx-webgpu",
-      "label": "FLUX.2 Klein 4B（暂不可用）",
+      "label": "FLUX.2 Klein 4B",
       "family": "flux2",
       "repo": "cgb/flux2-klein-4b-onnx-webgpu",
       "status": "planned",
