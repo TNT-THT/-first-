@@ -268,6 +268,52 @@
       }
     },
     {
+      "id": "sd15-nmkd-fp32",
+      "label": "Stable Diffusion 1.5（512 · fp32 ONNX · 浏览器内生图）",
+      "family": "sd15",
+      "repo": "nmkd/stable-diffusion-1.5-onnx",
+      "revision": "main",
+      "status": "available",
+      "license": "CreativeML OpenRAIL-M",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 20,
+        "guidance": 7.5
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 492582967
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 1198446
+        },
+        "unetWeights": {
+          "path": "unet/weights.pb",
+          "size": 3438083840
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 198078022
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 493
+        }
+      },
+      "note": "非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB，内存占用明显高于 fp16 版。适用于 fp16 在本机无法创建会话的情况（例如浏览器的 WebGPU 缺少 fp16 算子支持）。文件路径与大小已由 Hugging Face 元数据核对；图结构、显存占用与生成效果未在浏览器中验证。仓库不含安全检查器，生成内容不经过自动过滤。"
+    },
+    {
       "id": "flux2-klein-4b-onnx-webgpu",
       "label": "FLUX.2 Klein 4B（暂不可用）",
       "family": "flux2",
