@@ -13,6 +13,7 @@ import { isSelectable, sourceUrls } from './catalog.js';
 import {
   PermanentDownloadError,
   abortError,
+  STALL_MS,
   deleteSegments,
   downloadSegmentedFile,
   segmentStatus,
@@ -92,9 +93,9 @@ export function createLimiter(max) {
  * - 大文件按 PART_BYTES 分段，段之间并行下载。
  * - 永久错误记录后继续下载其他文件；全部完成后从缓存校验，缺失时抛出错误（已保存的部分保留）。
  * @param {object} p
- * @param {(p: {done: number, total: number, key: string|null, bytes: number, totalBytes: number, retry?: object}) => void} [p.onProgress]
+ * @param {(p: {done: number, total: number, key: string|null, bytes: number, totalBytes: number, retry?: object, note?: string}) => void} [p.onProgress]
  *   done/total 为文件数；bytes/totalBytes 为字节数（含上次已保存的部分）。开始时先报告一次（key 为 null）。
- *   重试时带 retry: {attempt, waitMs, message}。
+ *   重试时带 retry: {attempt, waitMs, message}；说明性提示带 note（字节数不变）。
  */
 /** 重试间隔：1 s、2 s、4 s …，最长 30 s。下载过程中不会因网络问题而报错，直到用户取消。 */
 export const RETRY_BASE_MS = 1000;
@@ -143,9 +144,9 @@ export async function imageCacheStatus(model, { storage = globalThis.caches, par
  * - 文件并行下载，同时的请求数不超过 concurrency。
  * - 永久错误记录后继续下载其他文件；全部完成后从缓存校验，缺失时抛出错误（已保存的部分保留）。
  * @param {object} p
- * @param {(p: {done: number, total: number, key: string|null, bytes: number, totalBytes: number, retry?: object}) => void} [p.onProgress]
+ * @param {(p: {done: number, total: number, key: string|null, bytes: number, totalBytes: number, retry?: object, note?: string}) => void} [p.onProgress]
  *   done/total 为文件数；bytes/totalBytes 为字节数（含上次已保存的部分）。开始时先报告一次（key 为 null）。
- *   重试时带 retry: {attempt, waitMs, message}。
+ *   重试时带 retry: {attempt, waitMs, message}；说明性提示带 note（字节数不变）。
  */
 export async function downloadImageModel(
   model,
@@ -159,6 +160,7 @@ export async function downloadImageModel(
     sleep = sleepMs,
     retryBaseMs = RETRY_BASE_MS,
     retryMaxMs = RETRY_MAX_MS,
+    stallMs = STALL_MS,
   } = {},
 ) {
   if (!isSelectable(model)) throw new Error('该模型暂不可用，无法下载');
@@ -180,6 +182,8 @@ export async function downloadImageModel(
       bytes += n;
       onProgress?.({ done, total, key, bytes, totalBytes });
     },
+    // 说明性提示（跳过已保存部分、拼接进度等），不改变字节数
+    onNote: (note) => onProgress?.({ done, total, key, bytes, totalBytes, note }),
     retry: (task) =>
       withRetry(task, {
         signal,
@@ -196,7 +200,7 @@ export async function downloadImageModel(
   let fatal = null;
 
   const downloadOne = async (key) => {
-    const { addBytes, retry } = progressFor(key);
+    const { addBytes, retry, onNote } = progressFor(key);
     try {
       await downloadSegmentedFile({
         url: urls[key],
@@ -211,6 +215,8 @@ export async function downloadImageModel(
         limit,
         retry,
         addBytes,
+        stallMs,
+        onNote,
       });
     } catch (err) {
       if (err.name === 'AbortError') throw err;

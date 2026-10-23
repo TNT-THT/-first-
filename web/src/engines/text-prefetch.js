@@ -15,6 +15,7 @@
 import { createLimiter } from '../image/model-files.js';
 import {
   PermanentDownloadError,
+  STALL_MS,
   abortError,
   downloadSegmentedFile,
   isPermanentStatus,
@@ -67,6 +68,7 @@ export async function prefetchTextModelShards({
   sleep,
   retryBaseMs = RETRY_BASE_MS,
   retryMaxMs = RETRY_MAX_MS,
+  stallMs = STALL_MS,
 } = {}) {
   const cache = await storage.open(TEXT_CACHE_SCOPE);
   const parts = await storage.open(TEXT_PARTS_SCOPE);
@@ -104,10 +106,11 @@ export async function prefetchTextModelShards({
   }
   const failed = [];
 
+  let note = null;
   const report = () => {
     onProgress?.({
       progress: totalBytes ? doneBytes / totalBytes : 1,
-      text: `正在下载模型文件：${doneCount}/${shards.size} 个分片（${concurrency} 路并行）…`,
+      text: note || `正在下载模型文件：${doneCount}/${shards.size} 个分片（${concurrency} 路并行）…`,
     });
   };
   report();
@@ -132,9 +135,15 @@ export async function prefetchTextModelShards({
         limit,
         retry: (task) => retry(task),
         addBytes,
+        stallMs,
+        onNote: (text) => {
+          note = text;
+          report();
+        },
       }).then(
         () => {
           doneCount += 1;
+          note = null;
           report();
         },
         (err) => {
