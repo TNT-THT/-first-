@@ -55,7 +55,7 @@ export function createImageClient({ createWorker }) {
      * 生成一张图。request: {prompt, negative?, width, height, steps, guidance, seed}；
      * urls: 模型文件地址（见 catalog.sourceUrls）。返回 {width, height, rgba}。
      */
-    generate(request, { urls, onProgress, signal } = {}) {
+    generate(request, { urls, sizes, onProgress, signal } = {}) {
       if (signal?.aborted) return Promise.reject(abortError());
       const id = nextId;
       nextId += 1;
@@ -77,7 +77,7 @@ export function createImageClient({ createWorker }) {
           },
         });
         try {
-          ensureWorker().postMessage({ id, type: 'generate', urls, request });
+          ensureWorker().postMessage({ id, type: 'generate', urls, sizes, request });
         } catch (err) {
           pending.delete(id);
           reject(err);

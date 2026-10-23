@@ -56,7 +56,7 @@ test('分区表与排除列表保持一致：分区 key 不包含被禁止的键
   for (const sec of DATA_SECTIONS) assert.ok(!NEVER_EXPORTED_KEYS.includes(sec.key), sec.key);
   assert.deepEqual(
     DATA_SECTIONS.map((s) => s.id),
-    ['sessions', 'adaptation', 'knowledge', 'localModels'],
+    ['sessions', 'adaptation', 'knowledge', 'imageAdmin', 'localModels'],
   );
 });
 

@@ -140,13 +140,23 @@
             </div>
             <div id="imageGallery" class="image-gallery"></div>
             <div id="imageAdmin" class="image-admin" hidden>
-              <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42”即可记录生图参数（仅本机，直到清除）。下方的风格提示会附加到每次生图的提示词末尾；CLIP 只读取前 77 个 token。</p>
+              <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42”即可记录生图参数（仅本机，直到清除）。也可以单独写一行“更正：……”（需管理员密钥验证）记录为该生图 AI 的更正。更正与知识库放在每次生图提示词的最前面；风格提示放在末尾。CLIP 只读取前 77 个 token（中文每字占多个 token），超出部分不参与生图。</p>
               <div class="image-admin-row">
                 <input id="imageHintInput" type="text" placeholder="风格提示，例如：水彩风格，柔和光线" aria-label="风格提示" />
                 <button id="imageHintAdd" type="button" class="btn ghost small">添加风格提示</button>
                 <button id="imageParamsClear" type="button" class="btn ghost small">清除管理员生图参数</button>
               </div>
               <div id="imageHintList" class="local-list"></div>
+              <div class="image-admin-row">
+                <input id="imageCorrectionInput" type="text" placeholder="更正，例如：猫是橘色的（需管理员密钥）" aria-label="生图更正" />
+                <button id="imageCorrectionAdd" type="button" class="btn ghost small">添加更正（需密钥）</button>
+              </div>
+              <div id="imageCorrectionList" class="local-list"></div>
+              <div class="image-admin-row">
+                <input id="imageKnowledgeInput" type="text" placeholder="知识库条目，例如：白天的天空是蓝色（仅本机）" aria-label="生图知识库条目" />
+                <button id="imageKnowledgeAdd" type="button" class="btn ghost small">添加知识库条目</button>
+              </div>
+              <div id="imageKnowledgeList" class="local-list"></div>
             </div>
           </section>
 

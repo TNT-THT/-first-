@@ -150,3 +150,14 @@ test('网站包：生图模块源码在打包范围内，模型文件被排除',
 test('网站包：超过 20 MB 的运行库（ORT wasm）不打包', () => {
   assert.equal(exclusionReason('web/public/ort/ort-wasm-simd-threaded.jsep.wasm', 28_300_000), '文件过大');
 });
+
+test('网站包：生图运行库（dist/ort）可以超过 20 MB，但有 40 MB 上限；其他文件仍为 20 MB', () => {
+  const wasm = 'web/dist/ort/ort-wasm-simd-threaded.jsep.wasm';
+  const { included } = selectSiteFiles([
+    { path: wasm, size: 28_300_000 },
+    { path: 'web/dist/ort/ort-wasm-simd-threaded.jsep.mjs', size: 60_000 },
+  ]);
+  assert.ok(included.includes(wasm));
+  assert.equal(exclusionReason(wasm, 45 * 1024 * 1024), '文件过大');
+  assert.equal(exclusionReason('web/dist/assets/big.js', 21 * 1024 * 1024), '文件过大');
+});

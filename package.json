@@ -13,7 +13,7 @@
     "build:remote": "VITE_ENGINE=remote vite build --config web/vite.config.js",
     "start": "node server/index.js",
     "set-password": "node scripts/set-access-password.mjs",
-    "test": "node --test test/unit.test.js test/server.test.js test/model-file.test.js test/training-pack.test.js test/training-catalog.test.js test/adaptation.test.js test/health.test.js test/lifecycle.test.js test/data-export.test.js test/site-pack.test.js test/reasoning.test.js test/budget.test.js test/pending-models.test.js test/default-model.test.js test/answer-check.test.js test/sliding.test.js test/history-chunk.test.js test/save-location.test.js test/repetition.test.js test/presets.test.js test/image-sd15.test.js test/image-units.test.js test/undo.test.js test/gallery-archive.test.js test/image-model-files.test.js",
+    "test": "node --test test/unit.test.js test/server.test.js test/model-file.test.js test/training-pack.test.js test/training-catalog.test.js test/adaptation.test.js test/health.test.js test/lifecycle.test.js test/data-export.test.js test/site-pack.test.js test/reasoning.test.js test/budget.test.js test/pending-models.test.js test/default-model.test.js test/answer-check.test.js test/sliding.test.js test/history-chunk.test.js test/save-location.test.js test/repetition.test.js test/presets.test.js test/image-sd15.test.js test/image-units.test.js test/undo.test.js test/gallery-archive.test.js test/image-model-files.test.js test/image-runtime-fallback.test.js",
     "test:training": "python3 -m unittest discover -s training/tests -p \"test_*.py\""
   },
   "dependencies": {

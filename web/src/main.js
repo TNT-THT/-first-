@@ -11,9 +11,24 @@ import { createBackend } from './engines/backend.js';
 import { getSavedDefaultModel, resolveStartupModel, saveDefaultModel } from './default-model.js';
 import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './answer-check.js';
 import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './engines/webllm.js';
-import { formatGB, imageModelsOf, isSelectable, sourceUrls, totalBytes } from './image/catalog.js';
+import { formatGB, imageModelsOf, isSelectable, sourceSizes, sourceUrls, totalBytes } from './image/catalog.js';
 import { createImageClient } from './image/client.js';
-import { addImageHint, buildImagePrompt, clearImageParams, effectiveImageSettings, getImageSettings, parseImageParams, removeImageHint, setImageParams, stripImageParamLine } from './image/params.js';
+import {
+  addImageCorrection,
+  addImageHint,
+  addImageKnowledge,
+  buildImagePrompt,
+  clearImageParams,
+  effectiveImageSettings,
+  getImageSettings,
+  imageLeadTexts,
+  parseImageParams,
+  removeImageCorrection,
+  removeImageHint,
+  removeImageKnowledge,
+  setImageParams,
+  stripImageParamLine,
+} from './image/params.js';
 import { randomSeed } from './image/rng.js';
 import { addGalleryImage, clearGallery, deleteGalleryImage, listGallery } from './image/gallery-store.js';
 import { buildGalleryArchive, readGalleryArchive } from './image/gallery-archive.js';
@@ -63,6 +78,7 @@ import {
   sanitizeParams,
   setModelParams,
   solidifyJsonl,
+  stripCorrectionLines,
   suggestParams,
   mechanicalReply,
 } from './adaptation.js';
@@ -200,6 +216,12 @@ const els = {
   imageHintAdd: $('#imageHintAdd'),
   imageParamsClear: $('#imageParamsClear'),
   imageHintList: $('#imageHintList'),
+  imageCorrectionInput: $('#imageCorrectionInput'),
+  imageCorrectionAdd: $('#imageCorrectionAdd'),
+  imageCorrectionList: $('#imageCorrectionList'),
+  imageKnowledgeInput: $('#imageKnowledgeInput'),
+  imageKnowledgeAdd: $('#imageKnowledgeAdd'),
+  imageKnowledgeList: $('#imageKnowledgeList'),
 };
 
 // ---------- 运行参数 ----------
@@ -2397,49 +2419,83 @@ function renderImageEffective() {
     els.imageEffective.textContent = '';
     return;
   }
-  const { params, hints } = getImageSettings(model.id);
+  const { params, hints, corrections, knowledge } = getImageSettings(model.id);
   const eff = effectiveImageSettings(readImageControls(), params);
   const adminKeys = Object.keys(params);
   const parts = [
     `生效：${eff.width} × ${eff.height}，${eff.steps} 步，引导 ${eff.guidance}，种子 ${eff.seed ?? '随机'}`,
   ];
   if (adminKeys.length) parts.push(`管理员参数已覆盖：${adminKeys.map((k) => `${k}=${params[k]}`).join('，')}`);
+  if (corrections.length) parts.push(`更正 ${corrections.length} 条（提示词最前面）`);
+  if (knowledge.length) parts.push(`知识库 ${knowledge.length} 条（提示词最前面）`);
   if (hints.length) parts.push(`风格提示 ${hints.length} 条`);
   if (isSelectable(model)) parts.push(`模型约 ${formatGB(totalBytes(model))}（可点“下载到本机”保存，之后离线可用）`);
   els.imageEffective.textContent = parts.join('｜');
+}
+
+/** 管理员列表的一行：文字 + 删除按钮（删除需管理员权限）。 */
+function imageNoteRow(text, onDelete, action) {
+  const row = document.createElement('div');
+  row.className = 'local-row';
+  const label = document.createElement('div');
+  label.className = 'muted small local-meta';
+  label.textContent = text;
+  const del = document.createElement('button');
+  del.type = 'button';
+  del.className = 'btn ghost small';
+  del.textContent = '删除';
+  del.addEventListener('click', () => {
+    if (!requireAdmin(action)) return;
+    onDelete();
+    renderImageAdmin();
+    renderImageEffective();
+  });
+  row.append(label, del);
+  return row;
 }
 
 function renderImageAdmin() {
   const model = imageModelById(els.imageModelSelect.value);
   els.imageAdmin.hidden = !isAdmin() || !model;
   if (!model) return;
-  const { hints } = getImageSettings(model.id);
-  els.imageHintList.replaceChildren();
-  for (const h of hints) {
-    const row = document.createElement('div');
-    row.className = 'local-row';
-    const text = document.createElement('div');
-    text.className = 'muted small local-meta';
-    text.textContent = h.text;
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'btn ghost small';
-    del.textContent = '删除';
-    del.addEventListener('click', () => {
-      if (!requireAdmin('删除风格提示')) return;
-      removeImageHint(model.id, h.id);
-      renderImageAdmin();
-      renderImageEffective();
-    });
-    row.append(text, del);
-    els.imageHintList.append(row);
-  }
+  const { hints, corrections, knowledge } = getImageSettings(model.id);
+  els.imageHintList.replaceChildren(
+    ...hints.map((h) => imageNoteRow(h.text, () => removeImageHint(model.id, h.id), '删除风格提示')),
+  );
+  els.imageCorrectionList.replaceChildren(
+    ...corrections.map((c) => imageNoteRow(`更正：${c.text}`, () => removeImageCorrection(model.id, c.id), '删除更正')),
+  );
+  els.imageKnowledgeList.replaceChildren(
+    ...knowledge.map((k) => imageNoteRow(`知识：${k.text}`, () => removeImageKnowledge(model.id, k.id), '删除知识库条目')),
+  );
+}
+
+/**
+ * 为生图 AI 记录更正。更正会成为该 AI 的底层设定（放在提示词最前面），因此与聊天一样需要管理员密钥验证。
+ * 返回新记录的条数；取消或密钥错误返回 null。
+ */
+async function recordImageCorrections(model, texts) {
+  const ok = await verifyCorrectionKey(
+    texts.join('\n'),
+    `这些更正将作为「${model.label}」（生图 AI）的底层设定，放在每次生图提示词的最前面（仅本机）。输入管理员密钥验证后保存；取消则不保存。`,
+  );
+  if (!ok) return null;
+  let added = 0;
+  for (const t of texts) if (addImageCorrection(model.id, t)) added += 1;
+  return added;
 }
 
 function imageErrorText(err) {
   const m = err?.message || String(err);
   if (/out of memory|Failed to allocate|OOM|device lost|GPUDevice|buffer.*size/i.test(m)) {
     return `显存不足或 GPU 资源丢失（${m}）。可以减小宽高、减少步数，或关闭占用显存的其他页面后重试。`;
+  }
+  // 运行库（网站包内的 ort/ 目录）加载失败：不是网络问题，而是文件缺失或服务器未提供该文件
+  if (/dynamically imported module|ort-wasm|initWasm/i.test(m)) {
+    return `生图运行库加载失败：${m}。请确认网站包完整（web/ort/ 目录存在）并刷新页面后重试。`;
+  }
+  if (/会话|session/i.test(m)) {
+    return `生图模型无法在本机运行：${m}`;
   }
   if (/Failed to fetch|NetworkError|下载失败|network/i.test(m)) {
     return `模型文件下载失败：${m}。请检查网络是否能访问 huggingface.co，然后重试。`;
@@ -2790,9 +2846,27 @@ async function runImageGenerate(event) {
       els.imagePrompt.value = text;
     }
   }
+  // 管理员的“更正：”行：记录为该生图 AI 的更正（需密钥验证），并从提示词中去掉
+  let correctionNote = '';
+  if (isAdmin()) {
+    const corr = parseCorrections(text);
+    if (corr.length) {
+      const added = await recordImageCorrections(model, corr.map((c) => c.text));
+      if (added === null) {
+        setImageStatus('未通过管理员密钥验证，更正未保存。提示词保持不变。', { error: true });
+        return;
+      }
+      correctionNote = added ? `已记录 ${added} 条更正（仅本机，放在提示词最前面）` : '更正已存在，未重复保存';
+      text = stripCorrectionLines(text);
+      els.imagePrompt.value = text;
+    }
+  }
   if (!text.trim()) {
-    if (recorded) {
-      setImageStatus('已记录管理员生图参数（仅本机）。');
+    if (recorded || correctionNote) {
+      const parts = [];
+      if (recorded) parts.push('已记录管理员生图参数');
+      if (correctionNote) parts.push(correctionNote);
+      setImageStatus(`${parts.join('，')}。`);
       renderImageAdmin();
       renderImageEffective();
     } else {
@@ -2804,10 +2878,10 @@ async function runImageGenerate(event) {
     setImageStatus(WEBGPU_MISSING, { error: true });
     return;
   }
-  const { hints } = getImageSettings(model.id);
+  const { hints, corrections, knowledge } = getImageSettings(model.id);
   const eff = currentImageSettings(model);
   if (eff.seed === null) eff.seed = randomSeed();
-  const prompt = buildImagePrompt(text, hints);
+  const prompt = buildImagePrompt(text, hints, imageLeadTexts({ corrections, knowledge }));
   const controller = new AbortController();
   imageState.controller = controller;
   setImageBusy(true);
@@ -2818,15 +2892,31 @@ async function runImageGenerate(event) {
       : '正在准备生图模型（未下载到本机，将从 Hugging Face 读取约 ' + formatGB(totalBytes(model)) + '）…',
   );
   try {
+    setImageProgress(0);
+    let top = 0; // 本次生成已显示的最高进度
     const res = await imageClient().generate(
       { prompt, width: eff.width, height: eff.height, steps: eff.steps, guidance: eff.guidance, seed: eff.seed },
       {
         urls: sourceUrls(model),
+        sizes: sourceSizes(model),
         signal: controller.signal,
         onProgress: (p) => {
+          // 进度条只前进不后退：文件读取与会话创建交错进行时，两类进度的映射不同
+          const raise = (v) => {
+            top = Math.max(top, v);
+            setImageProgress(top);
+          };
           if (p.stage === 'denoise' && p.total) {
             setImageStatus(`去噪中：第 ${p.step} / ${p.total} 步`);
-            setImageProgress(p.step / p.total);
+            raise(p.step / p.total);
+          } else if (p.stage === 'load' && p.total) {
+            // 模型读取占进度条的前 90%（与 worker 中 LOAD_SHARE 一致）
+            raise((0.9 * p.loaded) / p.total);
+            setImageStatus(p.message);
+          } else if (p.stage === 'session') {
+            // 会话创建占进度条的后 10%，fraction 已是整体进度
+            raise(p.fraction);
+            setImageStatus(p.message);
           } else if (p.message) {
             setImageStatus(p.message);
           }
@@ -2923,6 +3013,40 @@ function initImageMode() {
     setImageStatus('已添加风格提示（仅本机，之后每次生图都会附加）。');
   };
   els.imageHintAdd.addEventListener('click', addHint);
+  els.imageCorrectionAdd.addEventListener('click', async () => {
+    const model = imageModelById(els.imageModelSelect.value);
+    if (!model || !requireAdmin('添加更正')) return;
+    const text = els.imageCorrectionInput.value.trim();
+    if (!text) {
+      setImageStatus('请先输入更正内容。', { error: true });
+      return;
+    }
+    const added = await recordImageCorrections(model, [text]);
+    if (added === null) {
+      setImageStatus('未通过管理员密钥验证，更正未保存。', { error: true });
+      return;
+    }
+    if (added === 0) {
+      setImageStatus('该更正已存在，未重复保存。', { error: true });
+      return;
+    }
+    els.imageCorrectionInput.value = '';
+    renderImageAdmin();
+    renderImageEffective();
+    setImageStatus('已添加更正（仅本机，放在该生图 AI 提示词的最前面）。');
+  });
+  els.imageKnowledgeAdd.addEventListener('click', () => {
+    const model = imageModelById(els.imageModelSelect.value);
+    if (!model || !requireAdmin('添加知识库条目')) return;
+    if (!addImageKnowledge(model.id, els.imageKnowledgeInput.value)) {
+      setImageStatus('知识库条目为空，或与已有条目相同。', { error: true });
+      return;
+    }
+    els.imageKnowledgeInput.value = '';
+    renderImageAdmin();
+    renderImageEffective();
+    setImageStatus('已添加知识库条目（仅本机，放在该生图 AI 提示词的最前面）。');
+  });
   els.imageHintInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();

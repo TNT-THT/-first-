@@ -193,7 +193,7 @@ export function parseCorrections(text) {
 }
 
 /** 去掉反馈中的更正行：更正行不进入附加说明或知识库。 */
-function stripCorrectionLines(text) {
+export function stripCorrectionLines(text) {
   return String(text || '').replace(CORRECTION_LINE, '').trim();
 }
 
