@@ -4,7 +4,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createClipTokenizer, parseMerges } from '../web/src/image/clip-tokenizer.js';
 import { checkPromptBudget, countContentTokens, joinLeadTexts, CLIP_CONTENT_TOKENS } from '../web/src/image/prompt-budget.js';
-import { buildImagePrompt } from '../web/src/image/params.js';
+import { buildImagePrompt, effectiveInputLimit, parseImageParams, setImageParams, getImageSettings } from '../web/src/image/params.js';
+import { DEFAULT_INPUT_TOKENS, MAX_INPUT_TOKENS } from '../web/src/image/prompt-budget.js';
 
 // 每个 'a' 是一个 token（没有合并规则，词表中只有 a</w>；其余字符映射为 unk，同样计为一个 token）
 function tinyTokenizer() {
@@ -66,4 +67,50 @@ test('前置内容拼接与提示词构造一致：空项被忽略，lead 位于
   const prompt = buildImagePrompt('猫', [{ text: '水彩' }], ['更正甲', '知识乙']);
   assert.equal(prompt, '更正甲, 知识乙, 猫, 水彩');
   assert.ok(prompt.startsWith(joinLeadTexts(['更正甲', '知识乙'])));
+});
+
+// ---- 描述输入上限（默认 4096，管理员可调，硬上限 16384）----
+
+test('输入上限：默认 4096，硬上限 16384', () => {
+  assert.equal(DEFAULT_INPUT_TOKENS, 4096);
+  assert.equal(MAX_INPUT_TOKENS, 16384);
+  assert.equal(effectiveInputLimit({}), 4096);
+  assert.equal(effectiveInputLimit({ inputTokens: 8192 }), 8192);
+  assert.equal(effectiveInputLimit({ inputTokens: 99999 }), 16384, '超过硬上限时夹到 16384');
+  assert.equal(effectiveInputLimit({ inputTokens: 0 }), 1, '下限为 1');
+});
+
+test('输入上限：描述超过上限时拒绝生成，并说明可调上限', () => {
+  const tok = tinyTokenizer();
+  const input = Array(10).fill('a').join(' ');
+  assert.throws(() => checkPromptBudget(tok, { input, maxInputTokens: 9 }), (err) => {
+    assert.match(err.message, /描述共 10 个 token/);
+    assert.match(err.message, /输入上限 9 个/);
+    assert.match(err.message, /已拒绝生成/);
+    return true;
+  });
+});
+
+test('输入上限：描述在上限内时通过；超过 75 个 token 只报告截断（不拒绝）', () => {
+  const tok = tinyTokenizer();
+  const input = Array(100).fill('a').join(' ');
+  const r = checkPromptBudget(tok, { input, maxInputTokens: 4096, prompt: input });
+  assert.equal(r.inputTokens, 100);
+  assert.equal(r.maxInputTokens, 4096);
+  assert.equal(r.truncatedTokens, 25, 'SD 1.5 的 CLIP 只读取 75 个');
+});
+
+test('输入上限：未传入 input 时不检查（兼容旧调用）', () => {
+  const tok = tinyTokenizer();
+  const r = checkPromptBudget(tok, { prompt: 'a a' });
+  assert.equal(r.inputTokens, 0);
+});
+
+test('管理员参数：inputTokens 可由参数行设置，超出范围时夹到 16384，仅保留合法键', () => {
+  assert.deepEqual(parseImageParams('参数：inputTokens=8192, steps=25'), { inputTokens: 8192, steps: 25 });
+  assert.equal(parseImageParams('参数：inputTokens=99999').inputTokens, 16384);
+  const storage = { store: null, getItem() { return this.store; }, setItem(_k, v) { this.store = v; } };
+  const params = setImageParams('tiny-sd-onnx-webgpu', { inputTokens: 50000, bogus: 1 }, { storage });
+  assert.deepEqual(params, { inputTokens: 16384 });
+  assert.equal(effectiveInputLimit(getImageSettings('tiny-sd-onnx-webgpu', { storage }).params), 16384);
 });

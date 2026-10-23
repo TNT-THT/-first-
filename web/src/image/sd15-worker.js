@@ -229,7 +229,12 @@ self.onmessage = async (event) => {
     if (wasmBase) ort.env.wasm.wasmPaths = wasmBase;
     // 先读取分词器并检查预算（管理员内容超出时直接报错，不下载大文件）
     const tokenizer = await ensureTokenizer(urls, sizes || {});
-    const budget = checkPromptBudget(tokenizer, { lead: request.lead || '', prompt: request.prompt });
+    const budget = checkPromptBudget(tokenizer, {
+      input: typeof request.input === 'string' ? request.input : null,
+      maxInputTokens: request.maxInputTokens,
+      lead: request.lead || '',
+      prompt: request.prompt,
+    });
     const { runtime, scheduler } = await ensureLoaded(id, urls, sizes || {}, tokenizer);
     post({ id, type: 'progress', stage: 'denoise', step: 0, total: request.steps, message: '开始生成' });
     const { width, height, chw } = await generateSd15({

@@ -19,6 +19,7 @@ import {
   addImageKnowledge,
   buildImagePrompt,
   copyIntoImageModel,
+  effectiveInputLimit,
   imageAdminModelIds,
   clearImageParams,
   effectiveImageSettings,
@@ -2572,6 +2573,7 @@ function renderImageEffective() {
     `生效：${eff.width} × ${eff.height}，${eff.steps} 步，引导 ${eff.guidance}，种子 ${eff.seed ?? '随机'}`,
   ];
   if (adminKeys.length) parts.push(`管理员参数已覆盖：${adminKeys.map((k) => `${k}=${params[k]}`).join('，')}`);
+  parts.push(`描述输入上限 ${effectiveInputLimit(params)} tokens（CLIP 实际读取约 75 个）`);
   if (corrections.length) parts.push(`更正 ${corrections.length} 条（提示词最前面）`);
   if (knowledge.length) parts.push(`知识库 ${knowledge.length} 条（提示词最前面）`);
   if (hints.length) parts.push(`风格提示 ${hints.length} 条`);
@@ -3060,6 +3062,9 @@ async function runImageGenerate(event) {
     const res = await imageClient().generate(
       {
         prompt,
+        // 描述（文本框内容）与输入上限：超出上限时在 worker 中拒绝生成
+        input: text,
+        maxInputTokens: effectiveInputLimit(getImageSettings(model.id).params),
         lead: joinLeadTexts(leadTexts),
         width: eff.width,
         height: eff.height,

@@ -11,6 +11,7 @@
  * 存储键 oj-ai.image.v1，按图片模型分别保存（与聊天模型的适应记录 oj-ai.adapt.v1 分开）。
  */
 import { normalizeSize, snapSize } from './sizes.js';
+import { DEFAULT_INPUT_TOKENS, MAX_INPUT_TOKENS, MIN_INPUT_TOKENS } from './prompt-budget.js';
 
 export const IMAGE_STORAGE_KEY = 'oj-ai.image.v1';
 export const MAX_IMAGE_HINTS = 30;
@@ -22,8 +23,10 @@ export const IMAGE_PARAM_LIMITS = {
   steps: [1, 50], // 下限由调度器决定（PNDM 至少 2 步，SDXS 等一步模型为 1 步），见 sd15.js
   guidance: [1, 20],
   seed: [0, 4294967295],
+  // 描述输入上限（token）：仅管理员可通过参数行修改；默认 4096，硬上限 16384（见 prompt-budget.js）
+  inputTokens: [MIN_INPUT_TOKENS, MAX_INPUT_TOKENS],
 };
-const INTEGER_KEYS = new Set(['width', 'height', 'steps', 'seed']);
+const INTEGER_KEYS = new Set(['width', 'height', 'steps', 'seed', 'inputTokens']);
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
 
 /** 解析参数行；没有有效参数时返回 null。 */
@@ -245,6 +248,12 @@ export function copyIntoImageModel(
 export function buildImagePrompt(userPrompt, hints = [], lead = []) {
   const leading = lead.map((t) => String(t || '').trim()).filter(Boolean);
   return [...leading, String(userPrompt || '').trim(), ...hints.map((h) => h.text)].filter(Boolean).join(', ');
+}
+
+/** 生效的描述输入上限（token）：管理员参数优先，否则为默认值 4096；结果夹到 [1, 16384]。 */
+export function effectiveInputLimit(params = {}) {
+  const v = Number(params?.inputTokens);
+  return Number.isFinite(v) ? clampParam('inputTokens', v) : DEFAULT_INPUT_TOKENS;
 }
 
 /** 管理员设定的前置内容：更正在前，其次是知识库。 */
