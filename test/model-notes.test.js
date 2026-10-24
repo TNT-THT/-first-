@@ -21,7 +21,7 @@ test('文本模型：每个都有备注，写明参数量级与显存估计', ()
 });
 
 test('生图模型：每个都有备注（参数量级与显存），标签中也有显存估计', () => {
-  assert.equal(cfg.imageModels.length, 10);
+  assert.equal(cfg.imageModels.length, 13);
   for (const m of cfg.imageModels) {
     assert.match(m.note, /参数量级：/, `${m.id} 缺少参数量级`);
     assert.match(m.note, /显存/, `${m.id} 缺少显存`);

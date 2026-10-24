@@ -345,6 +345,111 @@
       "note": "参数量级：约 1.0B（fp32 存储，由文件大小推算）。显存：权重约 4.1 GB，本机运行约 4.6–5.6 GB（估计，未实测）；网页版因单文件上限无法加载。非官方 fp32 ONNX 版（nmkd，与 fp16 版同一仓库的 main 分支）。文本编码器、UNet 与 VAE 均为 fp32，体积约 4.1 GB。网页版暂不可用：UNet 权重（约 3.4 GB）超过浏览器单个文件 2 GB 的上限，无法在网页中加载，因此也不提供下载。可使用本机 Python 脚本（scripts/image/sd15_local.py）运行，见 README。"
     },
     {
+      "id": "wd14-anime-sd15-onnx-fp16",
+      "label": "动漫 SD 1.x（waifu-diffusion v1.4 · 512 · fp16 ONNX · 约 1.0B 参数 · 显存估计 2.6–3.6 GB · 暂不可用）",
+      "family": "sd15",
+      "repo": "RanaLLC/waifu-diffusion-onnx-v1-4",
+      "revision": "main",
+      "status": "unavailable",
+      "license": "CreativeML OpenRAIL-M（上游 hakurei/waifu-diffusion 声明；该 ONNX 仓库未单独声明许可）",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 20,
+        "guidance": 7.5
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 681257528
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 1732925107
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 99093889
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 374
+        }
+      },
+      "note": "参数量级：约 1.0B（由文件大小推算，估计）。显存：权重约 2.5 GB，浏览器内运行约 2.6–3.6 GB（估计，未实测）。非官方 ONNX 转换版（RanaLLC，由 hakurei/waifu-diffusion v1.4 转换；仓库未附许可证说明，许可沿用上游 CreativeML OpenRAIL-M）。结构与 sd15-nmkd-fp16 相同（SD 1.x，512 分辨率），UNet 为单个 1.73 GB 文件（低于 2 GB 上限），不需要 weights.pb。暂不可用：同类 fp16 UNet 在本机创建会话失败（Mul 节点，原因尚未定位），在问题解决前不可选择、不下载。文本编码器 681 MB 大于标准 SD 1.5 的 fp32 文本编码器（492 MB），原因未核实。未在浏览器中验证画质与接口。"
+    },
+    {
+      "id": "cyberpunk-anime-sd15-onnx-fp32",
+      "label": "动漫 SD 1.x（Cyberpunk Anime Diffusion · 512 · fp32 ONNX · 约 1.0B 参数 · 显存估计 4.6–5.6 GB · 网页版不可用）",
+      "family": "sd15",
+      "repo": "TheyCallMeHex/Cyberpunk-Anime-Diffusion-ONNX",
+      "revision": "main",
+      "status": "unavailable",
+      "license": "CreativeML OpenRAIL-M",
+      "defaults": {
+        "width": 512,
+        "height": 512,
+        "steps": 30,
+        "guidance": 7.5
+      },
+      "files": {
+        "textEncoder": {
+          "path": "text_encoder/model.onnx",
+          "size": 492588002
+        },
+        "unet": {
+          "path": "unet/model.onnx",
+          "size": 1950755
+        },
+        "unetWeights": {
+          "path": "unet/model.onnx_data",
+          "size": 3438083840
+        },
+        "vaeDecoder": {
+          "path": "vae_decoder/model.onnx",
+          "size": 198078038
+        },
+        "vocab": {
+          "path": "tokenizer/vocab.json",
+          "size": 1059962
+        },
+        "merges": {
+          "path": "tokenizer/merges.txt",
+          "size": 524619
+        },
+        "scheduler": {
+          "path": "scheduler/scheduler_config.json",
+          "size": 374
+        }
+      },
+      "note": "参数量级：约 1.0B（由文件大小推算，估计）。显存：权重约 4.1 GB（全部为 fp32），本机运行约 4.6–5.6 GB（估计，未实测）。非官方 ONNX 转换版（TheyCallMeHex，由 DGSpitzer/Cyberpunk-Anime-Diffusion 转换）。README 给出的触发词为 dgs illustration style。暂不可用，原因：UNet 外部权重 3.44 GB 超过浏览器单个文件 2 GB 的上限；外部数据文件名为 model.onnx_data，与加载器固定使用的 weights.pb 不同。若要使用，需要先转换为 fp16 并调整加载逻辑。未在浏览器中验证画质与接口。"
+    },
+    {
+      "id": "wai-illustrious-sdxl-onnx-webgpu",
+      "label": "动漫 SDXL（WAI-illustrious v17 · 1024 · fp16 ONNX · 约 3.5B 参数 · 显存估计 8 GB 以上 · 暂不可用）",
+      "family": "sdxl",
+      "repo": "aaaaaeeeee/blip-sdxl-anime-wai-illustrious17",
+      "revision": "main",
+      "status": "unavailable",
+      "license": "Fair AI Public License 1.0-SD（含禁止用途条款，使用前需阅读仓库内的 LICENSE.txt）",
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 28,
+        "guidance": 5
+      },
+      "files": {},
+      "note": "参数量级：约 3.5B（估计，按 SDXL 结构：UNet 约 2.6B 加两个文本编码器）。显存：已列出的文件合计约 6.9 GB（fp16，不含未列出的 VAE 编码器），浏览器内运行估计需要 8 GB 以上（估计，未实测）。非官方打包（aaaaaeeeee，由 WAI-illustrious-SDXL v17 转换，README 注明用于 BLIP Studio 的 WebGPU 推理）。暂不可用：本项目目前没有 SDXL 管线（需要额外输入与更大的显存），且 UNet 拆成三张图并分为多个约 1 GB 的分片，加载器不支持。许可为 Fair AI Public License 1.0-SD，含禁止用途，若要分发需附上许可证文本。未在浏览器中验证。"
+    },
+    {
       "id": "bk-sdm-small-2m-onnx-webgpu",
       "label": "BK-SDM Small 2M（512 · fp16 ONNX · 精简 UNet · 20 步 · 约 0.65B 参数 · 显存估计 1.9–2.9 GB）",
       "family": "bk-sdm",

@@ -50,3 +50,33 @@ test('SDXS 之外的新模型使用 SD 1.5 的潜变量缩放（缺省）', () =
     assert.equal(m.latentScale, undefined, id);
   }
 });
+
+// 三个新加入的动漫模型：只在选择器中显示，暂不可选、不下载；备注说明暂不可用的原因。
+const ANIME_UNAVAILABLE = ['wd14-anime-sd15-onnx-fp16', 'cyberpunk-anime-sd15-onnx-fp32', 'wai-illustrious-sdxl-onnx-webgpu'];
+
+test('动漫模型条目：状态为 unavailable，不可选，备注写明暂不可用的原因', () => {
+  for (const id of ANIME_UNAVAILABLE) {
+    const m = models.find((x) => x.id === id);
+    assert.ok(m, `缺少 ${id}`);
+    assert.equal(m.status, 'unavailable', id);
+    assert.equal(isSelectable(m), false, `${id} 不应可选`);
+    assert.match(m.note, /暂不可用/, `${id} 备注应说明暂不可用`);
+    assert.match(m.note, /未在浏览器中验证/, `${id} 备注应说明未验证`);
+  }
+});
+
+test('WD 1.4 动漫模型：单文件 UNet 无外部权重，文件大小均低于 2 GB', () => {
+  const m = models.find((x) => x.id === 'wd14-anime-sd15-onnx-fp16');
+  assert.equal(m.files.unetWeights, undefined);
+  for (const key of ['textEncoder', 'unet', 'vaeDecoder', 'vocab', 'merges', 'scheduler']) {
+    assert.ok(m.files[key]?.size > 0, `缺少 ${key} 的大小`);
+  }
+  assert.equal(oversizedFiles(sourceSizes(m)).length, 0);
+  assert.equal(sourceUrls(m).unet, 'https://huggingface.co/RanaLLC/waifu-diffusion-onnx-v1-4/resolve/main/unet/model.onnx');
+});
+
+test('Cyberpunk 动漫模型：fp32 外部权重超过 2 GB，应被标记为超限', () => {
+  const m = models.find((x) => x.id === 'cyberpunk-anime-sd15-onnx-fp32');
+  const over = oversizedFiles(sourceSizes(m));
+  assert.ok(over.length >= 1, '应检测到超过 2 GB 的文件');
+});
