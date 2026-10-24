@@ -293,3 +293,102 @@ test('连接卡住（既无数据也不报错）：超过 stallMs 后中止，�
   const res = await cache.match(BASE + 'params_shard_0.bin');
   assert.deepEqual(new Uint8Array(await res.arrayBuffer()), full);
 });
+
+/** 3 个分片（各 16 字节），按 4 字节一块返回；记录每次请求；receivedLimit 之后用户取消。 */
+function streamServer({ sizes = [16, 16, 16], chunk = 4 } = {}) {
+  const data = sizes.map((n, i) => Uint8Array.from({ length: n }, (_, k) => (k + i * 37) % 251));
+  const calls = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const name = url.slice(BASE.length);
+    if (name === 'tensor-cache.json') {
+      return new Response(JSON.stringify({ records: sizes.map((_, i) => ({ dataPath: `params_shard_${i}.bin`, nbytes: sizes[i] })) }), { status: 200 });
+    }
+    const i = Number(/params_shard_(\d+)/.exec(name)[1]);
+    const range = opts.headers?.Range || null;
+    calls.push({ name, range, at: Date.now() });
+    const m = range ? /bytes=(\d+)-(\d+)/.exec(range) : null;
+    const start = m ? Number(m[1]) : 0;
+    const end = m ? Number(m[2]) : sizes[i] - 1;
+    let pos = start;
+    const body = new ReadableStream(
+      {
+        async pull(c) {
+          if (opts.signal?.aborted) {
+            c.error(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+            return;
+          }
+          if (pos > end) {
+            c.close();
+            return;
+          }
+          const n = Math.min(chunk, end + 1 - pos);
+          c.enqueue(data[i].slice(pos, pos + n));
+          pos += n;
+          await new Promise((r) => setTimeout(r, 2));
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(body, { status: m ? 206 : 200 });
+  };
+  fetchImpl.calls = calls;
+  return fetchImpl;
+}
+
+test('取消后不再有后台下载：等待中的分片不会在取消后发起请求', async () => {
+  const storage = memoryCaches();
+  const f = streamServer();
+  const ctl = new AbortController();
+  await assert.rejects(
+    prefetchTextModelShards({
+      modelUrl: BASE,
+      storage,
+      fetchImpl: f,
+      signal: ctl.signal,
+      concurrency: 1,
+      sleep: instantSleep,
+      onProgress: ({ progress }) => {
+        if (progress >= 0.2) ctl.abort();
+      },
+    }),
+    (err) => err.name === 'AbortError',
+  );
+  const countAtReject = f.calls.length;
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(f.calls.length, countAtReject, '取消返回之后不再发起任何请求');
+});
+
+test('取消后续传：只请求缺少的字节，首次进度等于已保存的比例', async () => {
+  const storage = memoryCaches();
+  const ctl = new AbortController();
+  // 第一次：收到 20 字节（分片 0 全部 16 字节 + 分片 1 的 4 字节）后取消
+  await assert.rejects(
+    prefetchTextModelShards({
+      modelUrl: BASE,
+      storage,
+      fetchImpl: streamServer(),
+      signal: ctl.signal,
+      concurrency: 1,
+      sleep: instantSleep,
+      onProgress: ({ progress }) => {
+        if (progress >= 20 / 48) ctl.abort();
+      },
+    }),
+    (err) => err.name === 'AbortError',
+  );
+  // 第二次：从已保存的位置继续
+  const f = streamServer();
+  const reported = [];
+  await prefetchTextModelShards({
+    modelUrl: BASE,
+    storage,
+    fetchImpl: f,
+    sleep: instantSleep,
+    onProgress: ({ progress }) => reported.push(progress),
+  });
+  const bytes = f.calls.reduce((n, c) => n + (c.range ? Number(/bytes=(\d+)-(\d+)/.exec(c.range)[2]) - Number(/bytes=(\d+)-/.exec(c.range)[1]) + 1 : 16), 0);
+  assert.equal(bytes, 28, '网络上只传输缺少的 28 字节（48 - 已保存的 20）');
+  assert.ok(Math.abs(reported[0] - 20 / 48) < 1e-9, `首次进度为已保存的比例（实际 ${reported[0]}）`);
+  const cache = await storage.open(TEXT_CACHE_SCOPE);
+  for (let i = 0; i < 3; i++) assert.ok(await cache.match(BASE + `params_shard_${i}.bin`), `分片 ${i} 已完整`);
+});

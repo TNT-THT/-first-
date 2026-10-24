@@ -56,6 +56,8 @@ export function stallGuard(parentSignal, stallMs) {
   let timer = null;
   let stalled = false;
   const onParent = () => ctl.abort();
+  // 父信号可能在排队等待期间已经取消：此时 abort 事件已经发生过，必须直接中止
+  if (parentSignal?.aborted) ctl.abort();
   parentSignal?.addEventListener('abort', onParent, { once: true });
   return {
     signal: ctl.signal,
@@ -287,6 +289,7 @@ async function planSegment(parts, size, partBytes, i, st, url) {
 /** 下载一个分段（或它的剩余部分）。已保存的字节不会重下；每写满一块即保存，出错时保存未写满的块。 */
 async function fetchSegment(ctx, i) {
   const { url, label, size, partBytes, parts, fetchImpl, signal, addBytes, n, stallMs } = ctx;
+  if (signal?.aborted) throw abortError();
   const { start, end, length } = partRange(size, partBytes, i);
   const st = await segmentStatus(parts, url, size, partBytes);
   if (st.have[i] === length) return;
@@ -348,6 +351,7 @@ async function fetchWhole(ctx) {
   for (let i = 0; i < st.n; i += 1) if (st.have[i] !== partRange(size, partBytes, i).length) todo.push(i);
   if (todo.length === 0) return;
 
+  if (signal?.aborted) throw abortError();
   const guard = stallGuard(signal, stallMs);
   let res;
   try {

@@ -120,7 +120,8 @@ export async function prefetchTextModelShards({
     doneBytes += n;
     report();
   };
-  await Promise.all(
+  // 等全部分片结束（成功、永久失败或取消）后再返回：取消时不留下仍在后台运行的下载
+  const results = await Promise.allSettled(
     missing.map(([url, nbytes]) =>
       downloadSegmentedFile({
         url,
@@ -133,7 +134,12 @@ export async function prefetchTextModelShards({
         partBytes,
         concurrency,
         limit,
-        retry: (task) => retry(task),
+        // 暂时性错误：自动重试，并在进度文字中说明（已保存的字节保留）
+        retry: (task) =>
+          retry(task, (info) => {
+            note = `网络不稳定，${Math.round(info.waitMs / 1000)} 秒后自动重试（第 ${info.attempt} 次）。已下载的部分会保留。`;
+            report();
+          }),
         addBytes,
         stallMs,
         onNote: (text) => {
@@ -158,6 +164,8 @@ export async function prefetchTextModelShards({
     ),
   );
   if (signal?.aborted) throw abortError();
+  const firstError = results.find((r) => r.status === 'rejected');
+  if (firstError) throw firstError.reason;
 
   return { total: shards.size, cached: doneCount, failed };
 }

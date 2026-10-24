@@ -767,3 +767,43 @@ test('拼接阶段有进度提示（进度条停在已保存的字节数，并�
   assert.ok(notes.some((n) => n.includes('正在整理文件（unet/weights.pb）')), '拼接开始时提示');
   assert.ok(notes.some((n) => n.includes('100%')), '拼接进度达到 100%');
 });
+
+test('取消后不再发起新的下载：排队中的文件在取消后不会开始下载', async () => {
+  const storage = memoryCaches();
+  const m = model();
+  const ctl = new AbortController();
+  const calls = [];
+  const fetchImpl = scripted(({ name, range, data, signal }) => {
+    calls.push({ name, range, aborted: !!signal?.aborted });
+    let pos = range ? Number(/bytes=(\d+)-/.exec(range)[1]) : 0;
+    const stream = new ReadableStream(
+      {
+        pull(c) {
+          if (signal?.aborted) return c.error(abortError());
+          if (pos >= data.length) return c.close();
+          c.enqueue(data.slice(pos, pos + 2));
+          pos += 2;
+          return undefined;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return new Response(stream, { status: range ? 206 : 200 });
+  });
+  await assert.rejects(
+    downloadImageModel(m, {
+      storage,
+      fetchImpl,
+      signal: ctl.signal,
+      concurrency: 1,
+      sleep: instantSleep,
+      onProgress: ({ bytes }) => {
+        if (bytes > 0) ctl.abort();
+      },
+    }),
+    (err) => err.name === 'AbortError',
+  );
+  const atReject = calls.length;
+  await new Promise((r) => setTimeout(r, 40));
+  assert.equal(calls.length, atReject, '取消后不再发起任何请求');
+});
