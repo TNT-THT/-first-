@@ -50,7 +50,7 @@ test('SDXS 之外的新模型使用 SD 1.5 的潜变量缩放（缺省）', () =
 });
 
 // 三个新加入的动漫模型：只在选择器中显示，暂不可选、不下载；备注说明暂不可用的原因。
-const ANIME_UNAVAILABLE = ['wd14-anime-sd15-onnx-fp16', 'cyberpunk-anime-sd15-onnx-fp32', 'wai-illustrious-sdxl-onnx-webgpu'];
+const ANIME_UNAVAILABLE = ['cyberpunk-anime-sd15-onnx-fp32', 'wai-illustrious-sdxl-onnx-webgpu'];
 
 test('动漫模型条目：状态为 unavailable，不可选，备注写明暂不可用的原因', () => {
   for (const id of ANIME_UNAVAILABLE) {
@@ -65,6 +65,9 @@ test('动漫模型条目：状态为 unavailable，不可选，备注写明暂�
 
 test('WD 1.4 动漫模型：单文件 UNet 无外部权重，文件大小均已配置', () => {
   const m = models.find((x) => x.id === 'wd14-anime-sd15-onnx-fp16');
+  assert.equal(m.status, 'available', 'WD 1.4 已按用户决定改为可用');
+  assert.equal(isSelectable(m), true);
+  assert.match(m.note, /未在浏览器中验证生成/);
   assert.equal(m.files.unetWeights, undefined);
   for (const key of ['textEncoder', 'unet', 'vaeDecoder', 'vocab', 'merges', 'scheduler']) {
     assert.ok(m.files[key]?.size > 0, `缺少 ${key} 的大小`);
