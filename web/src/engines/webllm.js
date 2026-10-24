@@ -3,7 +3,6 @@
  * 之后的对话完全在本机完成，不需要服务器，也不需要 API Key。
  */
 import { buildModelList } from '../model-source.js';
-import { isPrefetchableRecord, prefetchTextModelShards, textModelBaseUrl } from './text-prefetch.js';
 import {
   decideVariant,
   diagnoseOutput,
@@ -157,17 +156,6 @@ async function doLoadWebLLMEngine(
         ...prebuiltAppConfig,
         model_list: buildModelList(prebuiltAppConfig.model_list, extraRecords, mirrorOwner),
       };
-      // 先以 12 路并发把缺少的分片下载到缓存（WebLLM 内置下载只有 4 路）。
-      // 这里不报告下载错误：分片仍缺失时，由 WebLLM 加载时报告。
-      const record = appConfig.model_list.find((r) => r.model_id === modelId);
-      const base = record && isPrefetchableRecord(record) ? textModelBaseUrl(record.model) : null;
-      if (base) {
-        try {
-          await prefetchTextModelShards({ modelUrl: base, signal, onProgress: progress });
-        } catch (err) {
-          if (err?.name === 'AbortError' || signal?.aborted) throw err;
-        }
-      }
       loadedId = null;
       loadedCtx = null;
       // 运行时覆盖上下文窗口（KV 缓存大小）；会覆盖模型自带的 context_window_size
