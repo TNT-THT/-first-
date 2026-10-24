@@ -79,3 +79,23 @@ test('Cyberpunk 动漫模型：fp32 外部权重大小已配置（超过 2 GB，
   const m = models.find((x) => x.id === 'cyberpunk-anime-sd15-onnx-fp32');
   assert.ok(m.files.unetWeights.size > 2e9, '外部权重应记录为超过 2 GB');
 });
+
+// Chroma1-HD、SDXL base 1.0、Kolors：只登记配置，不可选、不下载；许可与参数量级写在备注中。
+const ADDED_UNSELECTABLE = [
+  { id: 'chroma1-hd', status: 'planned', license: 'Apache-2.0', params: '8.9B' },
+  { id: 'sdxl-base-1.0', status: 'unavailable', license: 'CreativeML Open RAIL++-M', params: '3.5B' },
+  { id: 'kolors', status: 'planned', license: 'MODEL_LICENSE', params: '8.8B' },
+];
+
+test('新加入的生图模型：状态正确、不可选、无文件清单，备注写明参数量级与许可', () => {
+  for (const x of ADDED_UNSELECTABLE) {
+    const m = models.find((item) => item.id === x.id);
+    assert.ok(m, `缺少 ${x.id}`);
+    assert.equal(m.status, x.status, x.id);
+    assert.equal(isSelectable(m), false, `${x.id} 不应可选`);
+    assert.deepEqual(m.files, {}, `${x.id} 不应有未核对的文件清单`);
+    assert.match(m.note, new RegExp(`约 ${x.params}`), `${x.id} 备注应写明参数量级`);
+    assert.ok(m.license.includes(x.license), `${x.id} 许可应包含 ${x.license}`);
+    assert.match(m.note, /未在浏览器中验证/, `${x.id} 备注应说明未验证`);
+  }
+});

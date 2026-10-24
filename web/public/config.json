@@ -726,6 +726,57 @@
       "status": "planned",
       "license": "以原模型页面为准",
       "note": "参数量级：约 1B（按模型名称推算）。显存：演示页面的文件约 2.2 GB，运行约 2.7–3.7 GB（估计，未核对文件清单，未实测）。DeepSeek Janus-Pro-1B（自回归的多模态模型，文字生成图像能力有限）。ONNX 版在 onnx-community/Janus-Pro-1B-ONNX，演示页面称约 2.24 GB。尚未接入：需要自回归采样、图像令牌解码与 Transformers.js 风格的管线，且没有种子和尺寸控制。未核对文件清单，未在浏览器中验证。"
+    },
+    {
+      "id": "chroma1-hd",
+      "label": "Chroma1-HD（1024 · bf16 · 约 8.9B 参数 · 显存需求高，估计超过 20 GB · 暂未接入）",
+      "family": "chroma",
+      "repo": "lodestones/Chroma1-HD",
+      "revision": "main",
+      "status": "planned",
+      "license": "Apache-2.0",
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 40,
+        "guidance": 3
+      },
+      "files": {},
+      "note": "参数量级：约 8.9B（作者标注，基于 FLUX.1-schnell 结构改版，已在模型页面核对）。显存：bf16 检查点约 17.8 GB（第三方文章数字，未核对）；另需 T5-XXL 文本编码器（ComfyUI 说明中列出），总占用更高。浏览器内运行估计需要 20 GB 以上（估计，未实测）。尚未接入：官方仓库为 diffusers 格式，没有 ONNX 文件，文件清单尚未核对；需要 FLUX 架构的推理管线（T5 文本编码、潜变量打包、流匹配调度），且权重单文件体积大，需要分片加载。默认步数与引导值取自模型页面示例。许可 Apache-2.0（已在模型页面核对）。未在浏览器中验证。"
+    },
+    {
+      "id": "sdxl-base-1.0",
+      "label": "SDXL base 1.0（1024 · 约 3.5B 参数 · 显存估计 8 GB 以上 · 暂不可用）",
+      "family": "sdxl",
+      "repo": "stabilityai/stable-diffusion-xl-base-1.0",
+      "revision": "main",
+      "status": "unavailable",
+      "license": "CreativeML Open RAIL++-M",
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 30,
+        "guidance": 5
+      },
+      "files": {},
+      "note": "参数量级：约 3.5B（按 SDXL 结构估计：UNet 约 2.6B，加上两个文本编码器 OpenCLIP-ViT/G 与 CLIP-ViT/L）。显存：fp16 权重约 6.9 GB（估计），浏览器内运行估计需要 8 GB 以上（估计，未实测）。暂不可用：本项目没有 SDXL 管线（双文本编码器、尺寸与时间条件输入、1024 分辨率）；官方仓库为 diffusers 格式，没有 ONNX 文件，文件清单尚未核对。基础模型可单独使用，不需要 refiner。默认步数与引导值为估计值，未核对。许可 CreativeML Open RAIL++-M（已在模型页面核对）。未在浏览器中验证。"
+    },
+    {
+      "id": "kolors",
+      "label": "Kolors（1024 · 中英文 · 约 8.8B 参数 · 显存估计 18 GB 以上 · 暂未接入）",
+      "family": "kolors",
+      "repo": "Kwai-Kolors/Kolors",
+      "revision": "main",
+      "status": "planned",
+      "license": "代码 Apache-2.0；模型权重仅限学术研究，商用需向厂商登记（MODEL_LICENSE）",
+      "defaults": {
+        "width": 1024,
+        "height": 1024,
+        "steps": 25,
+        "guidance": 5
+      },
+      "files": {},
+      "note": "参数量级：约 8.8B（UNet 约 2.6B，文本编码器 ChatGLM3-6B 约 6.2B，按公开参数量估计）。模型页面元数据显示为 3B，与分拆计算不一致，以分拆估计为准（未核对）。显存：按 8.8B 参数的 fp16 估计约 17.6 GB，运行估计 18 GB 以上（估计，未实测）；第三方文章给出的 fp16 约 13 GB 与此不一致，未核对。尚未接入：需要 ChatGLM3 分词与聊天模板，以及 Kolors 版 UNet 的接口；官方仓库无 ONNX 文件，文件清单尚未核对。中英文文字渲染较强。许可：代码 Apache-2.0，权重受 MODEL_LICENSE 限制，商用需登记（已在模型页面核对）。未在浏览器中验证。"
     }
   ]
 }
