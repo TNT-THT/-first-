@@ -2330,8 +2330,8 @@ function autoGrow() {
 
 els.input.addEventListener('input', autoGrow);
 els.input.addEventListener('keydown', (e) => {
-  // 中文输入法组合输入期间按 Enter 不应发送
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+  // Shift+Enter 发送；Enter 换行（默认行为）。中文输入法组合输入期间按 Enter 不应发送
+  if (e.key === 'Enter' && e.shiftKey && !e.isComposing) {
     e.preventDefault();
     els.composer.requestSubmit();
   }
@@ -3358,7 +3358,8 @@ function initImageMode() {
   els.imageModeBtn.addEventListener('click', () => (imageState.active ? exitImageMode() : enterImageMode()));
   els.imageForm.addEventListener('submit', runImageGenerate);
   els.imagePrompt.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    // Shift+Enter 生成；Enter 换行（默认行为）
+    if (e.key === 'Enter' && e.shiftKey && !e.isComposing) {
       e.preventDefault();
       els.imageForm.requestSubmit();
     }
