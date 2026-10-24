@@ -1657,7 +1657,6 @@ function refreshRoleUI() {
   els.dataSectionList.closest('.data-export').hidden = MODE !== 'webllm';
   els.downloadSiteBtn.closest('.site-tools').hidden = MODE !== 'webllm';
   setImportButtons(admin);
-  renderImageFiles();
   els.modelAdminHint.textContent = admin
     ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
     : '导出与导入模型仅限管理员。';
@@ -3350,6 +3349,8 @@ function initImageMode() {
     renderImageFiles();
     preloadImageModel();
   });
+  // 管理员登录后，进入图片文件区时刷新导出/导入按钮的可用状态（不改动文本模型的刷新逻辑）
+  els.imageModelFiles.addEventListener('pointerenter', () => renderImageFiles());
   els.imageImportModelBtn.addEventListener('click', () => {
     if (requireAdmin('导入生图模型')) els.imageImportModelInput.click();
   });
