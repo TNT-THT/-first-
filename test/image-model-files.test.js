@@ -195,3 +195,38 @@ test('导入：拒绝聊天模型的 .ojmodel 文件与非本应用文件，并�
   const truncated = blob.slice(0, blob.size - 4);
   await assert.rejects(importImageModelFile(truncated, { models: [model()], storage: memoryCaches() }), /数据不完整/);
 });
+
+// 本站文件（file.local）：导出时的网站地址与导入时不同（另一台设备、http 与 https、另一个端口）仍应可以导入，
+// 并且写入导入网站的缓存地址，生图时才能找到。
+test('导入：本站文件的网站地址不同（换端口或协议）仍可导入，并写入当前网站的缓存地址', async () => {
+  const savedLocation = globalThis.location;
+  const localModel = () => model({ files: { ...model().files, unet: { path: 'unet/model.onnx', local: 'sd15-unet/model.onnx', size: 3 } } });
+  const localFetch = async (url) => {
+    if (url.endsWith('/sd15-unet/model.onnx')) return new Response(BYTES['unet/model.onnx'].slice(), { status: 200 });
+    return fakeFetch()(url);
+  };
+  try {
+    globalThis.location = { href: 'https://site-a.example/app/' };
+    const src = memoryCaches();
+    await downloadImageModel(localModel(), { storage: src, fetchImpl: localFetch });
+    const { blob } = await buildImageModelFile(localModel(), { storage: src });
+
+    globalThis.location = { href: 'http://localhost:5173/' };
+    const dst = memoryCaches();
+    const res = await importImageModelFile(blob, { models: [localModel()], storage: dst });
+    assert.equal(res.entryCount, 3);
+    assert.equal((await imageCacheStatus(localModel(), { storage: dst })).complete, true);
+    assert.ok(store(dst).has('http://localhost:5173/sd15-unet/model.onnx'));
+    assert.ok(!store(dst).has('https://site-a.example/app/sd15-unet/model.onnx'));
+  } finally {
+    globalThis.location = savedLocation;
+  }
+});
+
+test('导入：远程文件（Hugging Face）的地址仍必须完全一致', async () => {
+  const src = memoryCaches();
+  await downloadImageModel(model(), { storage: src, fetchImpl: fakeFetch() });
+  const { blob } = await buildImageModelFile(model(), { storage: src });
+  const otherHost = model({ repo: 'org/repo', revision: 'other' });
+  await assert.rejects(importImageModelFile(blob, { models: [otherHost], storage: memoryCaches() }), /地址与站点配置不一致/);
+});
