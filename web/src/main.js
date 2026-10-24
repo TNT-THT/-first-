@@ -2901,6 +2901,14 @@ function selectedImageModel() {
   return imageModelById(els.imageModelSelect.value);
 }
 
+/** 生图模式中权限变化后刷新：导出/导入/删除按钮、管理员面板、导出参数复选框。 */
+function refreshImageRoleState() {
+  if (!imageState.active) return;
+  renderImageFiles();
+  renderImageAdmin();
+  renderImageEffective();
+}
+
 async function renderImageFiles() {
   const model = selectedImageModel();
   const show = !!model && isSelectable(model);
@@ -3365,7 +3373,13 @@ function initImageMode() {
     renderImageFiles();
     preloadImageModel();
   });
-  // 管理员登录后，进入图片文件区时刷新导出/导入按钮的可用状态（不改动文本模型的刷新逻辑）
+  // 权限变化（登录、退出）时 refreshRoleUI 会更新角色标签；生图区据此同步导出/导入/参数按钮（不改动文本模型的代码）
+  new MutationObserver(() => refreshImageRoleState()).observe(els.roleBadge, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
+  // 管理员登录后，进入图片文件区时刷新导出/导入按钮的可用状态
   els.imageModelFiles.addEventListener('pointerenter', () => renderImageFiles());
   els.imageImportModelBtn.addEventListener('click', () => {
     if (requireAdmin('导入生图模型')) els.imageImportModelInput.click();

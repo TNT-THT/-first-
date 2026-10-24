@@ -697,6 +697,8 @@ body.embed .role-section { display: none !important; }
 .image-admin { border-top: 1px dashed var(--border, #d8dbe0); padding-top: 8px; display: flex; flex-direction: column; gap: 6px; }
 .image-admin-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .image-mode .messages, .image-mode .status-bar, .image-mode .composer, .image-mode .history-panel { display: none !important; }
+/* 生图模式下仍可打开“更改权限”面板：管理员登录/退出、导出与导入都从这里进入（与聊天模式相同） */
+.image-mode .role-panel:not([hidden]) { display: flex !important; }
 .image-mode .image-panel { flex: 1 1 auto; max-height: none; }
 
 /* 生图：模型文件与画廊工具 */

@@ -361,7 +361,8 @@ export function validateImageHeader(h) {
   }
   if (!Array.isArray(h.entries) || h.entries.length === 0) throw new Error('生图模型文件没有任何数据条目');
   for (const e of h.entries) {
-    if (typeof e.key !== 'string' || typeof e.url !== 'string' || !/^https:\/\//.test(e.url)) {
+    // 本站文件的地址含导出时的网站地址（可能是 http 的本地开发地址），因此两种协议都接受
+    if (typeof e.key !== 'string' || typeof e.url !== 'string' || !/^https?:\/\//.test(e.url)) {
       throw new Error('生图模型文件中的地址无效');
     }
     if (!Number.isSafeInteger(e.size) || e.size < 0 || !Number.isSafeInteger(e.offset) || e.offset < 0) {
@@ -398,6 +399,17 @@ export async function readImageModelHeader(file) {
 }
 
 /**
+ * 文件中记录的地址是否与本站的地址是同一个文件。
+ * 远程文件（Hugging Face）必须完全相同；本站文件（file.local）只比较相对路径，
+ * 因为导出的网站地址（协议、域名、端口）可能与导入的网站不同。
+ */
+export function sameSource(model, key, recordedUrl, expectedUrl) {
+  if (recordedUrl === expectedUrl) return true;
+  const local = model.files?.[key]?.local;
+  return !!local && typeof recordedUrl === 'string' && recordedUrl.endsWith(`/${local}`);
+}
+
+/**
  * 导入 .ojimage：必须与站点配置中的同一个模型一致（id、文件键、地址、大小），否则拒绝。
  * @param {Array<object>} models config.json 中的 imageModels
  * @returns {Promise<{model: object, entryCount: number}>}
@@ -415,7 +427,9 @@ export async function importImageModelFile(file, { models, storage = globalThis.
     if (!(e.key in expected)) throw new Error(`生图模型文件包含未知的文件：${e.key}`);
     if (seen.has(e.key)) throw new Error(`生图模型文件中重复的文件：${e.key}`);
     seen.add(e.key);
-    if (e.url !== expected[e.key]) throw new Error(`文件地址与站点配置不一致（${e.key}），文件可能已损坏或来自其他版本`);
+    if (!sameSource(model, e.key, e.url, expected[e.key])) {
+      throw new Error(`文件地址与站点配置不一致（${e.key}），文件可能已损坏或来自其他版本`);
+    }
     const want = Number(model.files[e.key].size);
     if (want > 0 && e.size !== want) throw new Error(`文件大小与站点配置不一致（${e.key}）`);
   }
@@ -426,9 +440,11 @@ export async function importImageModelFile(file, { models, storage = globalThis.
   try {
     let done = 0;
     for (const e of header.entries) {
+      // 写入本站当前的地址（不是文件中记录的地址），这样换一个网址导入也能被生图使用
+      const target = expected[e.key];
       const body = file.slice(dataStart + e.offset, dataStart + e.offset + e.size);
-      await cache.put(e.url, new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }));
-      written.push(e.url);
+      await cache.put(target, new Response(body, { status: 200, headers: { 'Content-Type': 'application/octet-stream' } }));
+      written.push(target);
       done += 1;
       onProgress?.({ done, total: header.entries.length });
     }
