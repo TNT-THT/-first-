@@ -22,7 +22,7 @@ import { createSd15Runtime } from './sd15-runtime.js';
 import { createClipTokenizer, parseMerges } from './clip-tokenizer.js';
 import { createScheduler, parseSchedulerConfig } from './schedulers.js';
 import { chwToRgba, generateSd15WithFallback } from './sd15.js';
-import { oversizedFiles, createLimiter, PART_CONCURRENCY } from './model-files.js';
+import { createLimiter, fileTooLargeMessage, PART_CONCURRENCY } from './model-files.js';
 import { openModelFile } from './model-source.js';
 import { rewritePowToMul } from './onnx-pow.js';
 import { loadFraction } from './load-progress.js';
@@ -43,6 +43,15 @@ const workerLimit = createLimiter(PART_CONCURRENCY);
  * 什么都没有则从 Hugging Face 读取。按字节上报进度；expected 为配置中的大小，用于预分配内存。
  */
 async function loadBytes(url, expected, onBytes) {
+  try {
+    return await readBytes(url, expected, onBytes);
+  } catch (err) {
+    // 浏览器无法在内存中分配该文件时，给出说明（不再事先按大小拒绝）
+    throw new Error(fileTooLargeMessage(err, url, expected) || err?.message || String(err));
+  }
+}
+
+async function readBytes(url, expected, onBytes) {
   const res = await openModelFile(url, expected, {
     storage: typeof caches !== 'undefined' ? caches : null,
     limit: workerLimit,
@@ -146,15 +155,6 @@ async function ensureLoaded(id, urls, sizes, tokenizer) {
 }
 
 async function loadRuntime(id, urls, sizes, tokenizer, key) {
-
-  // 超过浏览器单文件上限的模型（如 fp32 的 3.4 GB UNet 权重）无法在网页中加载：尽早报错，不去读取
-  const big = oversizedFiles(sizes);
-  if (big.length) {
-    const names = big.map((b) => `${b.key}（${(b.bytes / 1e9).toFixed(2)} GB）`).join('、');
-    throw new Error(
-      `该模型的文件超过浏览器单文件上限（约 2 GB）：${names}。网页版无法加载，请改用 fp16 版，或使用本机 Python 脚本（scripts/image/sd15_local.py）。`,
-    );
-  }
 
   // 进度总量只计入一定会读取的文件；备选文本编码器仅在主文件失败时读取，开始读取时再计入（见 onStart 回调）。
   // 词表与合并规则由 ensureTokenizer 读取，这里不再计入。

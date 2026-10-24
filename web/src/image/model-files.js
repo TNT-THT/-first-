@@ -450,17 +450,11 @@ export async function importImageModelFile(file, { models, storage = globalThis.
 
 
 /**
- * 浏览器中单个 ArrayBuffer 的上限（本项目测试的 Chromium 中，2 GB 的分配即失败；1.7 GB 可以成功）。
- * 模型的每个文件都要整体读入一个 ArrayBuffer 再交给 ONNX Runtime，超过上限的文件无法在网页中加载。
+ * 模型文件没有大小上限：导出、导入都是按文件段逐段读写的。
+ * 读取单个文件时若浏览器无法在内存中分配（例如超过其 ArrayBuffer 上限），给出明确的说明，而不是只显示浏览器的原始错误。
  */
-export const MAX_BROWSER_FILE_BYTES = 2 ** 31 - 1;
-
-/**
- * 返回大小超过浏览器单文件上限的文件名（sizes 为 { 文件键: 字节数 }）。
- * 只检查 sizes 中的数值；缺失或为 0 的项目视为未知，不报错。
- */
-export function oversizedFiles(sizes, limit = MAX_BROWSER_FILE_BYTES) {
-  return Object.entries(sizes || {})
-    .filter(([, n]) => Number(n) > limit)
-    .map(([key, n]) => ({ key, bytes: Number(n) }));
+export function fileTooLargeMessage(err, url, bytes) {
+  if (!(err instanceof RangeError)) return null;
+  const size = bytes > 0 ? `（约 ${(bytes / 1e9).toFixed(2)} GB）` : '';
+  return `浏览器无法在内存中装下该文件${size}：${url}。可以改用本机 Python 脚本（scripts/image/sd15_local.py）运行。`;
 }
