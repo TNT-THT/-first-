@@ -1,30 +1,26 @@
+// 模型文件没有大小上限：不再按大小事先拒绝；只有浏览器真正分配不下时才给出说明。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { oversizedFiles, MAX_BROWSER_FILE_BYTES } from '../web/src/image/model-files.js';
-import { sourceSizes } from '../web/src/image/catalog.js';
+import { fileTooLargeMessage } from '../web/src/image/model-files.js';
 
-const config = JSON.parse(fs.readFileSync(new URL('../web/public/config.json', import.meta.url), 'utf8'));
-const model = (id) => config.imageModels.find((m) => m.id === id);
-
-test('浏览器单文件上限为 2 GB 减 1 字节', () => {
-  assert.equal(MAX_BROWSER_FILE_BYTES, 2147483647);
+test('没有单文件大小上限：model-files 不再导出上限常量或预检查函数', async () => {
+  const mod = await import('../web/src/image/model-files.js');
+  assert.equal('MAX_BROWSER_FILE_BYTES' in mod, false);
+  assert.equal('oversizedFiles' in mod, false);
+  const worker = fs.readFileSync(new URL('../web/src/image/sd15-worker.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(worker, /超过浏览器单文件上限/);
+  assert.doesNotMatch(worker, /oversizedFiles/);
 });
 
-test('fp32 的 UNet 权重（3.4 GB）超过上限，会被识别出来', () => {
-  const over = oversizedFiles(sourceSizes(model('sd15-nmkd-fp32')));
-  assert.deepEqual(over.map((o) => o.key), ['unetWeights']);
+test('内存分配失败（RangeError）时给出说明，包含文件地址与大小', () => {
+  const msg = fileTooLargeMessage(new RangeError('Array buffer allocation failed'), 'https://h/unet/weights.pb', 3.4e9);
+  assert.match(msg, /无法在内存中装下该文件（约 3\.40 GB）/);
+  assert.match(msg, /https:\/\/h\/unet\/weights\.pb/);
+  assert.match(msg, /sd15_local\.py/);
 });
 
-test('fp16 的全部文件都在上限以内（最大为 UNet 权重 1.72 GB）', () => {
-  assert.deepEqual(oversizedFiles(sourceSizes(model('sd15-nmkd-fp16'))), []);
-});
-
-test('缺失或为 0 的大小视为未知，不报错', () => {
-  assert.deepEqual(oversizedFiles({ a: undefined, b: 0, c: '' }), []);
-  assert.deepEqual(oversizedFiles(null), []);
-});
-
-test('按自定义上限判断，边界值本身不超过', () => {
-  assert.deepEqual(oversizedFiles({ x: 10, y: 11 }, 10), [{ key: 'y', bytes: 11 }]);
+test('其他错误不改写（返回 null）', () => {
+  assert.equal(fileTooLargeMessage(new Error('网络错误'), 'u', 10), null);
+  assert.match(fileTooLargeMessage(new RangeError('x'), 'u', 0), /无法在内存中装下该文件：u/);
 });

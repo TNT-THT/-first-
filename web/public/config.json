@@ -347,11 +347,11 @@
     },
     {
       "id": "wd14-anime-sd15-onnx-fp16",
-      "label": "动漫 SD 1.x（waifu-diffusion v1.4 · 512 · fp16 ONNX · 约 1.0B 参数 · 显存估计 2.6–3.6 GB · 暂不可用）",
+      "label": "动漫 SD 1.x（waifu-diffusion v1.4 · 512 · fp16 ONNX · 约 1.0B 参数 · 显存估计 2.6–3.6 GB）",
       "family": "sd15",
       "repo": "RanaLLC/waifu-diffusion-onnx-v1-4",
       "revision": "main",
-      "status": "unavailable",
+      "status": "available",
       "license": "CreativeML OpenRAIL-M（上游 hakurei/waifu-diffusion 声明；该 ONNX 仓库未单独声明许可）",
       "defaults": {
         "width": 512,
@@ -385,7 +385,7 @@
           "size": 374
         }
       },
-      "note": "参数量级：约 1.0B（由文件大小推算，估计）。显存：权重约 2.5 GB，浏览器内运行约 2.6–3.6 GB（估计，未实测）。非官方 ONNX 转换版（RanaLLC，由 hakurei/waifu-diffusion v1.4 转换；仓库未附许可证说明，许可沿用上游 CreativeML OpenRAIL-M）。结构与 sd15-nmkd-fp16 相同（SD 1.x，512 分辨率），UNet 为单个 1.73 GB 文件（低于 2 GB 上限），不需要 weights.pb。暂不可用：同类 fp16 UNet 在本机创建会话失败（Mul 节点，原因尚未定位），在问题解决前不可选择、不下载。文本编码器 681 MB 大于标准 SD 1.5 的 fp32 文本编码器（492 MB），原因未核实。未在浏览器中验证画质与接口。"
+      "note": "参数量级：约 1.0B（由文件大小推算，估计）。显存：权重约 2.5 GB，浏览器内运行约 2.6–3.6 GB（估计，未实测）。非官方 ONNX 转换版（RanaLLC，由 hakurei/waifu-diffusion v1.4 转换；仓库未附许可证说明，许可沿用上游 CreativeML OpenRAIL-M）。结构与 sd15-nmkd-fp16 相同（SD 1.x，512 分辨率），UNet 为单个 1.73 GB 文件（低于 2 GB 上限），不需要 weights.pb。已改为可用（按用户决定），未在浏览器中验证生成。风险：本机测试中同类 fp16 UNet 在创建会话时报 Mul 节点错误（原因尚未定位，可能与 SD1.5 早期问题同类：float64 LayerNorm）。若出现创建会话失败，请改用 SD1.5 fp16，或使用本机脚本。文本编码器 681 MB 大于标准 SD 1.5 的 fp32 文本编码器（492 MB），原因未核实。未在浏览器中验证画质与接口。"
     },
     {
       "id": "cyberpunk-anime-sd15-onnx-fp32",

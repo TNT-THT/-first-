@@ -809,6 +809,15 @@ async function releaseStaleEngine() {
 }
 
 /**
+ * 预设或“恢复默认”改变了引擎窗口时，同样释放多余显存（与管理员参数、思考/滑动窗口开关相同）。
+ * 生成进行中不释放：释放会打断当前回答，新参数在下次发送时生效。
+ */
+async function releaseAfterSettingChange() {
+  if (state.streaming) return false;
+  return releaseStaleEngine();
+}
+
+/**
  * 管理员密钥验证（用于更正）。返回 Promise<boolean>：验证通过为 true；取消或密钥错误则不发送，文字保留在输入框中。
  */
 function verifyCorrectionKey(text, desc = '') {
@@ -1283,14 +1292,17 @@ function renderPresetOptions() {
  * 选择预设：机械修改，立即生效，不调用模型。
  * 思考开关是全局偏好，因此预设的 thinking 在这里写入偏好；之后仍可手动切换。
  */
-function applyPreset(id) {
+async function applyPreset(id) {
   if (!setPresetId(id)) return;
   const preset = findPreset(id) || findPreset(DEFAULT_PRESET_ID);
   setThinkingPref(preset.thinking);
   renderPresetOptions();
   refreshThinkToggle();
   refreshParamViews();
-  flashStatus(`已切换到预设「${preset.label}」：${preset.note} 下次发送时按新参数生效。`);
+  // 预设可能改变引擎窗口（上下文、滑动窗口、思考）：释放多余显存，下次发送时按新窗口加载
+  const released = await releaseAfterSettingChange();
+  const tail = released ? '已释放多余显存，' : '';
+  flashStatus(`已切换到预设「${preset.label}」：${preset.note} ${tail}下次发送时按新参数生效。`);
 }
 
 function renderModelOptions(selectId = state.backend.modelId) {
@@ -1657,7 +1669,6 @@ function refreshRoleUI() {
   els.dataSectionList.closest('.data-export').hidden = MODE !== 'webllm';
   els.downloadSiteBtn.closest('.site-tools').hidden = MODE !== 'webllm';
   setImportButtons(admin);
-  renderImageFiles();
   els.modelAdminHint.textContent = admin
     ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
     : '导出与导入模型仅限管理员。';
@@ -2146,19 +2157,23 @@ function renderParamDetails(list, modelId, overrides) {
  * 撤回参数覆盖：任何人都可以在“更改权限”面板中恢复某个参数为默认值（只影响本浏览器）。
  * 说明（notes）仍只能由管理员删除。
  */
-function revertParam(modelId, key) {
+async function revertParam(modelId, key) {
   if (!requireAdmin('恢复默认参数')) return;
   if (!resetParam(modelId, key)) return;
   refreshParamViews();
-  showStatus(`已恢复「${modelDisplayName(modelId)}」的 ${key} 为默认值（仅本机，从下一次回答起生效）。`);
+  const released = await releaseAfterSettingChange();
+  const tail = released ? '已释放多余显存。' : '';
+  showStatus(`已恢复「${modelDisplayName(modelId)}」的 ${key} 为默认值（仅本机，从下一次回答起生效）。${tail}`);
 }
 
-function revertAllParams(modelId) {
+async function revertAllParams(modelId) {
   if (!requireAdmin('恢复默认参数')) return;
   const n = resetAllParams(modelId);
   if (!n) return;
   refreshParamViews();
-  showStatus(`已恢复「${modelDisplayName(modelId)}」的全部 ${n} 项参数为默认值（仅本机，从下一次回答起生效）。`);
+  const released = await releaseAfterSettingChange();
+  const tail = released ? '已释放多余显存。' : '';
+  showStatus(`已恢复「${modelDisplayName(modelId)}」的全部 ${n} 项参数为默认值（仅本机，从下一次回答起生效）。${tail}`);
 }
 
 function refreshParamViews() {
@@ -3350,6 +3365,8 @@ function initImageMode() {
     renderImageFiles();
     preloadImageModel();
   });
+  // 管理员登录后，进入图片文件区时刷新导出/导入按钮的可用状态（不改动文本模型的刷新逻辑）
+  els.imageModelFiles.addEventListener('pointerenter', () => renderImageFiles());
   els.imageImportModelBtn.addEventListener('click', () => {
     if (requireAdmin('导入生图模型')) els.imageImportModelInput.click();
   });
