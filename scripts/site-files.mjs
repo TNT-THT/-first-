@@ -50,6 +50,9 @@ const EXCLUDED_EXTENSIONS = [
   '.pkl',
 ];
 
+/** 允许打包的图文件（不含权重）：SD1.5 UNet 补丁后的计算图，见 scripts/image/patch_sd15_unet_fp32_ln.py。 */
+export const ALLOWED_MODEL_GRAPHS = new Set(['web/public/sd15-unet/model.onnx']);
+
 /** 返回文件被排除的原因；未排除返回 null。 */
 export function exclusionReason(path, size = 0) {
   const p = String(path).replace(/\\/g, '/');
@@ -58,6 +61,7 @@ export function exclusionReason(path, size = 0) {
   const base = parts[parts.length - 1];
   if (/^\.env(\.|$)/.test(base)) return '环境变量或密钥文件';
   if (p === SITE_ZIP_NAME) return '网站包本身';
+  if (ALLOWED_MODEL_GRAPHS.has(p)) return null;
   if (EXCLUDED_EXTENSIONS.some((ext) => base.toLowerCase().endsWith(ext))) return '模型或权重文件';
   const limit = p.startsWith(RUNTIME_DIR) ? MAX_RUNTIME_FILE_BYTES : MAX_SITE_FILE_BYTES;
   if (size > limit) return '文件过大';

@@ -119,10 +119,15 @@
               <span id="imageFilesStatus" class="muted small" role="status"></span>
               <div class="image-admin-row">
                 <button id="imageDownloadBtn" type="button" class="btn ghost small" title="把该模型的全部文件保存到本机浏览器（之后可离线生成）">下载到本机</button>
-                <button id="imageExportModelBtn" type="button" class="btn ghost small" title="把本机已下载的模型导出为 .ojimage 文件，供其他设备导入">导出 .ojimage</button>
-                <label class="btn ghost small image-file-label" title="导入之前导出的 .ojimage 文件（必须与本站配置的模型一致）">导入 .ojimage<input id="imageImportModelInput" type="file" accept=".ojimage" hidden /></label>
+                <button id="imageExportModelBtn" type="button" class="btn ghost small" title="把本机已下载的模型导出为 .ojimage 文件，供其他设备导入。仅限管理员">导出 .ojimage</button>
+                <button id="imageImportModelBtn" type="button" class="btn ghost small" title="导入之前导出的 .ojimage 文件（必须与本站配置的模型一致）。仅限管理员">导入 .ojimage</button>
+                <input id="imageImportModelInput" type="file" accept=".ojimage" hidden />
                 <button id="imageDeleteFilesBtn" type="button" class="btn ghost small" title="删除本机缓存的模型文件，释放磁盘空间">删除本机文件</button>
               </div>
+                <label class="export-params" id="imageExportParamsLabel" hidden>
+                  <input id="imageExportWithParams" type="checkbox" checked />
+                  <span id="imageExportParamsText"></span>
+                </label>
               <div id="imageDownloadProgress" class="progress" hidden><i id="imageDownloadFill"></i></div>
             </div>
             <form id="imageForm" class="image-composer">

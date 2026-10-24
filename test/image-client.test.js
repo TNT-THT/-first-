@@ -67,3 +67,29 @@ test('worker 消息无法读取：请求失败且 worker 被终止', async () =>
   await assert.rejects(p, /无法读取其返回的消息/);
   assert.equal(f.made[0].terminated, true);
 });
+
+test('load（预加载）：只发送 load 消息（不含提示词），收到 loaded 后结束；进度回调随 id 送达', async () => {
+  const f = fakeWorkerFactory();
+  const client = createImageClient({ createWorker: f.create });
+  const progress = [];
+  const p = client.load({ urls: { textEncoder: 'u' }, sizes: { textEncoder: 3 }, wasmBase: 'http://h/ort/', onProgress: (m) => progress.push(m.message) });
+  const w = f.made[0];
+  const sent = w.sent[0];
+  assert.equal(sent.type, 'load');
+  assert.equal(sent.request, undefined);
+  w.onmessage({ data: { id: sent.id, type: 'progress', message: '读取中' } });
+  w.onmessage({ data: { id: sent.id, type: 'loaded' } });
+  assert.deepEqual(await p, { id: sent.id, type: 'loaded' });
+  assert.deepEqual(progress, ['读取中']);
+});
+
+test('load 被 dispose（切换模型、离开生图模式）时以 AbortError 结束，不留下待处理请求', async () => {
+  const f = fakeWorkerFactory();
+  const client = createImageClient({ createWorker: f.create });
+  const p = client.load({ urls: { textEncoder: 'u' }, sizes: {} });
+  assert.equal(client.running, true);
+  client.dispose();
+  await assert.rejects(p, (err) => err.name === 'AbortError');
+  assert.equal(client.running, false);
+  assert.equal(f.made[0].terminated, true);
+});

@@ -24,9 +24,21 @@ export function formatGB(bytes) {
  * file.repo 与 file.revision 可单独指定其他仓库（例如备选的 fp32 文本编码器）。
  */
 export function fileUrl(model, path, file = {}) {
+  // file.local：本站 public 目录中的文件（相对于网站根目录），例如修正过计算图的 UNet
+  if (file.local) return localFileUrl(file.local);
   const repo = file.repo || model.repo;
   const revision = file.revision || model.revision || 'main';
   return `https://huggingface.co/${repo}/resolve/${revision}/${path}`;
+}
+
+/**
+ * 本站文件的绝对地址（在页面中按页面地址解析）。没有页面地址时（如 Node 测试）返回相对路径。
+ * worker 不解析地址，由主线程把 sourceUrls 的结果传入。
+ */
+export function localFileUrl(rel) {
+  const base = globalThis.document?.baseURI || globalThis.location?.href;
+  if (!base) return `./${rel}`;
+  return new URL(rel, base).href;
 }
 
 /** 运行时需要的全部地址（与 files 中的键对应）。 */

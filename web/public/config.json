@@ -267,7 +267,8 @@
         },
         "unet": {
           "path": "unet/model.onnx",
-          "size": 1217704
+          "local": "sd15-unet/model.onnx",
+          "size": 1217320
         },
         "unetWeights": {
           "path": "unet/weights.pb",

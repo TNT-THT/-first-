@@ -22,7 +22,7 @@ import { createSd15Runtime } from './sd15-runtime.js';
 import { createClipTokenizer, parseMerges } from './clip-tokenizer.js';
 import { createScheduler, parseSchedulerConfig } from './schedulers.js';
 import { chwToRgba, generateSd15WithFallback } from './sd15.js';
-import { oversizedFiles, MAX_BROWSER_FILE_BYTES, createLimiter, PART_CONCURRENCY } from './model-files.js';
+import { oversizedFiles, createLimiter, PART_CONCURRENCY } from './model-files.js';
 import { openModelFile } from './model-source.js';
 import { rewritePowToMul } from './onnx-pow.js';
 import { loadFraction } from './load-progress.js';
@@ -116,10 +116,36 @@ async function ensureTokenizer(urls, sizes) {
   return tokenizer;
 }
 
+let loadingKey = null;
+let loadingPromise = null;
+
+/**
+ * 创建（或复用）当前模型的运行时。同一模型的加载只进行一次（预加载与生成可以同时请求）；
+ * 另一个模型的加载会先等待正在进行的加载结束，避免两个模型同时占用显存。
+ */
 async function ensureLoaded(id, urls, sizes, tokenizer) {
   const key = urls.textEncoder;
-  if (state && loadedKey === key) return state;
+  for (;;) {
+    if (state && loadedKey === key) return state;
+    if (loadingPromise && loadingKey === key) return loadingPromise;
+    if (!loadingPromise) break;
+    await loadingPromise.catch(() => {});
+  }
   release();
+  loadingKey = key;
+  const p = loadRuntime(id, urls, sizes, tokenizer, key);
+  loadingPromise = p;
+  try {
+    return await p;
+  } finally {
+    if (loadingPromise === p) {
+      loadingPromise = null;
+      loadingKey = null;
+    }
+  }
+}
+
+async function loadRuntime(id, urls, sizes, tokenizer, key) {
 
   // 超过浏览器单文件上限的模型（如 fp32 的 3.4 GB UNet 权重）无法在网页中加载：尽早报错，不去读取
   const big = oversizedFiles(sizes);
@@ -228,12 +254,18 @@ function post(message, transfer = []) {
 
 self.onmessage = async (event) => {
   const { id, type, urls, sizes, wasmBase, request, latentScale } = event.data || {};
-  if (type !== 'generate') return;
+  if (type !== 'generate' && type !== 'load') return;
   try {
     // 运行库目录由页面给出（开发服务器与网站包的路径不同），优先于上面的默认值
     if (wasmBase) ort.env.wasm.wasmPaths = wasmBase;
     // 先读取分词器并检查预算（管理员内容超出时直接报错，不下载大文件）
     const tokenizer = await ensureTokenizer(urls, sizes || {});
+    if (type === 'load') {
+      // 只加载（预加载）：不检查提示词、不生成
+      await ensureLoaded(id, urls, sizes || {}, tokenizer);
+      post({ id, type: 'loaded' });
+      return;
+    }
     const budgetInput = {
       input: typeof request.input === 'string' ? request.input : null,
       maxInputTokens: request.maxInputTokens,

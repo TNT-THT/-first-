@@ -8,7 +8,14 @@ import { trimRepetition } from './repetition.js';
 import { isAllowedOrigin } from './origin.js';
 import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
-import { getSavedDefaultModel, resolveStartupModel, saveDefaultModel } from './default-model.js';
+import {
+  getSavedDefaultModel,
+  getSavedImageModel,
+  resolveStartupImageModel,
+  resolveStartupModel,
+  saveDefaultModel,
+  saveImageModel,
+} from './default-model.js';
 import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './answer-check.js';
 import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './engines/webllm.js';
 import { formatGB, imageModelsOf, isSelectable, sourceSizes, sourceUrls, totalBytes } from './image/catalog.js';
@@ -29,6 +36,7 @@ import {
   removeImageCorrection,
   removeImageHint,
   removeImageKnowledge,
+  sanitizeImageParams,
   setImageParams,
   stripImageParamLine,
 } from './image/params.js';
@@ -37,11 +45,13 @@ import { joinLeadTexts, MAX_PROMPT_CHUNKS } from './image/prompt-budget.js';
 import { addGalleryImage, clearGallery, deleteGalleryImage, listGallery } from './image/gallery-store.js';
 import { buildGalleryArchive, readGalleryArchive } from './image/gallery-archive.js';
 import {
-  buildImageModelFile,
   deleteImageModelFiles,
   downloadImageModel,
   imageCacheStatus,
+  imageModelFileName,
   importImageModelFile,
+  listCompleteImageModelIds,
+  prepareImageModelExport,
 } from './image/model-files.js';
 import { DEFAULT_SIZE, RATIOS, sizeForRatio } from './image/sizes.js';
 import {
@@ -53,6 +63,7 @@ import {
   removeLocalModelFiles,
 } from './model-file.js';
 import {
+  imagePickerOptions,
   isPickerCancelled,
   savePickerOptions,
   supportsSaveLocationPicker,
@@ -208,7 +219,11 @@ const els = {
   imageFilesStatus: $('#imageFilesStatus'),
   imageDownloadBtn: $('#imageDownloadBtn'),
   imageExportModelBtn: $('#imageExportModelBtn'),
+  imageImportModelBtn: $('#imageImportModelBtn'),
   imageImportModelInput: $('#imageImportModelInput'),
+  imageExportParamsLabel: $('#imageExportParamsLabel'),
+  imageExportWithParams: $('#imageExportWithParams'),
+  imageExportParamsText: $('#imageExportParamsText'),
   imageDeleteFilesBtn: $('#imageDeleteFilesBtn'),
   imageDownloadProgress: $('#imageDownloadProgress'),
   imageDownloadFill: $('#imageDownloadFill'),
@@ -1642,6 +1657,7 @@ function refreshRoleUI() {
   els.dataSectionList.closest('.data-export').hidden = MODE !== 'webllm';
   els.downloadSiteBtn.closest('.site-tools').hidden = MODE !== 'webllm';
   setImportButtons(admin);
+  renderImageFiles();
   els.modelAdminHint.textContent = admin
     ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
     : '导出与导入模型仅限管理员。';
@@ -2466,7 +2482,17 @@ function notifyParentReady() {
 // ---------- 生图模式（仅本机 WebLLM 模式）----------
 // 生图与聊天互斥：进入生图模式时释放聊天模型的显存；离开时终止生图 worker。
 // 生图模型只在第一次生成时加载，启动页面时不下载、不加载。
-const imageState = { active: false, busy: false, controller: null, client: null, gallery: [], downloadCtl: null, filesStatus: null, filesToken: 0 };
+const imageState = {
+  active: false,
+  busy: false,
+  controller: null,
+  client: null,
+  gallery: [],
+  downloadCtl: null,
+  filesStatus: null,
+  filesToken: 0,
+  preload: null, // { modelId, token, promise }：进入生图模式后在后台从本机加载模型
+};
 
 function imageModels() {
   return imageModelsOf(state.appConfig);
@@ -2511,15 +2537,41 @@ function renderImageModelOptions() {
     ...models.map((m) => {
       const opt = document.createElement('option');
       opt.value = m.id;
-      opt.textContent = isSelectable(m) ? m.label : `${m.label}（暂不可用）`;
+      opt.textContent = imageOptionLabel(m, false);
       opt.disabled = !isSelectable(m);
       opt.title = m.note || '';
       return opt;
     }),
   );
-  const first = models.find(isSelectable);
-  if (first) els.imageModelSelect.value = first.id;
+  // 与聊天模型一样记住上次的选择（刷新页面后仍是同一个模型）
+  const startId = resolveStartupImageModel({
+    models: models.map((m) => ({ id: m.id, selectable: isSelectable(m) })),
+    saved: getSavedImageModel(),
+  });
+  if (startId) els.imageModelSelect.value = startId;
   fillImageControls(imageModelById(els.imageModelSelect.value));
+  refreshImageCacheMarks();
+}
+
+/** 下拉框文字：不可用模型加“（暂不可用）”，已完整下载的加 ✓（与聊天模型一致）。 */
+function imageOptionLabel(m, downloaded) {
+  // 目录生成的说明里可能已含“暂不可用”，避免重复
+  const base = isSelectable(m) || /暂不可用/.test(m.label) ? m.label : `${m.label}（暂不可用）`;
+  return downloaded ? `✓ ${base}` : base;
+}
+
+/** 在下拉框中给已完整下载到本机的生图模型加上 ✓（与聊天模型一致）。 */
+async function refreshImageCacheMarks() {
+  try {
+    const done = await listCompleteImageModelIds(imageModels());
+    for (const opt of els.imageModelSelect.options) {
+      const m = imageModelById(opt.value);
+      if (!m) continue;
+      opt.textContent = imageOptionLabel(m, done.has(m.id));
+    }
+  } catch (err) {
+    console.warn('无法检查生图模型缓存状态', err);
+  }
 }
 
 /** 切换模型时，用该模型的默认值填充控件（只在切换模型时执行）。 */
@@ -2579,6 +2631,15 @@ function renderImageEffective() {
   if (hints.length) parts.push(`风格提示 ${hints.length} 条`);
   if (isSelectable(model)) parts.push(`模型约 ${formatGB(totalBytes(model))}（可点“下载到本机”保存，之后离线可用）`);
   els.imageEffective.textContent = parts.join('｜');
+  renderImageExportParams(model);
+}
+
+/** 导出时“同时保存自定义参数”：只在管理员且该模型有参数时显示（与文本模型一致）。 */
+function renderImageExportParams(model) {
+  const params = sanitizeImageParams(getImageSettings(model.id).params);
+  const show = isAdmin() && !!params;
+  els.imageExportParamsLabel.hidden = !show;
+  if (show) els.imageExportParamsText.textContent = `同时保存自定义参数（${paramSummary(params)}）`;
 }
 
 /** 管理员列表的一行：文字 + 删除按钮（删除需管理员权限）。 */
@@ -2849,7 +2910,9 @@ async function renderImageFiles() {
   else if (st.complete) els.imageDownloadBtn.textContent = '已下载到本机';
   else els.imageDownloadBtn.textContent = partial ? '继续下载' : '下载到本机';
   els.imageDownloadBtn.disabled = !imageState.downloadCtl && st.complete;
-  els.imageExportModelBtn.disabled = !st.complete;
+  // 导出与导入仅限管理员（与文本模型一致）；导出还需要文件完整下载到本机
+  els.imageExportModelBtn.disabled = !st.complete || !isAdmin();
+  els.imageImportModelBtn.disabled = !isAdmin() || !!imageState.downloadCtl || imageState.busy;
   els.imageDeleteFilesBtn.disabled = (st.cached === 0 && st.partsCached === 0) || !!imageState.downloadCtl;
 }
 
@@ -2892,6 +2955,8 @@ async function downloadSelectedModel() {
       },
     });
     setImageStatus('模型已下载到本机，之后可离线生成。');
+    refreshImageCacheMarks();
+    preloadImageModel();
   } catch (err) {
     if (err.name === 'AbortError') setImageStatus('已取消下载。已保存的部分会保留，下次点击“继续下载”从断点继续。');
     else setImageStatus(`下载未完成：${err.message}`, { error: true });
@@ -2899,18 +2964,53 @@ async function downloadSelectedModel() {
     imageState.downloadCtl = null;
     els.imageDownloadProgress.hidden = true;
     renderImageFiles();
+    refreshImageCacheMarks();
   }
 }
 
 async function exportSelectedModel() {
+  if (!requireAdmin('导出生图模型')) return;
   const model = selectedImageModel();
   if (!model) return;
+  if (imageState.busy || imageState.downloadCtl) return setImageStatus('请等待当前生成或下载结束后再导出。', { error: true });
+  const withParams = !els.imageExportParamsLabel.hidden && els.imageExportWithParams.checked;
+  const params = withParams ? sanitizeImageParams(getImageSettings(model.id).params) : null;
+  const filename = imageModelFileName(model.id);
+  // 先选择保存位置：必须在点击后立即弹出（之后打包可能很久，浏览器会撤销授权）。
+  // 注意：这里不能有任何 await 在picker之前。
+  let handle = null;
+  if (supportsSaveLocationPicker()) {
+    try {
+      handle = await window.showSaveFilePicker(imagePickerOptions(filename));
+    } catch (err) {
+      if (isPickerCancelled(err)) return setImageStatus('已取消导出。');
+      // 其他错误（例如嵌入到其他网站的 iframe 中被浏览器禁止）：回退到下载目录
+      handle = null;
+    }
+  }
   els.imageExportModelBtn.disabled = true;
-  setImageStatus('正在打包模型文件（文件较大，请耐心等待）…');
+  setImageStatus(`正在打包「${model.label}」…`);
   try {
-    const { blob, filename, size } = await buildImageModelFile(model);
-    downloadBlob(blob, filename);
-    setImageStatus(`已导出 ${filename}（${formatGB(size)}）。`);
+    const { parts, size, entryCount, filename: name } = await prepareImageModelExport(model, {
+      params: params || undefined,
+      onProgress: ({ done, total }) => setImageStatus(`正在打包「${model.label}」（${done}/${total} 个文件）…`),
+    });
+    if (handle) {
+      // 逐段写入你选择的文件（不把整个模型合成为一个内存对象）
+      const writable = await handle.createWritable();
+      try {
+        for (const part of parts) await writable.write(part);
+        await writable.close();
+      } catch (err) {
+        await writable.abort?.(err).catch(() => {});
+        throw err;
+      }
+    } else {
+      downloadBlob(new Blob(parts, { type: 'application/octet-stream' }), name);
+    }
+    const where = handle ? `已保存到你选择的位置：${handle.name || name}` : '已下载到浏览器的下载目录';
+    const paramNote = params ? `，已保存自定义参数（${paramSummary(params)}）` : '';
+    setImageStatus(`${where}（${formatGB(size)}，${entryCount} 个文件${paramNote}）。导入后即可离线使用。`);
   } catch (err) {
     setImageStatus(`导出失败：${err.message}`, { error: true });
   } finally {
@@ -2919,18 +3019,46 @@ async function exportSelectedModel() {
 }
 
 async function importModelFileFromPicker(file) {
-  setImageStatus(`正在导入 ${file.name}（文件较大，请耐心等待）…`);
+  if (!requireAdmin('导入生图模型')) {
+    els.imageImportModelInput.value = '';
+    return;
+  }
+  if (imageState.busy || imageState.downloadCtl) {
+    els.imageImportModelInput.value = '';
+    return setImageStatus('请等待当前生成或下载结束后再导入。', { error: true });
+  }
+  els.imageImportModelBtn.disabled = true;
+  els.imageDownloadProgress.hidden = false;
+  els.imageDownloadFill.style.width = '0%';
+  setImageStatus(`正在导入 ${file.name}（${formatGB(file.size)}）…`);
   try {
-    const { model, entryCount } = await importImageModelFile(file, { models: imageModels() });
-    if (els.imageModelSelect.value !== model.id) {
-      els.imageModelSelect.value = model.id;
-      fillImageControls(model);
-    }
-    setImageStatus(`已导入「${model.label}」（${entryCount} 个文件），已写入本机。`);
+    const { model, params } = await importImageModelFile(file, {
+      models: imageModels(),
+      onProgress: ({ done, total }) => {
+        els.imageDownloadFill.style.width = `${Math.round((done / total) * 100)}%`;
+        setImageStatus(`正在导入 ${file.name}（${done}/${total} 个文件）…`);
+      },
+    });
+    // 文件中带有的自定义参数：写入该模型的本机参数
+    const carried = params ? setImageParams(model.id, params) : null;
+    // 导入后直接选中该模型（与文本模型“导入后即可使用”一致）
+    els.imageModelSelect.value = model.id;
+    saveImageModel(model.id);
+    fillImageControls(model);
+    renderImageAdmin();
+    renderImageFiles();
+    refreshImageCacheMarks();
+    const carriedNote = carried ? `，并带入自定义参数（${paramSummary(carried)}）` : '';
+    setImageStatus(`导入完成：「${model.label}」已写入本机，可离线使用${carriedNote}。`);
+    stopImagePreload(); // 若之前预加载的是其他模型，先释放
+    preloadImageModel();
   } catch (err) {
     setImageStatus(`导入失败：${err.message}`, { error: true });
   } finally {
     els.imageImportModelInput.value = '';
+    els.imageDownloadProgress.hidden = true;
+    els.imageDownloadFill.style.width = '0%';
+    els.imageImportModelBtn.disabled = !isAdmin();
     renderImageFiles();
   }
 }
@@ -2940,13 +3068,61 @@ async function deleteSelectedModelFiles() {
   if (!model) return;
   if (!window.confirm(`删除「${model.label}」在本机的文件（约 ${formatGB(totalBytes(model))}）？删除后生成时需要重新下载。`)) return;
   try {
+    // 若该模型正在预加载（或已加载在 worker 中），先释放，避免删除后仍占用内存
+    stopImagePreload();
     const n = await deleteImageModelFiles(model);
     setImageStatus(`已删除本机的 ${n} 个模型文件。`);
   } catch (err) {
     setImageStatus(`删除失败：${err.message}`, { error: true });
   } finally {
     renderImageFiles();
+    refreshImageCacheMarks();
   }
+}
+
+/**
+ * 进入生图模式后，在后台把已完整下载的模型加载到 worker（与生成共用同一次加载）。
+ * 页面刷新后 worker 会消失，所以刷新后的第一次进入仍需从本机读取一次，但不再等到第一次生成时才开始。
+ */
+async function preloadImageModel() {
+  const model = selectedImageModel();
+  if (!imageState.active || !model || !isSelectable(model) || imageState.downloadCtl || imageState.busy) return;
+  if (imageState.preload?.modelId === model.id) return imageState.preload.promise;
+  const st = await imageCacheStatus(model).catch(() => null);
+  // 只预加载完整的模型；未完整时生成会按原有方式读取（不在这里重复读取）
+  if (!st?.complete) return;
+  if (!imageState.active || selectedImageModel()?.id !== model.id || imageState.busy) return;
+  if (imageState.preload?.modelId === model.id) return imageState.preload.promise;
+  const token = {};
+  const current = () => imageState.preload?.token === token && !imageState.busy;
+  const promise = imageClient()
+    .load({
+      urls: sourceUrls(model),
+      sizes: sourceSizes(model),
+      wasmBase: new URL('ort/', document.baseURI).href,
+      onProgress: (msg) => {
+        if (current()) setImageStatus(`正在从本机加载「${model.label}」…${msg.message || ''}`);
+      },
+    })
+    .then(() => {
+      if (current()) setImageStatus(`「${model.label}」已加载，可以直接生成。`);
+    })
+    .catch((err) => {
+      if (err?.name === 'AbortError') return; // 切换模型或离开生图模式时主动结束
+      if (current()) setImageStatus(`加载「${model.label}」失败：${imageErrorText(err)}`, { error: true });
+    })
+    .finally(() => {
+      if (imageState.preload?.token === token) imageState.preload = null;
+    });
+  imageState.preload = { modelId: model.id, token, promise };
+  return promise;
+}
+
+/** 结束预加载并释放 worker（生成进行中不打断）。 */
+function stopImagePreload() {
+  if (imageState.busy) return;
+  imageState.preload = null;
+  if (imageState.client?.running) imageState.client.dispose();
 }
 
 async function enterImageMode() {
@@ -2971,6 +3147,7 @@ async function enterImageMode() {
   renderImageAdmin();
   renderImageEffective();
   renderImageFiles();
+  preloadImageModel();
   let galleryError = null;
   try {
     await loadGallery();
@@ -2986,6 +3163,7 @@ function exitImageMode() {
   // 结束正在进行的生成，并终止生图 worker（释放显存）
   imageState.controller?.abort();
   imageState.client?.dispose();
+  imageState.preload = null;
   imageState.active = false;
   els.body.classList.remove('image-mode');
   els.imagePanel.hidden = true;
@@ -3164,9 +3342,16 @@ function initImageMode() {
   });
   els.imageCancelBtn.addEventListener('click', () => imageState.controller?.abort());
   els.imageModelSelect.addEventListener('change', () => {
-    fillImageControls(imageModelById(els.imageModelSelect.value));
+    const model = imageModelById(els.imageModelSelect.value);
+    saveImageModel(model?.id || null);
+    stopImagePreload();
+    fillImageControls(model);
     renderImageAdmin();
     renderImageFiles();
+    preloadImageModel();
+  });
+  els.imageImportModelBtn.addEventListener('click', () => {
+    if (requireAdmin('导入生图模型')) els.imageImportModelInput.click();
   });
   els.imageDownloadBtn.addEventListener('click', () => downloadSelectedModel());
   els.imageExportModelBtn.addEventListener('click', () => exportSelectedModel());
