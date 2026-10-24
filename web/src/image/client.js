@@ -65,6 +65,37 @@ export function createImageClient({ createWorker, scriptUrl = '' }) {
     pending.clear();
   }
 
+  /** 发送一个请求给 worker，并等待它返回结果（或进度）。 */
+  function send(payload, { onProgress, signal } = {}) {
+    if (signal?.aborted) return Promise.reject(abortError());
+    const id = nextId;
+    nextId += 1;
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        // 终止 worker（即释放其中的 GPU 资源），并拒绝本次请求
+        dispose();
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      pending.set(id, {
+        onProgress,
+        resolve: (msg) => {
+          signal?.removeEventListener('abort', onAbort);
+          resolve(msg);
+        },
+        reject: (err) => {
+          signal?.removeEventListener('abort', onAbort);
+          reject(signal?.aborted ? abortError() : err);
+        },
+      });
+      try {
+        ensureWorker().postMessage({ id, ...payload });
+      } catch (err) {
+        pending.delete(id);
+        reject(err);
+      }
+    });
+  }
+
   return {
     /**
      * 生成一张图。request: {prompt, negative?, width, height, steps, guidance, seed}；
@@ -72,33 +103,14 @@ export function createImageClient({ createWorker, scriptUrl = '' }) {
      * 返回 {width, height, rgba}。
      */
     generate(request, { urls, sizes, wasmBase, latentScale, onProgress, signal } = {}) {
-      if (signal?.aborted) return Promise.reject(abortError());
-      const id = nextId;
-      nextId += 1;
-      return new Promise((resolve, reject) => {
-        const onAbort = () => {
-          // 终止 worker（即释放其中的 GPU 资源），并拒绝本次请求
-          dispose();
-        };
-        signal?.addEventListener('abort', onAbort, { once: true });
-        pending.set(id, {
-          onProgress,
-          resolve: (msg) => {
-            signal?.removeEventListener('abort', onAbort);
-            resolve(msg);
-          },
-          reject: (err) => {
-            signal?.removeEventListener('abort', onAbort);
-            reject(signal?.aborted ? abortError() : err);
-          },
-        });
-        try {
-          ensureWorker().postMessage({ id, type: 'generate', urls, sizes, wasmBase, latentScale, request });
-        } catch (err) {
-          pending.delete(id);
-          reject(err);
-        }
-      });
+      return send({ type: 'generate', urls, sizes, wasmBase, latentScale, request }, { onProgress, signal });
+    },
+    /**
+     * 只加载模型、不生成（进入生图模式时预加载，使第一次生成不再等待）。
+     * 参数同 generate 的 urls / sizes / wasmBase；正在进行的同一模型加载会被复用。
+     */
+    load({ urls, sizes, wasmBase, onProgress, signal } = {}) {
+      return send({ type: 'load', urls, sizes, wasmBase }, { onProgress, signal });
     },
     /** 终止 worker（释放显存）。正在进行的请求以 AbortError 结束。 */
     dispose,

@@ -135,16 +135,23 @@ function removeNote(modelId, field, id, { storage }) {
   return entry[field].length !== before;
 }
 
-/** 合并管理员参数（只保留合法键）。返回本次写入后的全部管理员参数。 */
-export function setImageParams(modelId, raw, { storage = globalThis.localStorage } = {}) {
-  if (!modelId || !raw || typeof raw !== 'object') return null;
+/** 清洗管理员参数：只保留合法键并限制在范围内。没有有效参数时返回 null。 */
+export function sanitizeImageParams(raw) {
+  if (!raw || typeof raw !== 'object') return null;
   const clean = {};
   for (const key of Object.keys(IMAGE_PARAM_LIMITS)) {
     const v = Number(raw[key]);
     if (raw[key] === undefined || raw[key] === null || raw[key] === '' || !Number.isFinite(v)) continue;
     clean[key] = clampParam(key, v);
   }
-  if (!Object.keys(clean).length) return null;
+  return Object.keys(clean).length ? clean : null;
+}
+
+/** 合并管理员参数（只保留合法键）。返回本次写入后的全部管理员参数。 */
+export function setImageParams(modelId, raw, { storage = globalThis.localStorage } = {}) {
+  if (!modelId) return null;
+  const clean = sanitizeImageParams(raw);
+  if (!clean) return null;
   const data = readAll(storage);
   const entry = entryFor(data, modelId);
   entry.params = { ...entry.params, ...clean };

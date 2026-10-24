@@ -275,10 +275,13 @@ function encodePrefix(headerLength) {
 }
 
 /**
- * 把缓存中的模型文件打包为 .ojimage（Blob）。文件必须已完整下载，且大小与站点配置一致。
- * @returns {Promise<{blob: Blob, filename: string, size: number, entryCount: number}>}
+ * 准备 .ojimage 导出：返回按顺序写入文件的各段（前缀、头部、各文件的 Blob）。
+ * 不把整个文件拼成一个内存对象，调用方可以逐段写入用户选择的文件（与 .ojmodel 相同的流式导出）。
+ * 文件必须已完整下载，且大小与站点配置一致。导出没有单文件大小上限。
+ * @param {object} [opts.params] 可选：管理员为该模型设置的参数（已清洗），随文件一起保存。
+ * @returns {Promise<{parts: Array<Uint8Array|Blob>, filename: string, size: number, entryCount: number}>}
  */
-export async function buildImageModelFile(model, { storage = globalThis.caches, onProgress, now = new Date() } = {}) {
+export async function prepareImageModelExport(model, { storage = globalThis.caches, onProgress, now = new Date(), params } = {}) {
   const status = await imageCacheStatus(model, { storage });
   if (!status.complete) {
     throw new Error(`模型文件尚未完整下载（缺少 ${status.missing.length} 个文件）。请先点击“下载到本机”。`);
@@ -313,9 +316,36 @@ export async function buildImageModelFile(model, { storage = globalThis.caches, 
     createdAt: now.toISOString(),
     entries,
   };
+  if (params && Object.keys(params).length) header.params = params;
   const headerBytes = new TextEncoder().encode(JSON.stringify(header));
-  const blob = new Blob([encodePrefix(headerBytes.byteLength), headerBytes, ...blobs], { type: 'application/octet-stream' });
-  return { blob, filename: imageModelFileName(model.id), size: blob.size, entryCount: entries.length };
+  const prefix = encodePrefix(headerBytes.byteLength);
+  const parts = [prefix, headerBytes, ...blobs];
+  const size = prefix.byteLength + headerBytes.byteLength + offset;
+  return { parts, filename: imageModelFileName(model.id), size, entryCount: entries.length };
+}
+
+/**
+ * 把缓存中的模型文件打包为 .ojimage（Blob）。与 prepareImageModelExport 相同，适合没有“选择保存位置”接口的浏览器。
+ * @returns {Promise<{blob: Blob, filename: string, size: number, entryCount: number}>}
+ */
+export async function buildImageModelFile(model, opts = {}) {
+  const { parts, filename, size, entryCount } = await prepareImageModelExport(model, opts);
+  const blob = new Blob(parts, { type: 'application/octet-stream' });
+  return { blob, filename, size: blob.size || size, entryCount };
+}
+
+/**
+ * 本机已完整下载（所有文件都在缓存中）的模型 id 集合，只读取一次缓存索引。用于下拉框的 ✓ 标记。
+ * @param {Array<object>} models 站点配置中的 imageModels
+ */
+export async function listCompleteImageModelIds(models, { storage = globalThis.caches } = {}) {
+  const have = await cachedUrls(storage);
+  const done = new Set();
+  for (const m of models || []) {
+    const urls = Object.values(sourceUrls(m));
+    if (urls.length && urls.every((u) => have.has(u))) done.add(m.id);
+  }
+  return done;
 }
 
 /** 校验头部结构。 */
@@ -326,6 +356,9 @@ export function validateImageHeader(h) {
     throw new Error(`生图模型文件版本 ${h.version} 高于当前支持的版本 ${IMAGE_FILE_VERSION}，请更新页面后再导入`);
   }
   if (typeof h.modelId !== 'string' || !h.modelId) throw new Error('生图模型文件缺少 modelId');
+  if (h.params !== undefined && (!h.params || typeof h.params !== 'object' || Array.isArray(h.params))) {
+    throw new Error('生图模型文件中的参数字段无效');
+  }
   if (!Array.isArray(h.entries) || h.entries.length === 0) throw new Error('生图模型文件没有任何数据条目');
   for (const e of h.entries) {
     if (typeof e.key !== 'string' || typeof e.url !== 'string' || !/^https:\/\//.test(e.url)) {
@@ -412,7 +445,7 @@ export async function importImageModelFile(file, { models, storage = globalThis.
     }
     throw err;
   }
-  return { model, entryCount: header.entries.length };
+  return { model, entryCount: header.entries.length, params: header.params || null };
 }
 
 

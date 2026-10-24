@@ -26,3 +26,16 @@ export function savePickerOptions(suggestedName) {
 export function isPickerCancelled(err) {
   return err?.name === 'AbortError';
 }
+
+/** 生图模型文件（.ojimage）的保存类型。 */
+export const IMAGE_FILE_PICKER_TYPES = [
+  {
+    description: 'OJ 生图模型文件（.ojimage）',
+    accept: { 'application/octet-stream': ['.ojimage'] },
+  },
+];
+
+/** 生图模型导出时 showSaveFilePicker 的参数。 */
+export function imagePickerOptions(suggestedName) {
+  return { suggestedName, types: IMAGE_FILE_PICKER_TYPES };
+}
