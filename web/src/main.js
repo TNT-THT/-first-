@@ -501,7 +501,9 @@ function paintSearchCard(bubble, msg) {
       const li = node('li', {});
       li.append(node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: title }));
       if (host && host !== title) li.append(node('span', { class: 'search-host' }, host));
+      if (r.sourceName) li.append(node('span', { class: 'search-host' }, `发布方：${r.sourceName}`));
       if (r.publishedAt) li.append(node('span', { class: 'search-host' }, `资料日期：${String(r.publishedAt).slice(0, 10)}`));
+      if (r.indexUpdatedAt) li.append(node('span', { class: 'search-host' }, `索引更新：${String(r.indexUpdatedAt).slice(0, 10)}`));
       if (r.evidenceKind) li.append(node('span', { class: 'search-host' }, `资料类型：${r.evidenceKind}`));
       if (String(r.snippet || '').trim()) li.append(node('span', { class: 'search-snippet' }, r.snippet));
       // 透明展示模型实际收到的正文/答案摘录，而非只展示更短的搜索摘要。
@@ -579,7 +581,7 @@ function paintSearchCard(bubble, msg) {
       { class: 'muted small' },
       info.reason?.includes('凭据')
         ? '消息仍会照常交给模型回答，但为保护隐私没有把任何查询发送到外部资料源。'
-        : '默认来源是公开资料 API，可能受网络、跨域或速率限制影响。需要更广泛网页覆盖时，请由部署者配置受信任的 SearXNG 或搜索代理。',
+        : '默认来源包含浏览器直连公开 API 与 GitHub 定时生成的中国资料快照；前者可能受网络、跨域或速率限制影响，后者可能暂未更新。需要更广泛网页覆盖时，请由部署者配置受信任的 SearXNG 或搜索代理。',
     ),
   );
 }
@@ -1865,7 +1867,7 @@ function renderSearchCard() {
       usable
         ? advanced.length
           ? `资料源：${names(advanced)} 与 ${names(keyless) || '无默认资料源'} 会并行交叉取样；单一自定义源不会独占答案。最多 ${cfg.maxResults} 条资料，单请求 ${Math.round(cfg.timeoutMs / 1000)} 秒、整次 ${Math.round(cfg.totalTimeoutMs / 1000)} 秒。`
-          : `资料源（免费公开 API，不是完整互联网索引）：${names(keyless) || '无'}。最多 ${cfg.maxResults} 条资料，单请求 ${Math.round(cfg.timeoutMs / 1000)} 秒、整次 ${Math.round(cfg.totalTimeoutMs / 1000)} 秒。`
+          : `资料源：${names(keyless) || '无'}。维基/Stack/HN 是浏览器直连公开 API；中国资料索引是 GitHub Actions 更新的同站静态快照。它们都不是完整互联网索引。最多 ${cfg.maxResults} 条资料，单请求 ${Math.round(cfg.timeoutMs / 1000)} 秒、整次 ${Math.round(cfg.totalTimeoutMs / 1000)} 秒。`
         : '没有可用的资料源：请在 config.json 的 webSearch.providers 中启用维基百科等公开资料源，或由管理员在下方填写受信任的 SearXNG / 自定义接口。',
     ),
   );
@@ -1873,7 +1875,7 @@ function renderSearchCard() {
     node(
       'p',
       { class: 'tool-note' },
-      '检索请求从浏览器直接发给所选资料源，并会暴露查询词与网络地址；不会发送对话历史或模型设置。若消息含疑似密钥、授权头、私钥或环境变量，系统会完全跳过联网检索。默认资料源仅覆盖维基百科、Stack Overflow 与 Hacker News；要检索更广网页，请配置受信任的 SearXNG/搜索代理。页面缓存最多保留数分钟且不单独写入 localStorage；为便于回看，本轮查询、资料链接、摘录与来源状态会随本机聊天历史保存，删除会话或清空本机数据即可移除。',
+      '浏览器直连资料源会看到查询词与网络地址；不会发送对话历史或模型设置。中国资料索引则只从本站 GitHub Pages 读取定时快照，不会在提问时向原始中文站点发送查询，但可能有更新延迟。若消息含疑似密钥、授权头、私钥或环境变量，系统会完全跳过联网检索。默认资料源覆盖维基百科、Stack Overflow、Hacker News 与受限的中国 RSS 索引；它们不是完整网页搜索。页面缓存最多保留数分钟且不单独写入 localStorage；为便于回看，本轮查询、资料链接、摘录与来源状态会随本机聊天历史保存，删除会话或清空本机数据即可移除。',
     ),
   );
   if (prefs.enabled && usable) {

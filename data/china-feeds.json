@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "maxItemsPerSource": 30,
+  "sources": [
+    {
+      "id": "gov-cn",
+      "label": "中国政府网",
+      "category": "官方公告",
+      "homepage": "https://www.gov.cn/",
+      "feed": "https://www.gov.cn/pushinfo/v150203/pushinfo.xml",
+      "enabled": true
+    },
+    {
+      "id": "sjtu-news",
+      "label": "上海交通大学新闻网",
+      "category": "教育/高校新闻",
+      "homepage": "https://news.sjtu.edu.cn/",
+      "feed": "https://news.sjtu.edu.cn/rss.xml",
+      "enabled": true
+    },
+    {
+      "id": "v2ex",
+      "label": "V2EX",
+      "category": "技术社区",
+      "homepage": "https://www.v2ex.com/",
+      "feed": "https://www.v2ex.com/index.xml",
+      "enabled": true
+    },
+    {
+      "id": "ruanyifeng",
+      "label": "阮一峰的网络日志",
+      "category": "技术文章",
+      "homepage": "https://www.ruanyifeng.com/blog/",
+      "feed": "https://www.ruanyifeng.com/blog/atom.xml",
+      "enabled": true
+    },
+    {
+      "id": "ithome",
+      "label": "IT之家",
+      "category": "科技资讯",
+      "homepage": "https://www.ithome.com/",
+      "feed": "https://www.ithome.com/rss/",
+      "enabled": true
+    }
+  ]
+}

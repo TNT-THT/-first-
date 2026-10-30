@@ -18,8 +18,11 @@ export const SEARCH_SETTINGS_KEY = 'oj-ai.search.settings.v1';
 export const SEARCH_MODES = ['quick', 'smart'];
 export const SEARCH_MODE_LABELS = { quick: '快速检索', smart: '深入检索' };
 
-/** 免费、免密钥、允许跨域的公开资料源。 */
-export const KEYLESS_PROVIDERS = ['wikipedia', 'stackexchange', 'hackernews', 'duckduckgo'];
+/**
+ * 不需要密钥的资料源。`china-static` 是同仓库 GitHub Actions 定时生成的
+ * 静态索引，浏览器只向当前 GitHub Pages 站点读取 JSON，不会把查询外发。
+ */
+export const KEYLESS_PROVIDERS = ['wikipedia', 'stackexchange', 'hackernews', 'duckduckgo', 'china-static'];
 /** 需要管理员自己填地址的进阶来源。 */
 export const ADVANCED_PROVIDERS = ['searxng', 'custom'];
 export const ALL_PROVIDERS = [...KEYLESS_PROVIDERS, ...ADVANCED_PROVIDERS];
@@ -35,7 +38,7 @@ export const DEFAULT_WEB_SEARCH = {
   totalTimeoutMs: 12000,
   // 仅页面内内存缓存；缓存本身不写入 localStorage（聊天历史另有可审计保存）。
   cacheTtlMs: 5 * 60 * 1000,
-  providers: ['wikipedia', 'stackexchange', 'hackernews'],
+  providers: ['wikipedia', 'stackexchange', 'hackernews', 'china-static'],
   wikipedia: { lang: 'zh', fallbackLang: 'en' },
   stackexchange: { site: 'stackoverflow' },
   searxng: { baseUrl: '' },
@@ -246,7 +249,7 @@ export function planAdvanced(config, settings = {}) {
   return plan;
 }
 
-/** 免费公开资料源，来自 config.json 的 providers。 */
+/** 无密钥资料源，来自 config.json 的 providers（含本仓库的中国资料静态索引）。 */
 export function planKeyless(config) {
   const cfg = config || DEFAULT_WEB_SEARCH;
   return (cfg.providers || [])
@@ -264,6 +267,7 @@ export const PROVIDER_LABELS = {
   stackexchange: 'Stack Overflow',
   hackernews: 'Hacker News',
   duckduckgo: 'DuckDuckGo 即时答案',
+  'china-static': '中国资料索引（GitHub 更新）',
   searxng: 'SearXNG',
   custom: '自定义接口',
 };

@@ -257,7 +257,8 @@
     "providers": [
       "wikipedia",
       "stackexchange",
-      "hackernews"
+      "hackernews",
+      "china-static"
     ],
     "wikipedia": {
       "lang": "zh",

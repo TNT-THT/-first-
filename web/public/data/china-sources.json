@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": null,
+  "generator": "GitHub Actions RSS snapshot; this file contains no user query data.",
+  "sources": [
+    {
+      "id": "gov-cn",
+      "label": "中国政府网",
+      "category": "官方公告",
+      "homepage": "https://www.gov.cn/",
+      "feed": "https://www.gov.cn/pushinfo/v150203/pushinfo.xml",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "sjtu-news",
+      "label": "上海交通大学新闻网",
+      "category": "教育/高校新闻",
+      "homepage": "https://news.sjtu.edu.cn/",
+      "feed": "https://news.sjtu.edu.cn/rss.xml",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "v2ex",
+      "label": "V2EX",
+      "category": "技术社区",
+      "homepage": "https://www.v2ex.com/",
+      "feed": "https://www.v2ex.com/index.xml",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "ruanyifeng",
+      "label": "阮一峰的网络日志",
+      "category": "技术文章",
+      "homepage": "https://www.ruanyifeng.com/blog/",
+      "feed": "https://www.ruanyifeng.com/blog/atom.xml",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "ithome",
+      "label": "IT之家",
+      "category": "科技资讯",
+      "homepage": "https://www.ithome.com/",
+      "feed": "https://www.ithome.com/rss/",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    }
+  ],
+  "items": []
+}
