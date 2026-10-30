@@ -32,6 +32,7 @@ import {
   parseSearxng,
   parseStackExchange,
   parseWikipedia,
+  searchCustom,
   searchSearxng,
   stripHtml,
   enrichWithExtracts,
@@ -144,6 +145,8 @@ test('服务地址限制为 HTTPS 或本机 HTTP；正文模板保留拼接边�
   assert.equal(jina, 'https://r.jina.ai/');
   assert.equal(readerUrlFor(jina, 'https://example.com/article'), 'https://r.jina.ai/https%3A%2F%2Fexample.com%2Farticle');
   assert.equal(cleanReaderTemplate('https://reader.example/read'), '');
+  assert.equal(cleanReaderTemplate('https://reader.example/#'), '');
+  assert.equal(cleanReaderTemplate('https://reader.example/?url={url}#fragment'), '');
   assert.equal(cleanReaderTemplate('https://reader.example/?url={url}'), 'https://reader.example/?url={url}');
 });
 
@@ -179,7 +182,7 @@ test('管理员搜索源设置只保存合法地址', () => {
   });
 });
 
-test('搜索源顺序：管理员配置的自定义接口 > SearXNG > 站点配置；维基百科始终可作后备', () => {
+test('资料源计划：管理员自定义接口与 SearXNG 排在已配置默认来源之前，但不排他', () => {
   const cfg = normalizeWebSearch({ providers: ['wikipedia'] });
   assert.deepEqual(planProviders(cfg, {}).map((p) => p.id), ['wikipedia']);
   assert.deepEqual(planProviders(cfg, { searxngBase: 'https://s.example.com' }).map((p) => p.id), [
@@ -223,6 +226,7 @@ test('疑似密钥、授权头和 shell 配置绝不成为外发查询', () => {
     "curl https://api.example.test/v1 -H 'Authorization: Bearer sk-live-EXAMPLE_SECRET'",
     'OPENAI_API_KEY=sk-live-EXAMPLE_SECRET',
     'token: ghp_EXAMPLE_SECRET 请解释报错',
+    'X-Api-Key: x',
     '-----BEGIN PRIVATE KEY-----\nnot-a-real-key',
   ];
   for (const text of cases) {
@@ -294,6 +298,25 @@ test('SearXNG 请求固定拼到部署路径的 /search，不带管理员误填�
   assert.equal(url.searchParams.get('stale'), null);
   assert.equal(url.searchParams.get('q'), '二分查找');
   assert.equal(url.hash, '');
+});
+
+test('自定义接口安全设置查询参数，保留静态参数且不让参数落在 fragment 后', async () => {
+  let seen = '';
+  await searchCustom({
+    query: '二分查找',
+    endpoint: 'https://custom.example.test/search?project=demo#stale',
+    limit: 3,
+    fetchImpl: async (url) => {
+      seen = String(url);
+      return { ok: true, json: async () => ({ results: [] }) };
+    },
+  });
+  const url = new URL(seen);
+  assert.equal(url.searchParams.get('project'), 'demo');
+  assert.equal(url.searchParams.get('q'), '二分查找');
+  assert.equal(url.searchParams.get('limit'), '3');
+  assert.equal(url.hash, '');
+  await assert.rejects(searchCustom({ endpoint: 'http://insecure.example.test/search' }), /无效/);
 });
 
 // ---------- 合并与资料块 ----------
@@ -910,6 +933,25 @@ test('深入检索读取 HN 讨论 API，并把 reader 模板的斜杠保留下�
   assert.match(out[0].extract, /评论一/);
   assert.equal(out[1].extract, '正文内容');
   assert.ok(calls.some((u) => u.startsWith('https://r.jina.ai/https%3A')));
+});
+
+test('一个正文读取请求本地超时不会中断其他资料的深入摘录', async () => {
+  const out = await enrichWithExtracts(
+    [
+      { title: 'Slow', url: 'https://slow.example/article', snippet: '慢摘要', provider: 'custom' },
+      { title: 'Fast', url: 'https://fast.example/article', snippet: '快摘要', provider: 'custom' },
+    ],
+    {
+      maxPages: 2,
+      readerTemplate: 'https://reader.example/?url={url}',
+      fetchImpl: async (url) => {
+        if (String(url).includes('slow.example')) throw Object.assign(new Error('单条读取超时'), { name: 'AbortError' });
+        return { ok: true, text: async () => '快速正文' };
+      },
+    },
+  );
+  assert.equal(out[0].extract, undefined);
+  assert.equal(out[1].extract, '快速正文');
 });
 
 test('runWebSearch 遇到疑似凭据时不发任何网络请求', async () => {

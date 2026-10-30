@@ -180,7 +180,7 @@ export function compactSources(results, { limit = 5 } = {}) {
         snippet,
         ...(evidence ? { evidence, evidenceKind } : {}),
         ...(normalizeDate(r?.publishedAt) ? { publishedAt: normalizeDate(r?.publishedAt) } : {}),
-        provider: String(r?.provider || ''),
+        provider: sanitizeEvidenceText(r?.provider || '', { maxChars: 40 }),
       };
     })
     .filter((r) => r.url);

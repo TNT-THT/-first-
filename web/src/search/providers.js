@@ -6,7 +6,7 @@
  * 讨论摘录。其他网页正文只能通过部署者明确配置的受信任 reader 服务读取。
  */
 
-import { readerUrlFor } from './config.js';
+import { cleanBaseUrl, readerUrlFor } from './config.js';
 import { filterRelevantResults, queryForLang } from './query.js';
 
 /**
@@ -97,8 +97,10 @@ async function fetchText(url, { fetchImpl = globalThis.fetch, signal, timeoutMs 
   }
 }
 
-function isAbort(err, signal) {
-  return !!signal?.aborted || err?.name === 'AbortError';
+// 只有调用方的全局 signal 真的取消时，才停止整个深入检索；单个 fetch 的
+// 本地超时也会表现为 AbortError，但应该只回退该条摘要，不能中断其他资料。
+function globallyAborted(signal) {
+  return !!signal?.aborted;
 }
 
 /** 去掉来源摘要里的 HTML 标签；仅用于文本展示，非提示注入防护。 */
@@ -335,11 +337,12 @@ export async function searchWikipedia({ query, langs = ['zh'], limit = 5, fetchI
 }
 
 export async function searchSearxng({ query, baseUrl, limit = 5, fetchImpl, signal, timeoutMs } = {}) {
-  if (!baseUrl) throw new Error('未配置 SearXNG 地址');
+  const safeBaseUrl = cleanBaseUrl(baseUrl);
+  if (!safeBaseUrl) throw new Error('未配置或无效的 SearXNG 地址');
   let endpoint;
   try {
     // baseUrl 是实例根/部署路径，不允许它已有的 query/hash 污染真正的 /search 请求。
-    const base = new URL(baseUrl);
+    const base = new URL(safeBaseUrl);
     base.search = '';
     base.hash = '';
     base.pathname = `${base.pathname.replace(/\/+$/, '')}/search`;
@@ -354,10 +357,19 @@ export async function searchSearxng({ query, baseUrl, limit = 5, fetchImpl, sign
 }
 
 export async function searchCustom({ query, endpoint, limit = 5, fetchImpl, signal, timeoutMs } = {}) {
-  if (!endpoint) throw new Error('未配置自定义搜索接口');
-  const base = String(endpoint);
-  const sep = base.includes('?') ? '&' : '?';
-  const url = `${base}${sep}q=${encodeURIComponent(query)}&limit=${encodeURIComponent(limit)}`;
+  const safeEndpoint = cleanBaseUrl(endpoint);
+  if (!safeEndpoint) throw new Error('未配置或无效的自定义搜索接口');
+  let url;
+  try {
+    const base = new URL(safeEndpoint);
+    // searchParams 正确保留接口所需的静态 query，同时避免把 q/limit 拼到 #fragment 后。
+    base.hash = '';
+    base.searchParams.set('q', query);
+    base.searchParams.set('limit', String(limit));
+    url = base.href;
+  } catch {
+    throw new Error('自定义接口地址无效');
+  }
   const payload = await fetchJson(url, { fetchImpl, signal, timeoutMs });
   return parseCustom(payload).slice(0, Math.max(1, limit));
 }
@@ -437,7 +449,7 @@ async function enrichWikipediaExtracts(out, list, { fetchImpl, signal, timeoutMs
           }
         }
       } catch (err) {
-        if (isAbort(err, signal)) throw err;
+        if (globallyAborted(signal)) throw err;
       }
     }),
   );
@@ -481,7 +493,7 @@ async function enrichStackExchangeAnswers(out, list, { site = 'stackoverflow', f
       }
     }
   } catch (err) {
-    if (isAbort(err, signal)) throw err;
+    if (globallyAborted(signal)) throw err;
   }
 }
 
@@ -515,7 +527,7 @@ async function enrichHackerNewsDiscussions(out, list, { fetchImpl, signal, timeo
         }
         if (!out[index].publishedAt && payload?.created_at) out[index].publishedAt = payload.created_at;
       } catch (err) {
-        if (isAbort(err, signal)) throw err;
+        if (globallyAborted(signal)) throw err;
       }
     }),
   );
@@ -551,7 +563,7 @@ export async function enrichWithExtracts(
       enrichHackerNewsDiscussions(out, list, { fetchImpl, signal, timeoutMs }),
     ]);
   } catch (err) {
-    if (isAbort(err, signal)) throw err;
+    if (globallyAborted(signal)) throw err;
   }
 
   const readerTargets = list
@@ -568,11 +580,11 @@ export async function enrichWithExtracts(
           item.evidenceKind = '正文读取服务摘录';
         }
       } catch (err) {
-        if (isAbort(err, signal)) throw err;
+        if (globallyAborted(signal)) throw err;
       }
     });
   } catch (err) {
-    if (isAbort(err, signal)) throw err;
+    if (globallyAborted(signal)) throw err;
   }
   return out;
 }

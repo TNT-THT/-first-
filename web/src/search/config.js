@@ -72,6 +72,8 @@ export function cleanBaseUrl(value) {
     const u = new URL(raw);
     if (u.username || u.password) return '';
     if (u.protocol !== 'https:' && !(u.protocol === 'http:' && isLoopbackHost(u.hostname))) return '';
+    // URL fragment 从不会发送到服务端；去掉它，避免自定义接口的 q 参数被拼到 fragment 后。
+    u.hash = '';
     return u.href.replace(/\/+$/, '');
   } catch {
     return '';
@@ -85,6 +87,8 @@ export function cleanBaseUrl(value) {
 export function cleanReaderTemplate(value) {
   const raw = str(value);
   if (!raw || raw.length > MAX_CONFIG_URL_CHARS) return '';
+  // fragment 从不随 fetch 发给正文服务；把编码后的目标 URL 拼在 # 后会静默失效。
+  if (raw.includes('#')) return '';
   const hasPlaceholder = raw.includes('{url}');
   const probe = hasPlaceholder ? raw.replaceAll('{url}', 'https%3A%2F%2Fexample.invalid%2F') : raw;
   try {
@@ -94,8 +98,8 @@ export function cleanReaderTemplate(value) {
     // 保留用户原本的占位符；普通模板使用 URL 规范化结果以保留根路径的 `/`。
     if (hasPlaceholder) return raw;
     const normalized = u.href;
-    // 普通前缀必须明确有一个拼接边界，例如 /、?、& 或 =。
-    if (!/[/?&=:#]$/.test(normalized)) return '';
+    // 普通前缀必须明确有一个拼接边界，例如 /、?、&、= 或 :。
+    if (!/[/?&=:]$/.test(normalized)) return '';
     return normalized;
   } catch {
     return '';

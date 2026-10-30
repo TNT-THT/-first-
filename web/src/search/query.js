@@ -15,7 +15,8 @@ const SECRET_PATTERNS = [
   { kind: '访问令牌', re: /\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{12,}|sk-(?:proj-)?[A-Za-z0-9_-]{8,})\b/i },
   {
     kind: '凭据赋值',
-    re: /\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|password|passwd|private[_-]?key|client[_-]?secret|session[_-]?token|cookie)\b\s*[:=]\s*["']?[A-Za-z0-9_.~+\/=:-]{8,}/i,
+    // 值再短也不应外发；宁可把“password=x”之类的代码示例当作敏感内容而跳过检索。
+    re: /\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|password|passwd|private[_-]?key|client[_-]?secret|session[_-]?token|cookie)\b\s*[:=]\s*["']?[A-Za-z0-9_.~+\/=:-]{1,}/i,
   },
   { kind: '授权头', re: /\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|token)\s+\S+/i },
   { kind: 'Bearer 凭据', re: /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/i },

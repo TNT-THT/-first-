@@ -233,7 +233,7 @@ npm run set-password -- "新口令"   # 使用指定口令（至少 8 位）
 - `maxResults` 为 1–10，`maxSnippetChars` 为 80–600；`timeoutMs` 为单请求预算（2000–20000 ms），`totalTimeoutMs` 为整次并发检索预算（3000–30000 ms），`cacheTtlMs` 为 0–900000 ms。输入越大不等于结果越可靠。
 - `providers` 选择默认公开资料源（`wikipedia`、`stackexchange`、`hackernews`、可选 `duckduckgo`）。填写 `searxng.baseUrl` 或 `custom.endpoint`（或管理员本机设置）会额外启用进阶来源；它们与默认源并行，而非“优先后备”的排他关系。SearXNG 填实例根/部署路径，不要带 `?query` 或 `#fragment`；程序会请求其 `/search`。
 - 所有服务地址只接受 HTTPS；HTTP 仅接受 `localhost` / `127.*` / `::1` 的本机调试地址，且拒绝 URL 内嵌用户名密码。进阶地址必须允许浏览器跨域请求。
-- `smart.maxPages` 为 0–5。`smart.readerTemplate` 是正文读取 URL 前缀或带 `{url}` 的模板：例如 `https://reader.example/read?url={url}`，或以 `/`、`?`、`&`、`=`、`:`、`#` 结尾的前缀。目标 URL 会进行 percent-encoding 后拼入；末尾 `/` 是语义的一部分，不能省略。不要使用不可信 reader。
+- `smart.maxPages` 为 0–5。`smart.readerTemplate` 是正文读取 URL 前缀或带 `{url}` 的模板：例如 `https://reader.example/read?url={url}`，或以 `/`、`?`、`&`、`=`、`:` 结尾的前缀。目标 URL 会进行 percent-encoding 后拼入；末尾 `/` 是语义的一部分，不能省略。`#fragment` 不会随 HTTP 请求发送，因此模板会拒绝它。不要使用不可信 reader。
 - `maxContextChars.quick`（400–12000）与 `.smart`（400–16000）是**完整资料块**的硬上限，不是每一条结果的上限。
 
 ### 部署与 CSP
