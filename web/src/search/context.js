@@ -107,11 +107,7 @@ export function normalizeResult(result, { maxSnippetChars = 240 } = {}) {
   const snippet = sanitizeEvidenceText(result?.snippet || '', { maxChars: maxSnippetChars });
   const extract = sanitizeEvidenceText(result?.extract || '', { maxChars: 800 });
   const publishedAt = normalizeDate(result?.publishedAt || result?.published_at || result?.date || result?.timestamp);
-  // 静态索引的刷新时间与文章发布日期不同，分别保留以避免把快照时间误读为文章时效。
-  const indexUpdatedAt = normalizeDate(result?.indexUpdatedAt || result?.snapshotAt || result?.generatedAt);
   const evidenceKind = sanitizeEvidenceText(result?.evidenceKind || '', { maxChars: 40 });
-  // sourceName 是静态索引/聚合源披露的原始发布方标签，不能未经清洗进入卡片或提示词。
-  const sourceName = sanitizeEvidenceText(result?.sourceName || '', { maxChars: 60 });
   // provider 通常由本地适配器固定写入；仍作文本边界处理，避免调用方把外部字段当作元数据透传。
   const provider = sanitizeEvidenceText(result?.provider || '', { maxChars: 40 });
   const out = {
@@ -120,9 +116,7 @@ export function normalizeResult(result, { maxSnippetChars = 240 } = {}) {
     snippet,
     ...(extract ? { extract } : {}),
     ...(publishedAt ? { publishedAt } : {}),
-    ...(indexUpdatedAt ? { indexUpdatedAt } : {}),
     ...(evidenceKind ? { evidenceKind } : {}),
-    ...(sourceName ? { sourceName } : {}),
     provider,
   };
   // 这些字段只给深入检索的 provider 使用，永远不直接拼入模型资料块。
@@ -188,17 +182,13 @@ export function compactSources(results, { limit = 5 } = {}) {
       const explicitEvidence = sanitizeEvidenceText(r?.evidence || '', { maxChars: 800 });
       const evidence = explicitEvidence || extract || sanitizeEvidenceText(r?.snippet || '', { maxChars: 800 });
       const evidenceKind = sanitizeEvidenceText(r?.evidenceKind || '', { maxChars: 40 }) || (extract ? '正文摘录' : '搜索摘要');
-      const sourceName = sanitizeEvidenceText(r?.sourceName || '', { maxChars: 60 });
       const publishedAt = normalizeDate(r?.publishedAt);
-      const indexUpdatedAt = normalizeDate(r?.indexUpdatedAt || r?.snapshotAt || r?.generatedAt);
       return {
         title,
         url,
         snippet,
         ...(evidence ? { evidence, evidenceKind } : {}),
-        ...(sourceName ? { sourceName } : {}),
         ...(publishedAt ? { publishedAt } : {}),
-        ...(indexUpdatedAt ? { indexUpdatedAt } : {}),
         provider: sanitizeEvidenceText(r?.provider || '', { maxChars: 40 }),
       };
     })
@@ -259,10 +249,8 @@ export function prepareSearchEvidence(
     // 原始 URL 不进 prompt；域名只作来源提示，也必须有上限，避免畸形长主机名耗尽预算。
     const meta = [
       r.provider ? `资料源：${oneLine(r.provider, 40)}` : '',
-      r.sourceName ? `发布方：${oneLine(r.sourceName, 60)}` : '',
       hostOf(r.url) ? `域名：${oneLine(hostOf(r.url), 120)}` : '',
       shortDate(r.publishedAt) ? `日期：${shortDate(r.publishedAt)}` : '日期：未知',
-      shortDate(r.indexUpdatedAt) ? `索引更新：${shortDate(r.indexUpdatedAt)}` : '',
     ]
       .filter(Boolean)
       .join('｜');

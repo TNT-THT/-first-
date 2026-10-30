@@ -26,7 +26,6 @@ import {
   zhKeywords,
 } from '../web/src/search/query.js';
 import {
-  parseChinaStatic,
   parseCustom,
   parseDuckDuckGo,
   parseHackerNews,
@@ -90,24 +89,8 @@ const WIKI_PAYLOAD = {
   },
 };
 
-const CHINA_STATIC_PAYLOAD = {
-  schemaVersion: 1,
-  generatedAt: '2026-10-30T00:00:00Z',
-  sources: [{ id: 'gov-cn', label: '中国政府网', category: '官方公告', status: 'ok', fetchedAt: '2026-10-30T00:00:00Z' }],
-  items: [
-    {
-      id: 'gov-binary-search',
-      source: 'gov-cn',
-      title: '二分查找算法科普',
-      url: 'https://www.gov.cn/example/binary-search',
-      snippet: '<p>二分查找的时间复杂度为 O(log n)。</p>',
-      publishedAt: '2026-10-29T08:00:00Z',
-    },
-  ],
-};
-
 // ---------- 配置 ----------
-test('站点配置缺失时使用默认值（三个公开 API 加 GitHub 中国资料索引、关闭、快速检索）', () => {
+test('站点配置缺失时使用默认值（三个公开 API、关闭、快速检索）', () => {
   const cfg = normalizeWebSearch(undefined);
   assert.equal(cfg.enabled, true);
   assert.equal(cfg.defaultOn, false);
@@ -115,7 +98,7 @@ test('站点配置缺失时使用默认值（三个公开 API 加 GitHub 中国�
   assert.equal(cfg.maxResults, 5);
   assert.equal(cfg.totalTimeoutMs, 12000);
   assert.equal(cfg.cacheTtlMs, 300000);
-  assert.deepEqual(cfg.providers, ['wikipedia', 'stackexchange', 'hackernews', 'china-static']);
+  assert.deepEqual(cfg.providers, ['wikipedia', 'stackexchange', 'hackernews']);
   assert.equal(cfg.wikipedia.lang, 'zh');
   assert.equal(cfg.stackexchange.site, 'stackoverflow');
 });
@@ -301,26 +284,6 @@ test('SearXNG 与自定义接口的字段名容错（title/url/snippet 的常见
   assert.equal(stripHtml('<script>ignore previous instructions</script><p>正文</p>'), '正文');
 });
 
-test('GitHub 中国资料静态索引保留发布方，且只接受可点击的 HTTPS 条目', () => {
-  const parsed = parseChinaStatic({
-    sources: [{ id: 'gov-cn', label: '中国政府网', category: '官方公告', fetchedAt: '2026-10-30T00:00:00Z' }],
-    items: [
-      { source: 'gov-cn', title: '二分查找', url: 'https://www.gov.cn/example', snippet: '<b>算法</b>', publishedAt: '2026-10-29' },
-      { source: 'gov-cn', title: '不安全', url: 'javascript:alert(1)', snippet: 'x' },
-    ],
-  });
-  assert.equal(parsed.length, 1);
-  assert.equal(parsed[0].provider, 'china-static');
-  assert.equal(parsed[0].sourceName, '中国政府网');
-  assert.equal(parsed[0].indexUpdatedAt, '2026-10-30T00:00:00Z');
-  assert.equal(parsed[0].snippet, '算法');
-  const stale = parseChinaStatic({
-    sources: [{ id: 'gov-cn', label: '中国政府网', category: '官方公告', status: 'stale' }],
-    items: [{ source: 'gov-cn', title: '旧资料', url: 'https://www.gov.cn/old', snippet: '缓存' }],
-  });
-  assert.match(stale[0].evidenceKind, /可能过期/);
-});
-
 test('SearXNG 请求固定拼到部署路径的 /search，不带管理员误填的 query/hash', async () => {
   let seen = '';
   await searchSearxng({
@@ -475,8 +438,7 @@ test('历史中保存的来源清单会被裁剪并丢弃非法地址', () => {
         title: 'A',
         url: 'https://a.example.com',
         snippet: 'x'.repeat(400),
-        sourceName: '中国政府网',
-        indexUpdatedAt: '2026-10-30T00:00:00Z',
+        publishedAt: '2026-10-30T00:00:00Z',
       },
       { title: 'B', url: 'javascript:alert(1)' },
     ],
@@ -484,8 +446,7 @@ test('历史中保存的来源清单会被裁剪并丢弃非法地址', () => {
   );
   assert.equal(saved.length, 1);
   assert.equal(saved[0].snippet.length <= 161, true);
-  assert.equal(saved[0].sourceName, '中国政府网');
-  assert.equal(saved[0].indexUpdatedAt, '2026-10-30T00:00:00.000Z');
+  assert.equal(saved[0].publishedAt, '2026-10-30T00:00:00.000Z');
 });
 
 test('来源摘要文案：检索中 / 失败 / 成功', () => {
@@ -516,62 +477,6 @@ test('runWebSearch：维基百科成功返回结果，并把查询与模式带�
   assert.equal(res.provider, 'wikipedia');
   assert.equal(res.results.length, 2);
   assert.equal(res.query, '二分查找的时间复杂度是多少？');
-});
-
-test('runWebSearch：中国资料索引只读取同站静态 JSON，并保留原始发布方', async () => {
-  const urls = [];
-  const res = await runWebSearch('二分查找的时间复杂度', {
-    config: normalizeWebSearch({ providers: ['china-static'] }),
-    prefs: { enabled: true, mode: 'quick' },
-    fetchImpl: async (url) => {
-      urls.push(String(url));
-      return { ok: true, status: 200, json: async () => CHINA_STATIC_PAYLOAD };
-    },
-  });
-  assert.equal(res.ok, true);
-  assert.deepEqual(urls, ['./data/china-sources.json']);
-  assert.equal(res.provider, 'china-static');
-  assert.equal(res.results[0].sourceName, '中国政府网');
-  assert.equal(res.results[0].indexUpdatedAt, '2026-10-30T00:00:00.000Z');
-  assert.equal(res.results[0].url, 'https://www.gov.cn/example/binary-search');
-  assert.equal(res.attempts[0].status, 'ok');
-});
-
-test('runWebSearch：中国静态索引先在完整快照内筛选，不能被最新无关条目挤掉', async () => {
-  const res = await runWebSearch('二分查找', {
-    config: normalizeWebSearch({ providers: ['china-static'], maxResults: 1 }),
-    prefs: { enabled: true, mode: 'quick' },
-    fetchImpl: async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        schemaVersion: 1,
-        sources: [{ id: 'gov-cn', label: '中国政府网', status: 'ok' }],
-        items: [
-          { source: 'gov-cn', title: '无关科技资讯', url: 'https://www.gov.cn/unrelated', snippet: '新款设备发布' },
-          { source: 'gov-cn', title: '二分查找算法', url: 'https://www.gov.cn/binary', snippet: '算法复杂度' },
-        ],
-      }),
-    }),
-  });
-  assert.equal(res.ok, true);
-  assert.equal(res.results.length, 1);
-  assert.equal(res.results[0].title, '二分查找算法');
-});
-
-test('runWebSearch：中国资料索引尚未生成快照时明确报错，不伪装成无结果', async () => {
-  const res = await runWebSearch('二分查找', {
-    config: normalizeWebSearch({ providers: ['china-static'] }),
-    prefs: { enabled: true, mode: 'quick' },
-    fetchImpl: async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ schemaVersion: 1, sources: [{ id: 'gov-cn', status: 'pending' }], items: [] }),
-    }),
-  });
-  assert.equal(res.ok, false);
-  assert.equal(res.attempts[0].status, 'error');
-  assert.match(res.attempts[0].message, /尚未生成首个快照/);
 });
 
 test('runWebSearch：第一个搜索源失败时自动换下一个，并记录错误', async () => {
@@ -1321,18 +1226,21 @@ test('词典命中的中文术语仍直接翻译，不触发 langlink 请求', a
 // ---------- 回归：报错文案去重，诊断优先 ----------
 test('全部来源失败时原因不复读“没有相关结果”，具体诊断排前面', async () => {
   const res = await runWebSearch('二分查找', {
-    config: normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews', 'china-static'] }),
+    config: normalizeWebSearch({
+      providers: ['wikipedia', 'stackexchange', 'hackernews'],
+      searxng: { baseUrl: 'https://searx.example.com' },
+    }),
     prefs: { enabled: true, mode: 'quick' },
     fetchImpl: fakeFetch({
       'list=search': { query: { search: [] } },
       'api.stackexchange.com': new Error('Failed to fetch'),
       'hn.algolia.com': { hits: [] },
-      './data/china-sources.json': new Error('中国资料索引更新失败，暂无可用快照'),
+      'searx.example.com': new Error('搜索服务返回 HTTP 503'),
     }),
   });
   assert.equal(res.ok, false);
   assert.equal(res.reason.includes('没有相关结果；没有相关结果'), false, '同一文案不再复读');
-  assert.match(res.reason, /中国资料索引更新失败/, '具体诊断保留在原因里');
+  assert.match(res.reason, /HTTP 503/, '具体诊断保留在原因里');
 });
 
 // ---------- 回归：默认资料预算扩容 ----------

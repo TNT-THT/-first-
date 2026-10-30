@@ -67,8 +67,6 @@ globalThis.fetch = async (url) => {
   if (u.includes('wikipedia.org') && u.includes('list=search')) return { ok: true, json: async () => WIKI };
   if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => SO };
   if (u.includes('hn.algolia.com')) return { ok: true, json: async () => HN };
-  // 中国资料索引由 GitHub Actions 生成、随当前站点发布；空索引也应是透明的“无结果”。
-  if (u.includes('china-sources.json')) return { ok: true, json: async () => ({ schemaVersion: 1, sources: [{ status: 'ok' }], items: [] }) };
   if (u.includes('config.json')) return { ok: true, json: async () => config };
   throw new Error(`unexpected fetch: ${u}`);
 };
@@ -190,8 +188,8 @@ test('发送时先联网资料检索：来源卡片显示在回答下方，并�
   assert.ok(assistant, '应出现助手消息');
   const card = await waitFor(() => assistant.querySelector('.search-card')?.dataset.key?.startsWith('done|') && assistant.querySelector('.search-card'));
   assert.ok(card, '回答下方应出现资料来源卡片');
-  // 公开 API 与同站中国资料索引并行；摘要同时披露静态索引本轮没有匹配结果。
-  assert.match(card.querySelector('summary').textContent, /深入检索：3 条资料（维基百科 \+ Stack Overflow \+ Hacker News；中国资料索引（GitHub 更新）（无结果））/);
+  // 三个公开 API 并行；摘要披露各来源合计命中的资料数。
+  assert.match(card.querySelector('summary').textContent, /深入检索：3 条资料（维基百科 \+ Stack Overflow \+ Hacker News）/);
   const links = [...card.querySelectorAll('.search-sources a')];
   assert.equal(links.length, 3);
   assert.equal(links[0].textContent, '二分查找');
@@ -199,13 +197,12 @@ test('发送时先联网资料检索：来源卡片显示在回答下方，并�
   assert.equal(links[1].getAttribute('href'), 'https://stackoverflow.com/questions/1');
   assert.equal(links[2].getAttribute('href'), 'https://example.com/bs');
 
-  // “各来源情况”：多来源时默认折叠列出，让人看到各公开 API 与静态索引均被检查
+  // “各来源情况”：多来源时默认折叠列出，让人看到各公开 API 均被检查
   const statusBox = card.querySelector('.search-attempts-box');
   assert.ok(statusBox, '多来源时应显示各来源情况');
   const statuses = [...statusBox.querySelectorAll('.search-attempts li')].map((li) => li.textContent);
-  assert.equal(statuses.length, 4);
-  assert.ok(statuses.slice(0, 3).every((t) => /返回 \d+ 条资料/.test(t)), statuses.join('/'));
-  assert.equal(statuses[3], '中国资料索引（GitHub 更新）：没有相关结果');
+  assert.equal(statuses.length, 3);
+  assert.ok(statuses.every((t) => /返回 \d+ 条资料/.test(t)), statuses.join('/'));
 
   // 来源清单写入本机会话：刷新页面后仍能回看
   const store = JSON.parse(localStorage.getItem('oj-ai.sessions.v1'));
@@ -222,7 +219,6 @@ test('发送时先联网资料检索：来源卡片显示在回答下方，并�
       ['wikipedia', 'ok'],
       ['stackexchange', 'ok'],
       ['hackernews', 'ok'],
-      ['china-static', 'empty'],
     ],
   );
 
@@ -234,7 +230,7 @@ test('联网资料检索全部失败时：卡片写明每个来源的错误与�
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.includes('wikipedia.org') || u.includes('api.stackexchange.com') || u.includes('hn.algolia.com') || u.includes('china-sources.json')) {
+    if (u.includes('wikipedia.org') || u.includes('api.stackexchange.com') || u.includes('hn.algolia.com')) {
       throw new TypeError('Failed to fetch');
     }
     if (u.includes('config.json')) return { ok: true, json: async () => config };
@@ -259,11 +255,11 @@ test('联网资料检索全部失败时：卡片写明每个来源的错误与�
     assert.equal(card.classList.contains('is-error'), true);
     assert.match(card.querySelector('summary').textContent, /联网资料检索未使用/);
     const failures = [...card.querySelectorAll('.search-failures li')].map((li) => li.textContent);
-    assert.equal(failures.length, 4);
+    assert.equal(failures.length, 3);
     assert.ok(failures.some((t) => t.startsWith('维基百科：')));
     assert.ok(failures.some((t) => t.startsWith('Stack Overflow：')));
-    assert.ok(failures.some((t) => t.startsWith('中国资料索引（GitHub 更新）：')));
-    assert.match(card.textContent, /公开 API 与 GitHub 定时生成/);
+    assert.ok(failures.some((t) => t.startsWith('Hacker News：')));
+    assert.match(card.textContent, /浏览器直连的公开 API/);
   } finally {
     globalThis.fetch = realFetch;
     window.fetch = realFetch;
@@ -279,7 +275,6 @@ test('部分来源无结果 / 失败时：卡片列出各来源情况，回答�
     }
     if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => ({ items: [] }) };
     if (u.includes('hn.algolia.com')) throw new TypeError('Failed to fetch');
-    if (u.includes('china-sources.json')) return { ok: true, json: async () => ({ schemaVersion: 1, sources: [{ status: 'ok' }], items: [] }) };
     if (u.includes('config.json')) return { ok: true, json: async () => config };
     throw new Error(`unexpected fetch: ${u}`);
   };
@@ -293,20 +288,19 @@ test('部分来源无结果 / 失败时：卡片列出各来源情况，回答�
     assert.ok(card, '有结果时也应显示资料来源卡片');
     assert.equal(card.classList.contains('is-error'), false);
 
-    // 只有维基百科有结果，但卡片明确列出其余公开 API 与 GitHub 静态索引的状态。
+    // 只有维基百科有结果，但卡片明确列出其余公开 API 的状态。
     const statuses = [...card.querySelectorAll('.search-attempts li')].map((li) => li.textContent);
-    assert.equal(statuses.length, 4);
+    assert.equal(statuses.length, 3);
     assert.equal(statuses[0], '维基百科：返回 1 条资料');
     assert.equal(statuses[1], 'Stack Overflow：没有相关结果');
     assert.match(statuses[2], /^Hacker News：(请求失败|Failed to fetch)/);
-    assert.equal(statuses[3], '中国资料索引（GitHub 更新）：没有相关结果');
 
     // 状态随会话保存，刷新后仍能看到“为什么只有一个来源”
     const store = JSON.parse(localStorage.getItem('oj-ai.sessions.v1'));
     const saved = store.sessions[0].messages.filter((m) => m.role === 'assistant' && m.search).pop();
     assert.deepEqual(
       saved.search.attempts.map((a) => a.status),
-      ['ok', 'empty', 'error', 'empty'],
+      ['ok', 'empty', 'error'],
     );
   } finally {
     globalThis.fetch = realFetch;

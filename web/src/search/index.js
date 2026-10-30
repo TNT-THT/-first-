@@ -234,7 +234,7 @@ export async function runWebSearch(text, options = {}) {
     const merged = interleaveByProvider(groups, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars });
     if (!merged.length) {
       // 报错文案去重：四个源同时“没有相关结果”不该复读四遍；
-      // 真正的诊断（如“索引尚未生成快照”）排在通用文案前面。
+      // 来源自己的具体诊断（如 SearXNG 返回 HTTP 503）排在通用文案前面。
       const messages = [...new Set(errors.map((error) => error.message).filter(Boolean))];
       const ordered = [...messages.filter((m) => m !== '没有相关结果'), ...messages.filter((m) => m === '没有相关结果')];
       const reason = deadlineHit
