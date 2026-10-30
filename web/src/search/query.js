@@ -1,16 +1,36 @@
 /**
- * 从用户消息中提取搜索关键词（纯逻辑，便于测试）。
+ * 从用户消息中提取可安全外发的搜索词（纯逻辑，便于测试）。
  *
- * 刷题场景常见的消息是“题面 + 输入输出格式 + 一大段代码”。整段丢给搜索引擎几乎搜不到东西，
- * 因此这里先把代码块、行内代码、链接和明显的代码行去掉，再取第一句作为查询。
- * 宁可查询短一点：词语太多会互相牵制，检索引擎的召回反而更差。
+ * 刷题场景常见“题面 + 代码 + 日志”。搜索只应拿问题主题，绝不能把
+ * 代码、命令行或疑似凭据当作查询词送给第三方。检测到疑似凭据时宁可
+ * 整次跳过联网资料检索，也不尝试“聪明地”猜测哪一段可以泄露。
  */
 
 const FENCED_CODE = /```[\s\S]*?(?:```|$)/g;
 const INLINE_CODE = /`[^`\n]*`/g;
 const URL_RE = /https?:\/\/[^\s]+/g;
 
-/** 看着像代码的行（声明、控制流、以分号或花括号结尾的语句、缩进 4 格以上的行）。 */
+const SECRET_PATTERNS = [
+  { kind: '私钥', re: /-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----/i },
+  { kind: '访问令牌', re: /\b(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,}|glpat-[A-Za-z0-9_-]{8,}|xox[baprs]-[A-Za-z0-9-]{8,}|AIza[A-Za-z0-9_-]{12,}|sk-(?:proj-)?[A-Za-z0-9_-]{8,})\b/i },
+  {
+    kind: '凭据赋值',
+    re: /\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|password|passwd|private[_-]?key|client[_-]?secret|session[_-]?token|cookie)\b\s*[:=]\s*["']?[A-Za-z0-9_.~+\/=:-]{8,}/i,
+  },
+  { kind: '授权头', re: /\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|token)\s+\S+/i },
+  { kind: 'Bearer 凭据', re: /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/i },
+];
+
+/** 返回疑似敏感内容类型；只返回类型，绝不把原始值回显到 UI 或日志。 */
+export function findSensitiveContent(text) {
+  const value = String(text || '');
+  for (const item of SECRET_PATTERNS) {
+    if (item.re.test(value)) return item.kind;
+  }
+  return '';
+}
+
+/** 看着像代码/命令/配置的行。宁可不搜，也不把粘贴的凭据或命令外发。 */
 export function isCodeLine(line) {
   const raw = String(line || '');
   const t = raw.trim();
@@ -22,6 +42,12 @@ export function isCodeLine(line) {
   ) {
     return true;
   }
+  // shell 命令和常见配置赋值以前会漏掉，尤其容易把 Authorization / API key 发出去。
+  if (/^(?:[$#]\s*)?(?:curl|wget|http|httpie|ssh|scp|docker|kubectl|npm|npx|pnpm|yarn|pip(?:3)?|python(?:3)?|node|git|export|set)\b/i.test(t)) {
+    return true;
+  }
+  if (/^(?:export\s+)?[A-Z][A-Z0-9_]{2,}\s*=/.test(t)) return true;
+  if (/^[{[]\s*(?:["'][\w.-]+["']\s*:)?/.test(t)) return true;
   // 以 ; 或 { } 结尾，并且含有赋值、比较或调用等代码符号
   if (/[;{}]\s*$/.test(t) && /[=()<>[\]]/.test(t)) return true;
   // 明显缩进的行（题面里的编号列表一般只有 1–3 个空格）
@@ -29,7 +55,7 @@ export function isCodeLine(line) {
   return false;
 }
 
-/** 去掉代码与链接，只留下自然语言。 */
+/** 去掉代码与链接，只留下自然语言。这里不负责敏感信息检测，见 analyzeSearchInput。 */
 export function stripForQuery(text) {
   let s = String(text || '');
   s = s.replace(FENCED_CODE, ' ');
@@ -62,16 +88,45 @@ export function pickSentence(text, maxChars = 120) {
   return q.slice(0, maxChars);
 }
 
+const QUERY_BOILERPLATE = /^(?:下面(?:是|附上)?(?:代码|题目|日志|报错)|(?:我的|有个)?(?:代码|题目|日志|报错)(?:如下|在下面)?|请看(?:下面|代码|题目))[：:。]?$/;
+const QUESTION_HINT = /[？?]|(?:为什么|为何|怎么|如何|怎么办|是什么|是谁|哪里|多少|能否|有没有|是否|what|who|when|where|why|how|error|exception|fail|issue)/i;
+
 /**
- * 由用户消息生成搜索查询（最多 maxChars 个字符）。
- * 清洗后没有自然语言（例如整条都是代码）时返回空串：此时不搜索，直接让模型回答。
+ * 从清洗后的多行文字中选最像真实问题的一行，避免“代码如下：”抢走查询位。
+ * 不生成查询变体，也不把整段题面/对话发给搜索服务。
  */
-export function buildSearchQuery(text, { maxChars = 120 } = {}) {
+function pickQueryLine(cleaned) {
+  const lines = String(cleaned || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length >= 2 && !QUERY_BOILERPLATE.test(line));
+  if (!lines.length) return '';
+  return lines.find((line) => QUESTION_HINT.test(line)) || lines[0];
+}
+
+/**
+ * 分析一次待检索消息。检测到疑似凭据时返回 blocked，而不是把敏感文本
+ * 放进错误原因；调用方可继续正常向模型回答，但不会联网。
+ */
+export function analyzeSearchInput(text, { maxChars = 120 } = {}) {
+  const sensitiveKind = findSensitiveContent(text);
+  if (sensitiveKind) {
+    return {
+      query: '',
+      blocked: true,
+      reason: `检测到可能包含${sensitiveKind}，为避免外发已跳过联网资料检索`,
+    };
+  }
   const cleaned = stripForQuery(text);
-  if (!cleaned) return '';
-  const firstLine = cleaned.split('\n').find((line) => line.trim().length >= 2) || cleaned;
-  const sentence = pickSentence(firstLine, maxChars) || firstLine;
-  return sentence.replace(/\s+/g, ' ').trim().slice(0, maxChars);
+  if (!cleaned) return { query: '', blocked: false, reason: '' };
+  const line = pickQueryLine(cleaned) || cleaned;
+  const sentence = pickSentence(line, maxChars) || line;
+  return { query: sentence.replace(/\s+/g, ' ').trim().slice(0, maxChars), blocked: false, reason: '' };
+}
+
+/** 由用户消息生成安全的搜索查询（最多 maxChars 个字符）。 */
+export function buildSearchQuery(text, options = {}) {
+  return analyzeSearchInput(text, options).query;
 }
 
 /** 后续追问通常省略主题；遇到明显的“再找找/不对”等短追问，沿用最近一个用户问题作为搜索词。 */
@@ -83,8 +138,8 @@ export function searchInputForTurn(text, previousUserText = '') {
 }
 
 /**
- * 维基百科的优先语言：有中文时先查中文站，否则先查英文站（算法术语的英文条目通常更全）。
- * 返回去重后的语言列表，供“第一个站点没有结果时再试第二个”使用。
+ * 维基百科的优先语言：有中文时先中文站，否则先英文站。
+ * 英文回退仍会发生；若没有可靠翻译，相关性过滤会宁可丢弃无法核实的英文结果。
  */
 export function wikipediaLangs(query, { lang = 'zh', fallbackLang = 'en' } = {}) {
   const first = hasCjk(query) ? lang : 'en';
@@ -92,12 +147,7 @@ export function wikipediaLangs(query, { lang = 'zh', fallbackLang = 'en' } = {})
   return [...new Set([first, second].filter(Boolean))];
 }
 
-/**
- * 常见专有名词的中英对照。维基百科、Stack Overflow 等英文来源对英文条目更全，
- * 中文问题只查中文站经常“查无此条”（例如“2026 年诺贝尔物理学奖”在中文站可能还没有条目），
- * 因此维基百科的英文站回退会先把这些词换成英文，再发**同一个**请求（不增加请求次数）。
- * 只收录确定、无歧义的写法；没有命中时不会生成英文查询。
- */
+/** 常见专有名词与刷题术语的中英对照；没有命中时不硬翻。 */
 export const TERM_GLOSSARY = {
   诺贝尔物理学奖: 'Nobel Prize in Physics',
   诺贝尔化学奖: 'Nobel Prize in Chemistry',
@@ -119,19 +169,24 @@ export const TERM_GLOSSARY = {
   大语言模型: 'large language model',
   量子计算: 'quantum computing',
   区块链: 'blockchain',
+  二分查找: 'binary search',
+  二分搜索: 'binary search',
+  时间复杂度: 'time complexity',
+  最短路径: 'shortest path',
+  动态规划: 'dynamic programming',
+  深度优先搜索: 'depth first search',
+  广度优先搜索: 'breadth first search',
+  并查集: 'disjoint set union',
 };
 
-/**
- * 中文里对检索没有帮助的词。只收多字词：单字（“有”“的”“在”）往往是词的一部分，
- * 删掉会破坏原意（例如“有向图” → “向图”），因此一律保留。
- */
+/** 中文里对检索没有帮助的词。 */
 const ZH_STOPWORDS = [
   '请问', '想问一下', '想问', '想知道', '帮我查一下', '帮我查', '帮我', '告诉我', '介绍一下', '解释一下',
   '的获得者是谁', '的获得者', '获得者', '的得主', '得主是谁', '得主', '是谁', '是什么', '有哪些', '是哪个',
   '为什么', '怎么样', '怎么办', '如何获取', '多少', '是否', '能不能', '有没有', '一下',
 ];
 
-/** 英文里可以从查询中去掉的词：疑问词与冠词（保留 in / of / for 等介词，英文检索需要它们）。 */
+/** 英文里可以从查询中去掉的词：疑问词与冠词。 */
 const EN_STOPWORDS = ['what', 'who', 'whom', 'whose', 'when', 'where', 'why', 'how', 'which', 'is', 'are', 'was', 'were', 'do', 'does', 'did', 'the', 'a', 'an'];
 
 function stripStopwords(text, list) {
@@ -153,7 +208,6 @@ function tidy(text) {
 /** 中文查询的关键词式写法：只去掉明显的疑问句式，保留专有名词与单字。 */
 export function zhKeywords(text) {
   const q = tidy(stripStopwords(tidy(text), ZH_STOPWORDS));
-  // 只清理句末残留的单字虚词（“是多少”→“多少”之后剩下的“是”），句中的单字一律保留
   return q.length > 2 ? q.replace(/[是的有在了呢吗吧啊]+$/, '').trim() || q : q;
 }
 
@@ -176,67 +230,60 @@ export function translateQuery(text) {
   s = s.replace(/[年月份]/g, ' ');
   s = tidy(stripStopwords(tidy(s), ZH_STOPWORDS));
   s = tidy(stripStopwords(s, EN_STOPWORDS));
-  // 还残留大量汉字说明没有真正翻译过去，作为英文查询没有意义
   if (!/[a-z]{2,}/i.test(s)) return '';
   const cjk = (s.match(/[\u3400-\u9fff]/g) || []).length;
   if (cjk > s.length * 0.3) return '';
   return s.slice(0, 120);
 }
 
-/**
- * 真正发给搜索引擎的查询（只生成一个，**不增加请求次数**）：
- * 中文问题去掉“的获得者是谁”这类疑问句式；英文问题去掉 what/who/the 这类词。
- * 关键词式查询比整句疑问句更容易命中条目（维基百科尤其明显）。
- */
+/** 真正发给搜索引擎的关键词式查询。 */
 export function searchKeywords(text) {
-  const cleaned = pickSentence(stripForQuery(text), 120) || String(text || '');
-  if (!cleaned) return '';
-  const narrowed = hasCjk(cleaned) ? zhKeywords(cleaned) : enKeywords(cleaned);
-  return (narrowed.length >= 2 ? narrowed : cleaned).replace(/\s+/g, ' ').trim().slice(0, 120);
+  const analyzed = analyzeSearchInput(text);
+  if (analyzed.blocked || !analyzed.query) return '';
+  const narrowed = hasCjk(analyzed.query) ? zhKeywords(analyzed.query) : enKeywords(analyzed.query);
+  return (narrowed.length >= 2 ? narrowed : analyzed.query).replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
-/**
- * 某个语言的站点该用的查询：中文问题在英文站回退时先翻成英文（同一个请求，只是换了更可能命中的词）。
- */
+/** 某个语言站点的查询：中文问题在英文站回退时优先用确定的词典翻译。 */
 export function queryForLang(query, lang, { defaultLang = 'zh' } = {}) {
   if (!query) return query;
   if (lang && lang !== defaultLang && hasCjk(query)) return translateQuery(query) || query;
   return query;
 }
 
+function tokenize(value) {
+  const s = String(value || '').toLowerCase();
+  const tokens = new Set(s.match(/[a-z]{3,}|\d{2,}/g) || []);
+  const cjk = s.match(/[\u3400-\u9fff\uf900-\ufaff]+/g) || [];
+  for (const run of cjk) {
+    if (run.length === 1) tokens.add(run);
+    for (let i = 0; i + 1 < run.length; i += 1) tokens.add(run.slice(i, i + 2));
+  }
+  return tokens;
+}
+
 /**
- * 通用相关性门槛：避免把搜索引擎的错配结果（不论主题）当作回答证据。
- * 数字/英文按词匹配，中文按相邻二字词匹配；若查询含明确年份，结果也必须提到该年份。
+ * 保守的相关性门槛：无可靠的跨语言翻译时，不把“英文标题”当作相关性的替代品。
+ * 查询有年份时，候选资料必须出现同一年；这只是最低门槛，不把它伪装成时效验证。
  */
 export function filterRelevantResults(query, results) {
-  const original = String(query || '').toLowerCase();
-  const translated = translateQuery(query).toLowerCase();
-  const tokenize = (value) => {
-    const s = String(value || '').toLowerCase();
-    const tokens = new Set(s.match(/[a-z]{3,}|\d{2,}/g) || []);
-    const cjk = s.match(/[\u3400-\u9fff\uf900-\ufaff]+/g) || [];
-    for (const run of cjk) {
-      if (run.length === 1) tokens.add(run);
-      for (let i = 0; i + 1 < run.length; i += 1) tokens.add(run.slice(i, i + 2));
-    }
-    return tokens;
-  };
-  const queryVariants = [original, translated].filter(Boolean).map((q) => ({
-    year: q.match(/(?:19|20)\d{2}/)?.[0],
-    terms: tokenize(q),
-  }));
+  const safeQuery = buildSearchQuery(query) || String(query || '');
+  const keywordQuery = hasCjk(safeQuery) ? zhKeywords(safeQuery) : enKeywords(safeQuery);
+  const translated = translateQuery(keywordQuery).toLowerCase();
+  const variants = [keywordQuery.toLowerCase(), translated]
+    .filter(Boolean)
+    .map((q) => ({ year: q.match(/(?:19|20)\d{2}/)?.[0], terms: tokenize(q) }));
   return (Array.isArray(results) ? results : []).filter((r) => {
     const content = `${r?.title || ''} ${r?.snippet || ''} ${r?.extract || ''}`;
     const candidates = tokenize(content);
-    return queryVariants.some(({ year, terms }) => {
+    return variants.some(({ year, terms }) => {
       if (!terms.size || (year && !candidates.has(year))) return false;
-      // 未命中词典翻译的中文查询可能拿到英文站结果；此时无法跨语种逐词比对，
-      // 只做年份约束（如有），避免误删确实相关的英文页面。
-      if (hasCjk(original) && !hasCjk(r?.title) && /[a-z]{3,}/i.test(r?.title || '') && !translated) return true;
       let matches = 0;
       for (const term of terms) if (candidates.has(term)) matches += 1;
-      return matches >= (terms.size >= 5 ? 2 : 1) && matches / terms.size >= 0.18;
+      // 词典翻译后的中文查询不能因一个泛词（例如 search）就接纳任意英文页面。
+      // 三个及以上术语至少命中两个；短查询仍允许一个精确术语命中。
+      const required = terms.size >= 3 ? 2 : 1;
+      return matches >= required && matches / terms.size >= 0.2;
     });
   });
 }
-

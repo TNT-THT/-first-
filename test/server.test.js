@@ -63,7 +63,7 @@ test('CSP frame-ancestors 可通过环境变量收紧', async () => {
   await new Promise((r2) => s.close(r2));
 });
 
-test('CSP 的 connect-src 默认允许免费的联网搜索来源，可用 CSP_CONNECT_SRC 覆盖', async () => {
+test('CSP 的 connect-src 默认允许免费的联网资料检索来源，可用 CSP_CONNECT_SRC 覆盖', async () => {
   const r = await req('/healthz');
   const csp = r.headers.get('content-security-policy');
   assert.match(csp, /connect-src 'self' https:\/\/\*\.wikipedia\.org/);
@@ -136,6 +136,7 @@ test('/api/chat 流式透传上游结果，并带上服务端密钥与系统提�
   assert.equal(upstream.body.model, 'qwen-test');
   assert.equal(upstream.body.stream, true);
   assert.equal(upstream.body.messages[0].role, 'system');
+  assert.match(upstream.body.messages[0].content, /外部资料.*不可信/);
   assert.equal(upstream.body.messages[1].content, '两数之和怎么做？');
 });
 

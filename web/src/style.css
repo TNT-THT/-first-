@@ -729,7 +729,7 @@ body.embed .role-section { display: none !important; }
 .image-gallery-tools { margin-top: 2px; }
 .image-card .image-admin-row { gap: 4px; }
 
-/* ---------- 工具面板（思考模式 / 滑动窗口 / 联网搜索） ---------- */
+/* ---------- 工具面板（思考模式 / 滑动窗口 / 联网资料检索） ---------- */
 .btn.tools-btn {
   flex: 0 0 auto;
   height: 38px;
@@ -889,7 +889,7 @@ body.embed .role-section { display: none !important; }
 .search-setting-actions { display: flex; gap: 6px; }
 .search-test-result { min-height: 1.2em; }
 
-/* ---------- 联网搜索的来源卡片（回答下方） ---------- */
+/* ---------- 联网资料检索的来源卡片（回答下方） ---------- */
 .search-card {
   margin-top: 8px;
   border: 1px solid var(--border);
@@ -931,16 +931,21 @@ body.embed .role-section { display: none !important; }
 .search-advanced[open] > summary::before { content: '▾ '; }
 .search-advanced[open] > summary { color: var(--text); }
 
-/* 联网搜索失败时列出的各来源错误 */
+/* 联网资料检索失败时列出的各来源错误 */
 .search-failures { margin: 4px 0 6px; padding-left: 1.4em; font-size: 12px; color: var(--danger); }
 .search-failures li { line-height: 1.5; }
 
 /* 各来源情况（有来源无结果或失败时才出现） */
-.search-attempts-box { margin-top: 6px; }
-.search-attempts-box > summary { cursor: pointer; list-style: none; }
-.search-attempts-box > summary::-webkit-details-marker { display: none; }
-.search-attempts-box > summary::before { content: '▸ '; }
-.search-attempts-box[open] > summary::before { content: '▾ '; }
+.search-attempts-box,
+.search-evidence-box { margin-top: 6px; }
+.search-attempts-box > summary,
+.search-evidence-box > summary { cursor: pointer; list-style: none; }
+.search-attempts-box > summary::-webkit-details-marker,
+.search-evidence-box > summary::-webkit-details-marker { display: none; }
+.search-attempts-box > summary::before,
+.search-evidence-box > summary::before { content: '▸ '; }
+.search-attempts-box[open] > summary::before,
+.search-evidence-box[open] > summary::before { content: '▾ '; }
 .search-attempts { margin: 4px 0 0; padding-left: 1.4em; font-size: 12px; color: var(--muted); }
 .search-attempts li { line-height: 1.5; }
 .search-attempt-ok { color: var(--muted); }

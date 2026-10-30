@@ -1,26 +1,24 @@
 /**
- * 联网搜索 / 智能搜索的配置与偏好（纯逻辑，便于测试）。
+ * 联网资料检索的配置与偏好（纯逻辑，便于测试）。
  *
- * **前提：没有 API Key，也没有独立服务器。** 所有搜索都在浏览器里直接请求公开接口。
+ * 搜索请求在浏览器中直接发送给公开接口；因此默认来源只是一组可跨域的
+ * 公开资料源，并不等同于覆盖整个互联网的搜索引擎。要检索更广泛网页，
+ * 需要部署者配置受信任的 SearXNG / 自定义搜索服务。
  *
  * 三份数据分开保存：
- * 1. 站点配置：config.json 的 `webSearch`，由部署者决定有没有这个功能、默认是否开启、结果条数上限；
- * 2. 用户偏好：本浏览器的开关与模式（localStorage `oj-ai.search.v1`），所有用户可改；
- * 3. 管理员搜索源设置（可选，进阶）：自建 SearXNG 地址、自定义接口地址（`oj-ai.search.settings.v1`），仅本机。
- *
- * 默认只使用“免费、免密钥、允许跨域”的公开接口，开箱即用：
- *   维基百科（概念与算法）、Stack Exchange / Stack Overflow（具体编程问题）、Hacker News（技术讨论）。
- * 它们会并行请求并合并结果。管理员另填了 SearXNG / 自定义接口时，优先用它们（能搜整个网页）。
+ * 1. 站点配置：config.json 的 `webSearch`；
+ * 2. 用户偏好：本浏览器的开关与模式（localStorage `oj-ai.search.v1`）；
+ * 3. 管理员搜索源设置：自建服务地址与正文读取模板（仅本机）。
  */
 
 export const SEARCH_PREF_KEY = 'oj-ai.search.v1';
 export const SEARCH_SETTINGS_KEY = 'oj-ai.search.settings.v1';
 
-/** 搜索模式：quick = 只用搜索结果摘要；smart = 额外抓取正文摘要再交给模型。 */
+/** 搜索模式：quick = 资料源摘要；smart = 补充可审计的正文摘录。 */
 export const SEARCH_MODES = ['quick', 'smart'];
-export const SEARCH_MODE_LABELS = { quick: '快速搜索', smart: '智能搜索' };
+export const SEARCH_MODE_LABELS = { quick: '快速检索', smart: '深入检索' };
 
-/** 免费、免密钥、允许跨域的公开接口。名字里的“免费”指不需要注册或付费。 */
+/** 免费、免密钥、允许跨域的公开资料源。 */
 export const KEYLESS_PROVIDERS = ['wikipedia', 'stackexchange', 'hackernews', 'duckduckgo'];
 /** 需要管理员自己填地址的进阶来源。 */
 export const ADVANCED_PROVIDERS = ['searxng', 'custom'];
@@ -32,7 +30,11 @@ export const DEFAULT_WEB_SEARCH = {
   defaultMode: 'quick',
   maxResults: 5,
   maxSnippetChars: 240,
+  // 单个请求与一次完整检索的预算分开，避免一个慢源拖住回答。
   timeoutMs: 8000,
+  totalTimeoutMs: 12000,
+  // 仅页面内内存缓存；缓存本身不写入 localStorage（聊天历史另有可审计保存）。
+  cacheTtlMs: 5 * 60 * 1000,
   providers: ['wikipedia', 'stackexchange', 'hackernews'],
   wikipedia: { lang: 'zh', fallbackLang: 'en' },
   stackexchange: { site: 'stackoverflow' },
@@ -41,6 +43,8 @@ export const DEFAULT_WEB_SEARCH = {
   smart: { maxPages: 3, readerTemplate: '' },
   maxContextChars: { quick: 1600, smart: 3200 },
 };
+
+const MAX_CONFIG_URL_CHARS = 2048;
 
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
@@ -52,17 +56,59 @@ function str(value, fallback = '') {
   return typeof value === 'string' ? value.trim() : fallback;
 }
 
-/** 只接受 http(s) 地址；返回去掉末尾斜杠的地址，非法时返回空串。 */
+function isLoopbackHost(hostname) {
+  const host = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+/**
+ * 公开服务只允许 HTTPS；HTTP 仅允许本机调试服务，避免把查询词发到明文网络。
+ * `cleanBaseUrl` 用于会在后续代码中自行添加路径/参数的 API 地址，因此去掉末尾斜杠。
+ */
 export function cleanBaseUrl(value) {
   const raw = str(value);
-  if (!raw) return '';
+  if (!raw || raw.length > MAX_CONFIG_URL_CHARS) return '';
   try {
     const u = new URL(raw);
-    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+    if (u.username || u.password) return '';
+    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && isLoopbackHost(u.hostname))) return '';
     return u.href.replace(/\/+$/, '');
   } catch {
     return '';
   }
+}
+
+/**
+ * 正文读取模板会把编码后的原文地址拼在末尾，或者用 `{url}` 占位。
+ * 与 base URL 不同，模板的尾部 `/` / `=` 是语义的一部分，绝不能裁掉。
+ */
+export function cleanReaderTemplate(value) {
+  const raw = str(value);
+  if (!raw || raw.length > MAX_CONFIG_URL_CHARS) return '';
+  const hasPlaceholder = raw.includes('{url}');
+  const probe = hasPlaceholder ? raw.replaceAll('{url}', 'https%3A%2F%2Fexample.invalid%2F') : raw;
+  try {
+    const u = new URL(probe);
+    if (u.username || u.password) return '';
+    if (u.protocol !== 'https:' && !(u.protocol === 'http:' && isLoopbackHost(u.hostname))) return '';
+    // 保留用户原本的占位符；普通模板使用 URL 规范化结果以保留根路径的 `/`。
+    if (hasPlaceholder) return raw;
+    const normalized = u.href;
+    // 普通前缀必须明确有一个拼接边界，例如 /、?、& 或 =。
+    if (!/[/?&=:#]$/.test(normalized)) return '';
+    return normalized;
+  } catch {
+    return '';
+  }
+}
+
+/** 由安全的正文模板生成请求地址。 */
+export function readerUrlFor(template, sourceUrl) {
+  const safeTemplate = cleanReaderTemplate(template);
+  if (!safeTemplate) return '';
+  const encoded = encodeURIComponent(String(sourceUrl || ''));
+  if (!encoded) return '';
+  return safeTemplate.includes('{url}') ? safeTemplate.replaceAll('{url}', encoded) : `${safeTemplate}${encoded}`;
 }
 
 /**
@@ -91,6 +137,8 @@ export function normalizeWebSearch(raw) {
     maxResults: clampInt(src.maxResults, 1, 10, d.maxResults),
     maxSnippetChars: clampInt(src.maxSnippetChars, 80, 600, d.maxSnippetChars),
     timeoutMs: clampInt(src.timeoutMs, 2000, 20000, d.timeoutMs),
+    totalTimeoutMs: clampInt(src.totalTimeoutMs, 3000, 30000, d.totalTimeoutMs),
+    cacheTtlMs: clampInt(src.cacheTtlMs, 0, 15 * 60 * 1000, d.cacheTtlMs),
     providers: providers.length ? providers : [...d.providers],
     wikipedia: {
       lang: langOk(wiki.lang) || d.wikipedia.lang,
@@ -103,7 +151,7 @@ export function normalizeWebSearch(raw) {
     custom: { endpoint: cleanBaseUrl(custom.endpoint) },
     smart: {
       maxPages: clampInt(smart.maxPages, 0, 5, d.smart.maxPages),
-      readerTemplate: cleanBaseUrl(smart.readerTemplate),
+      readerTemplate: cleanReaderTemplate(smart.readerTemplate),
     },
     maxContextChars: {
       quick: clampInt(ctx.quick, 400, 12000, d.maxContextChars.quick),
@@ -148,7 +196,7 @@ export function resolveSearchPrefs(config, stored = {}) {
   };
 }
 
-/** 读取管理员的搜索源设置（SearXNG 地址、自定义接口、正文抓取模板）。 */
+/** 读取管理员的搜索源设置（SearXNG 地址、自定义接口、正文读取模板）。 */
 export function loadProviderSettings(storage = globalThis.localStorage) {
   try {
     const raw = storage.getItem(SEARCH_SETTINGS_KEY);
@@ -157,7 +205,7 @@ export function loadProviderSettings(storage = globalThis.localStorage) {
     return {
       searxngBase: cleanBaseUrl(data.searxngBase),
       customEndpoint: cleanBaseUrl(data.customEndpoint),
-      readerTemplate: cleanBaseUrl(data.readerTemplate),
+      readerTemplate: cleanReaderTemplate(data.readerTemplate),
     };
   } catch {
     return { searxngBase: '', customEndpoint: '', readerTemplate: '' };
@@ -171,7 +219,7 @@ export function saveProviderSettings(settings, storage = globalThis.localStorage
       JSON.stringify({
         searxngBase: cleanBaseUrl(settings?.searxngBase),
         customEndpoint: cleanBaseUrl(settings?.customEndpoint),
-        readerTemplate: cleanBaseUrl(settings?.readerTemplate),
+        readerTemplate: cleanReaderTemplate(settings?.readerTemplate),
       }),
     );
   } catch {
@@ -180,8 +228,8 @@ export function saveProviderSettings(settings, storage = globalThis.localStorage
 }
 
 /**
- * 进阶来源（需要管理员填地址）。填写后优先使用，能搜到整个网页。
- * 顺序：自定义接口 > SearXNG。
+ * 进阶来源（需要管理员填地址）。填写后与免费来源并行检索、合并呈现；
+ * 不让一个不受信任的自定义源单独垄断本次答案。
  */
 export function planAdvanced(config, settings = {}) {
   const cfg = config || DEFAULT_WEB_SEARCH;
@@ -189,15 +237,12 @@ export function planAdvanced(config, settings = {}) {
   const add = (id, url) => {
     if (url && !plan.some((p) => p.id === id)) plan.push({ id, url });
   };
-  add('custom', settings.customEndpoint || cfg.custom.endpoint);
-  add('searxng', settings.searxngBase || cfg.searxng.baseUrl);
+  add('custom', cleanBaseUrl(settings.customEndpoint) || cfg.custom.endpoint);
+  add('searxng', cleanBaseUrl(settings.searxngBase) || cfg.searxng.baseUrl);
   return plan;
 }
 
-/**
- * 免费来源（免密钥、允许跨域），来自 config.json 的 providers。
- * 它们会并行请求并合并结果，任何一个失败都不影响其它来源。
- */
+/** 免费公开资料源，来自 config.json 的 providers。 */
 export function planKeyless(config) {
   const cfg = config || DEFAULT_WEB_SEARCH;
   return (cfg.providers || [])
@@ -205,9 +250,7 @@ export function planKeyless(config) {
     .map((id) => ({ id, url: '' }));
 }
 
-/**
- * 展示 / 说明用的完整搜索源列表：进阶来源在前（优先），免费来源在后（并行合并）。
- */
+/** 所有实际启用的来源。进阶源在前只是展示与结果排序优先级，不再排他。 */
 export function planProviders(config, settings = {}) {
   return [...planAdvanced(config, settings), ...planKeyless(config)];
 }
@@ -216,7 +259,7 @@ export const PROVIDER_LABELS = {
   wikipedia: '维基百科',
   stackexchange: 'Stack Overflow',
   hackernews: 'Hacker News',
-  duckduckgo: 'DuckDuckGo',
+  duckduckgo: 'DuckDuckGo 即时答案',
   searxng: 'SearXNG',
   custom: '自定义接口',
 };
