@@ -934,3 +934,15 @@ body.embed .role-section { display: none !important; }
 /* 联网搜索失败时列出的各来源错误 */
 .search-failures { margin: 4px 0 6px; padding-left: 1.4em; font-size: 12px; color: var(--danger); }
 .search-failures li { line-height: 1.5; }
+
+/* 各来源情况（有来源无结果或失败时才出现） */
+.search-attempts-box { margin-top: 6px; }
+.search-attempts-box > summary { cursor: pointer; list-style: none; }
+.search-attempts-box > summary::-webkit-details-marker { display: none; }
+.search-attempts-box > summary::before { content: '▸ '; }
+.search-attempts-box[open] > summary::before { content: '▾ '; }
+.search-attempts { margin: 4px 0 0; padding-left: 1.4em; font-size: 12px; color: var(--muted); }
+.search-attempts li { line-height: 1.5; }
+.search-attempt-ok { color: var(--muted); }
+.search-attempt-empty { color: #b45309; }
+.search-attempt-error { color: var(--danger); }

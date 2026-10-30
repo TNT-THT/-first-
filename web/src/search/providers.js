@@ -13,11 +13,14 @@
  * | searxng / custom | 自建服务 | 可选 | 想搜“整个网页”时，由管理员自己填地址（本机保存） |
  *
  * 前四个是默认的免费来源，会并行请求、合并去重；任何一个失败或跨域被拦都不影响其它来源。
+ * 每个来源每次提问只发一个请求（维基百科在中文站没有结果时会再用英文站发一个，这是原有的语言回退）。
  *
  * 智能搜索（smart）在快速搜索的基础上再补一段正文：维基百科用 Action API 的 extracts，
  * Stack Exchange 直接用答案正文，Hacker News 用讨论文本；
  * 其他来源可以在设置里填一个“正文抓取模板”（例如 `https://r.jina.ai/`），抓不到就算了，不影响回答。
  */
+
+import { queryForLang } from './query.js';
 
 /** 搜索请求统一加超时；失败抛出可读的错误信息。 */
 async function fetchJson(url, { fetchImpl = globalThis.fetch, signal, timeoutMs = 8000, headers } = {}) {
@@ -270,7 +273,8 @@ export async function searchWikipedia({
     const params = new URLSearchParams({
       action: 'query',
       list: 'search',
-      srsearch: query,
+      // 同一个请求，只是换成该语言更可能命中的词（中文问题在英文站用翻译后的词）
+      srsearch: queryForLang(query, lang),
       srlimit: String(limit),
       srprop: 'snippet',
       format: 'json',
