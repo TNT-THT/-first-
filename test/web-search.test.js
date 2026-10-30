@@ -24,6 +24,7 @@ import {
 } from '../web/src/search/query.js';
 import {
   parseCustom,
+  parseBilibili,
   parseDuckDuckGo,
   parseHackerNews,
   parseSearxng,
@@ -86,7 +87,7 @@ test('站点配置缺失时使用默认值（三个免费免密钥来源、关�
   assert.equal(cfg.defaultOn, false);
   assert.equal(cfg.defaultMode, 'quick');
   assert.equal(cfg.maxResults, 5);
-  assert.deepEqual(cfg.providers, ['wikipedia', 'stackexchange', 'hackernews']);
+  assert.deepEqual(cfg.providers, ['wikipedia', 'stackexchange', 'bilibili']);
   assert.equal(cfg.wikipedia.lang, 'zh');
   assert.equal(cfg.stackexchange.site, 'stackoverflow');
 });
@@ -535,6 +536,32 @@ test('Stack Exchange 与 Hacker News 的解析：去掉 HTML、按上限截断�
   assert.equal(hn[1].url, 'https://news.ycombinator.com/item?id=11');
 });
 
+test('哔哩哔哩搜索解析与请求：返回中文标题、BV 地址，并只请求一次', async () => {
+  const parsed = parseBilibili({ data: { result: [
+    { title: '<em>二分查找</em>讲解', bvid: 'BV1xx411c7mD', description: '算法讲解' },
+    { title: '缺少视频地址', description: '应被忽略' },
+  ] } });
+  assert.equal(parsed.length, 1);
+  assert.equal(parsed[0].title, '二分查找讲解');
+  assert.equal(parsed[0].url, 'https://www.bilibili.com/video/BV1xx411c7mD');
+  assert.equal(parsed[0].provider, 'bilibili');
+  let calls = 0;
+  const result = await runWebSearch('二分查找是什么？', {
+    config: normalizeWebSearch({ providers: ['bilibili'] }),
+    prefs: { enabled: true, mode: 'quick' },
+    fetchImpl: async (url) => {
+      calls += 1;
+      assert.match(String(url), /api\.bilibili\.com\/x\/web-interface\/search\/type/);
+      return { ok: true, json: async () => ({ code: 0, data: { result: [
+        { title: '二分查找算法入门', bvid: 'BV1xx411c7mD', description: '有序数组查找' },
+      ] } }) };
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 1);
+  assert.equal(result.providers[0], 'bilibili');
+});
+
 test('DuckDuckGo 即时答案：摘要与相关主题（默认不启用）', () => {
   const ddg = parseDuckDuckGo({
     Heading: 'Binary search',
@@ -599,8 +626,8 @@ test('中文问题在英文站回退时用翻译后的查询（同一个请求�
   assert.equal(queryForLang('2026年诺贝尔物理学奖', 'zh'), '2026年诺贝尔物理学奖');
   assert.equal(queryForLang('binary search', 'en'), 'binary search');
   assert.equal(queryForLang('', 'en'), '');
-  // 词典里没有的词不硬翻
-  assert.equal(translateQuery('有向图最短路径'), '');
+  // 未命中词典的片段不硬翻，已知专名可以部分翻译
+  assert.equal(translateQuery('有向图最短路径'), '有向图 shortest path');
 });
 
 test('请求次数不变：每个免费来源每次提问只发一个请求', async () => {
@@ -662,7 +689,9 @@ test('通用相关性过滤：不论主题都拒绝错年份、无关页面，�
   assert.deepEqual(results.map((r) => r.title), ['2026 Nobel Prize in Physics']);
   assert.deepEqual(filterRelevantResults('巴黎天气', [
     { title: '二分查找算法', snippet: '程序设计', url: 'https://example.org/irrelevant' },
-  ]), []);
+    { title: 'Binary Search Tutorial', snippet: 'Computer science', url: 'https://example.org/english-irrelevant' },
+    { title: '巴黎旅游攻略', snippet: '法国旅行', url: 'https://example.org/partial-match' },
+  ]), [], '不能因为搜索结果是英文或只匹配一个泛化词就跳过相关性校验');
   assert.equal(searchInputForTurn('你在找找?', '2026年诺贝尔物理学奖的获得者是谁？'), '2026年诺贝尔物理学奖的获得者是谁？');
 });
 

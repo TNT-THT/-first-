@@ -9,6 +9,7 @@
  * | wikipedia | 维基百科 Action API（`origin=*`） | 不需要 | 概念、算法、数据结构 |
  * | stackexchange | Stack Exchange API 2.3（Stack Overflow） | 不需要 | 具体的编程问题、报错 |
  * | hackernews | HN Algolia Search API | 不需要 | 技术讨论、工具与经验 |
+ * | bilibili | Bilibili 搜索 API | 不需要 | 中文视频、教程与社区内容 |
  * | duckduckgo | DuckDuckGo Instant Answer API | 不需要 | 常识性摘要（跨域支持不稳定，默认关闭） |
  * | searxng / custom | 自建服务 | 可选 | 想搜“整个网页”时，由管理员自己填地址（本机保存） |
  *
@@ -175,6 +176,30 @@ export function parseHackerNews(payload, { maxSnippetChars = 240 } = {}) {
     .filter(Boolean);
 }
 
+/** Bilibili：搜索视频标题、简介与视频链接（公共接口，不需要登录态）。 */
+export function parseBilibili(payload, { maxSnippetChars = 240 } = {}) {
+  const list = Array.isArray(payload?.data?.result) ? payload.data.result : [];
+  return list
+    .map((item) => {
+      const bvid = pick(item, ['bvid']);
+      const rawUrl = pick(item, ['arcurl', 'url']);
+      const url = rawUrl.startsWith('http')
+        ? rawUrl
+        : bvid
+          ? `https://www.bilibili.com/video/${encodeURIComponent(bvid)}`
+          : '';
+      const title = stripHtml(pick(item, ['title']));
+      if (!url || !title) return null;
+      return {
+        title,
+        url,
+        snippet: stripHtml(pick(item, ['description', 'desc'])).slice(0, Math.max(0, maxSnippetChars)),
+        provider: 'bilibili',
+      };
+    })
+    .filter(Boolean);
+}
+
 /** DuckDuckGo 即时答案：摘要 + 相关主题（不是完整网页搜索，只适合常识性内容）。 */
 export function parseDuckDuckGo(payload, { maxSnippetChars = 240 } = {}) {
   const out = [];
@@ -240,6 +265,26 @@ export async function searchHackerNews({ query, limit = 5, maxSnippetChars = 240
     timeoutMs,
   });
   return parseHackerNews(payload, { maxSnippetChars }).slice(0, Math.max(1, limit));
+}
+
+/** Bilibili 综合搜索（视频结果）。 */
+export async function searchBilibili({ query, limit = 5, maxSnippetChars = 240, fetchImpl, signal, timeoutMs } = {}) {
+  const params = new URLSearchParams({
+    search_type: 'video',
+    keyword: query,
+    page: '1',
+    page_size: String(Math.min(10, Math.max(1, limit))),
+  });
+  const payload = await fetchJson(`https://api.bilibili.com/x/web-interface/search/type?${params}`, {
+    fetchImpl,
+    signal,
+    timeoutMs,
+    headers: { Accept: 'application/json' },
+  });
+  if (payload?.code !== 0 && payload?.code != null) {
+    throw new Error(String(payload?.message || `Bilibili API 错误 ${payload.code}`).slice(0, 120));
+  }
+  return parseBilibili(payload, { maxSnippetChars }).slice(0, Math.max(1, limit));
 }
 
 /** DuckDuckGo 即时答案（默认不启用：跨域支持不稳定）。 */
@@ -325,6 +370,7 @@ export function runProvider(id, options = {}) {
   }
   if (id === 'stackexchange') return searchStackExchange(options);
   if (id === 'hackernews') return searchHackerNews(options);
+  if (id === 'bilibili') return searchBilibili(options);
   if (id === 'duckduckgo') return searchDuckDuckGo(options);
   if (id === 'searxng') return searchSearxng(options);
   if (id === 'custom') return searchCustom(options);

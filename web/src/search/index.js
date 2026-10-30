@@ -2,7 +2,7 @@
  * 联网搜索的编排（纯逻辑，fetch 与存储可注入，便于测试）。
  *
  * **前提：没有 API Key，也没有独立服务器。**
- * - 免费来源（维基百科、Stack Overflow、Hacker News）并行请求、合并去重，任何一个失败都不影响其它；
+ * - 免费来源（维基百科、Stack Overflow、Bilibili）并行请求、合并去重，任何一个失败都不影响其它；
  * - 管理员另填了 SearXNG / 自定义接口时，先用它们（能搜整个网页），拿不到结果再用免费来源；
  * - 智能搜索（smart）在结果上再补一段正文摘要。
  *
@@ -14,7 +14,7 @@
  */
 
 import { DEFAULT_WEB_SEARCH, planAdvanced, planKeyless, resolveSearchPrefs } from './config.js';
-import { buildSearchQuery, filterRelevantResults, searchKeywords, wikipediaLangs } from './query.js';
+import { buildSearchQuery, filterRelevantResults, searchKeywords, translateQuery, wikipediaLangs } from './query.js';
 import { enrichWithExtracts, runProvider } from './providers.js';
 import { interleaveByProvider, mergeResults } from './context.js';
 
@@ -26,7 +26,9 @@ function isAbort(err, signal) {
 function providerOptions(id, { query, url, config, settings, fetchImpl, signal, timeoutMs }) {
   return {
     // 用一个“关键词式”查询（去掉疑问句式），每个来源依旧只发一个请求
-    query: searchKeywords(query) || query,
+    query: ['stackexchange', 'hackernews'].includes(id)
+      ? translateQuery(searchKeywords(query)) || searchKeywords(query) || query
+      : searchKeywords(query) || query,
     // wikipedia 的 langs / stackexchange 的 site 都来自站点配置
     langs: id === 'wikipedia' ? wikipediaLangs(query, config.wikipedia) : undefined,
     site: id === 'stackexchange' ? config.stackexchange?.site : undefined,
