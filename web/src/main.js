@@ -99,6 +99,30 @@ import {
 } from './adaptation.js';
 import { buildConversationMarkdown, conversationFilename } from './chat-export.js';
 import {
+  loadProviderSettings,
+  loadSearchPrefs,
+  normalizeWebSearch,
+  planAdvanced,
+  planKeyless,
+  PROVIDER_LABELS,
+  resolveSearchPrefs,
+  saveProviderSettings,
+  saveSearchPrefs,
+  SEARCH_MODE_LABELS,
+  SEARCH_MODES,
+  searchAvailable,
+} from './search/config.js';
+import { buildSearchQuery } from './search/query.js';
+import {
+  buildSearchBlock,
+  compactSources,
+  hostOf,
+  sanitizeUrl,
+  searchSummary,
+  withSearchContext,
+} from './search/context.js';
+import { runWebSearch } from './search/index.js';
+import {
   buildContext,
   createSession,
   deleteSession,
@@ -145,10 +169,13 @@ const els = {
   sendBtn: $('#sendBtn'),
   undoBtn: $('#undoBtn'),
   stopBtn: $('#stopBtn'),
-  thinkToggleLabel: $('#thinkToggleLabel'),
-  thinkToggle: $('#thinkToggle'),
-  slidingToggleLabel: $('#slidingToggleLabel'),
-  slidingToggle: $('#slidingToggle'),
+  toolsBtn: $('#toolsBtn'),
+  toolsBadge: $('#toolsBadge'),
+  toolsPanel: $('#toolsPanel'),
+  toolList: $('#toolList'),
+  toolCard: $('#toolCard'),
+  toolsClose: $('#toolsClose'),
+  modelSelectCompact: $('#modelSelectCompact'),
   statusBar: $('#statusBar'),
   statusText: $('#statusText'),
   statusProgress: $('#statusProgress'),
@@ -260,6 +287,9 @@ const state = {
   clearArmed: false,
   foldSessionId: null, // 当前折叠状态对应的会话
   visibleStart: 0, // 历史会话中第一条已渲染消息的下标（之前的消息折叠）
+  // 联网搜索：站点配置（config.json 的 webSearch）+ 本机偏好 + 管理员搜索源设置
+  search: { config: normalizeWebSearch(null), prefs: { enabled: false, mode: 'quick' }, settings: {} },
+  toolCardId: null, // 工具面板中当前展开的卡片 id
 };
 
 // ---------- 工具函数 ----------
@@ -398,6 +428,101 @@ function paintAssistant(bubble, msg, { streaming = false, label = '正在思考�
   if (!streaming && msg.role === 'assistant' && msg.model && !msg.error) {
     const hits = findViolations(parts.answer, listCheckRules(msg.model));
     if (hits.length) bubble.appendChild(buildCheckWarning(hits));
+  }
+  paintSearchCard(bubble, msg);
+}
+
+/**
+ * 联网搜索的来源卡片（回答下方，可折叠）。
+ * 搜索中显示进度；失败或没有结果时明确写出“本条回答未使用搜索结果”，避免用户误以为搜过了。
+ * 标题、摘要、地址一律以纯文本写入，链接只允许 http(s)。
+ */
+function paintSearchCard(bubble, msg) {
+  const info = msg.search;
+  let box = bubble.querySelector(':scope > .search-card');
+  if (!info) {
+    box?.remove();
+    return;
+  }
+  if (!box) {
+    box = document.createElement('details');
+    box.className = 'search-card';
+    const summary = document.createElement('summary');
+    const body = document.createElement('div');
+    body.className = 'search-body';
+    box.append(summary, body);
+    const warning = bubble.querySelector(':scope > .check-warning');
+    if (warning) bubble.insertBefore(box, warning);
+    else bubble.appendChild(box);
+  }
+  const results = Array.isArray(info.results) ? info.results : [];
+  const done = info.status === 'done' && results.length > 0;
+  const key = [info.status, info.mode, info.query, results.length, info.reason || ''].join('|');
+  if (box.dataset.key === key) return;
+  box.dataset.key = key;
+  box.classList.toggle('is-error', info.status === 'error');
+  const summary = box.querySelector('summary');
+  const body = box.querySelector('.search-body');
+  body.replaceChildren();
+
+  if (info.status === 'searching') {
+    summary.textContent = `🌐 正在联网搜索「${info.query || '…'}」…`;
+    body.append(node('p', { class: 'muted small' }, '正在检索网页，结果会作为本条回答的参考。'));
+    box.open = true;
+    return;
+  }
+  if (done) {
+    summary.textContent = `🌐 ${searchSummary(info, { providerLabels: PROVIDER_LABELS })}（点击展开）`;
+    const list = node('ol', { class: 'search-sources' });
+    for (const r of results) {
+      const url = sanitizeUrl(r.url);
+      if (!url) continue;
+      const li = node('li', {});
+      li.append(node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: r.title || url }));
+      const host = hostOf(url);
+      if (host) li.append(node('span', { class: 'search-host' }, host));
+      if (r.snippet) li.append(node('span', { class: 'search-snippet' }, r.snippet));
+      list.append(li);
+    }
+    body.append(list);
+    body.append(
+      node(
+        'p',
+        { class: 'search-note' },
+        info.mode === 'smart'
+          ? '智能搜索：已尝试抓取前几条结果的正文摘要。资料可能不完整，请自行核对；回答中的 [1]、[2] 对应上面的编号。'
+          : '快速搜索：只使用搜索结果摘要，未抓取网页正文。回答中的 [1]、[2] 对应上面的编号。',
+      ),
+    );
+    return;
+  }
+  summary.textContent =
+    info.status === 'stopped'
+      ? '🌐 已取消联网搜索，本条回答未使用搜索结果'
+      : info.status === 'error'
+        ? `🌐 联网搜索失败${info.reason ? `（${info.reason}）` : ''}，本条回答未使用搜索结果`
+        : '🌐 没有找到相关结果，本条回答未使用搜索结果';
+  if (info.status === 'error' && Array.isArray(info.failures) && info.failures.length) {
+    const ul = node('ul', { class: 'search-failures' });
+    for (const f of info.failures) {
+      ul.append(
+        node(
+          'li',
+          {},
+          `${PROVIDER_LABELS[f.id] || f.id}：${f.message || '请求失败'}`,
+        ),
+      );
+    }
+    body.append(ul);
+    body.append(
+      node(
+        'p',
+        { class: 'muted small' },
+        '默认搜索源都是境外的公开接口；如果上面的错误都是网络类错误，说明当前网络访问不到它们。可以关闭联网搜索直接提问；需要搜索中文网页时，只能由管理员在“进阶（可选）：自建搜索源”里填一个自己能访问的地址（仍然不需要服务器之外的其它东西）。',
+      ),
+    );
+  } else {
+    body.append(node('p', { class: 'muted small' }, '可以换个说法再问，或在工具面板里改用“智能搜索”。'));
   }
 }
 
@@ -696,13 +821,19 @@ function setBusy(busy) {
   refreshUndoButton();
   // 生成期间不能切换模型，否则回答的标注与实际生成的模型可能不一致
   els.modelSelect.disabled = busy;
+  if (els.modelSelectCompact) els.modelSelectCompact.disabled = busy;
+  // 生成期间也不能改思考 / 滑动窗口（会触发引擎重新加载）
+  refreshTools();
 }
 
 /** 当前回答 AI 的显示名称（不含 ✓ 等缓存标记）。 */
 function modelDisplayName(id) {
   if (MODE !== 'webllm') return state.appConfig.model || '服务端模型';
-  const opt = [...els.modelSelect.options].find((o) => o.value === id);
-  return opt?.dataset.label || state.backend.models.find((m) => m.id === id)?.label || id;
+  for (const select of [els.modelSelect, els.modelSelectCompact]) {
+    const opt = select && [...select.options].find((o) => o.value === id);
+    if (opt) return opt.dataset.label || opt.textContent || id;
+  }
+  return state.backend.models.find((m) => m.id === id)?.label || id;
 }
 
 /**
@@ -948,7 +1079,82 @@ async function send(rawText) {
     });
   };
 
+  // 本次提问的联网搜索资料块（只在本次请求中使用；历史里只保存来源清单）
+  let searchBlock = '';
   try {
+    // ---------- 联网搜索 ----------
+    // 先搜索再加载模型：搜索只需要网络，失败也不影响正常回答（会明确标注“未使用搜索结果”）
+    if (shouldSearch()) {
+      const query = buildSearchQuery(text);
+      assistantMsg.search = { status: 'searching', query, mode: state.search.prefs.mode };
+      paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在联网搜索…' });
+      showStatus(`正在联网搜索${query ? `：${query}` : '…'}`);
+      try {
+        const res = await runWebSearch(text, {
+          config: state.search.config,
+          prefs: state.search.prefs,
+          settings: state.search.settings,
+          signal: controller.signal,
+        });
+        if (res.ok) {
+          assistantMsg.search = {
+            status: 'done',
+            query: res.query,
+            mode: res.mode,
+            provider: res.provider,
+            providers: res.providers,
+            results: compactSources(res.results, { limit: state.search.config.maxResults }),
+            at: Date.now(),
+          };
+          searchBlock = buildSearchBlock(res.results, {
+            query: res.query,
+            mode: res.mode,
+            provider: PROVIDER_LABELS[res.provider] || res.provider,
+            maxChars: state.search.config.maxContextChars[res.mode] || 1600,
+          });
+          showStatus(`已完成联网搜索（${res.results.length} 个来源），正在生成回答…`);
+        } else {
+          assistantMsg.search = {
+            status: 'error',
+            query: res.query || query,
+            mode: res.mode,
+            reason: res.reason,
+            // 记下每个来源失败的原因（最多 3 条），用于说明“是不是网络不通”
+            failures: (res.errors || []).slice(0, 3).map((e) => ({
+              id: e.id,
+              message: String(e.message || '').slice(0, 120),
+            })),
+          };
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError' || controller.signal.aborted) {
+          assistantMsg.stopped = true;
+          assistantMsg.search = {
+            status: 'stopped',
+            query: assistantMsg.search?.query || query,
+            mode: state.search.prefs.mode,
+          };
+        } else {
+          assistantMsg.search = {
+            status: 'error',
+            query: assistantMsg.search?.query || query,
+            mode: state.search.prefs.mode,
+            reason: err?.message || String(err),
+          };
+        }
+      }
+      paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在加载模型…' });
+      scrollToBottom();
+      persist();
+    }
+    // 在搜索阶段被停止：不加载模型、不生成
+    if (controller.signal.aborted) {
+      assistantMsg.stopped = true;
+      finalizeAssistant(assistantMsg);
+      paintAssistant(bubble, assistantMsg);
+      return;
+    }
+
     if (!state.backend.isReady()) {
       paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在加载模型…' });
       // 加载可以被停止按钮取消（signal），长时间没有进展会超时并提示重试
@@ -965,7 +1171,7 @@ async function send(rawText) {
 
     let loopDetected = false;
     for await (const delta of state.backend.stream({
-      messages: context,
+      messages: searchBlock ? withSearchContext(context, searchBlock) : context,
       signal: controller.signal,
       onLoop: () => {
         loopDetected = true;
@@ -1260,20 +1466,488 @@ function makeOption(value, label) {
   return opt;
 }
 
-/** 重建下拉框：官方模型在前，“新建AI”分组在后（仅本浏览器可用，不上传云端）。 */
-/** 思考模式开关：仅推理模型显示；偏好在本浏览器中保存（默认开启）。 */
-function refreshThinkToggle() {
-  const show = MODE === 'webllm' && !!state.backend?.supportsThinking();
-  els.thinkToggleLabel.hidden = !show;
-  els.thinkToggle.checked = state.backend?.thinkingEnabled() ?? true;
+// ---------- 工具面板（思考模式 / 滑动窗口 / 联网搜索） ----------
+/*
+ * 功能变多后，把这些开关统一收进输入框右侧的“工具”按钮：
+ * 点开后是一列带开关的工具行，点某一行会在下方展开对应的说明卡片（参考 Qwen 网页端的工具选择）。
+ * 每张卡片只负责展示与控制自己那一项，新增工具时在 toolDefs() 里加一条即可。
+ */
+
+/** 用 DOM API 建节点：搜索结果的标题、摘要一律按纯文本写入，避免被当成 HTML。 */
+function node(tag, props = {}, ...children) {
+  const el = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (value == null || value === false) continue;
+    if (key === 'class') el.className = value;
+    else if (key === 'text') el.textContent = value;
+    else if (key === 'dataset') Object.assign(el.dataset, value);
+    else if (key.startsWith('on') && typeof value === 'function') el.addEventListener(key.slice(2).toLowerCase(), value);
+    else el.setAttribute(key, value === true ? '' : String(value));
+  }
+  for (const child of children.flat()) {
+    if (child == null || child === false) continue;
+    el.append(child.nodeType ? child : document.createTextNode(String(child)));
+  }
+  return el;
 }
 
-/** 滑动窗口开关：所有模型可用；偏好在本浏览器中保存（默认关闭）。 */
-function refreshSlidingToggle() {
-  const show = MODE === 'webllm';
-  els.slidingToggleLabel.hidden = !show;
-  els.slidingToggle.checked = state.backend?.slidingEnabled() ?? false;
+/** 当前的工具清单。available 为 false 时行仍然显示（附原因），避免用户以为功能消失了。 */
+function toolDefs() {
+  const thinkingSupported = MODE === 'webllm' && !!state.backend?.supportsThinking();
+  const cfg = state.search.config;
+  const searchOk = searchAvailable(cfg, state.search.settings);
+  return [
+    {
+      id: 'thinking',
+      icon: '🧠',
+      name: '思考模式',
+      desc: thinkingSupported ? '先思考再回答，更慢但更充分' : '仅推理模型可用（当前模型不支持）',
+      available: thinkingSupported,
+      enabled: () => !!state.backend?.thinkingEnabled(),
+      toggle: (on) => setThinkingTool(on),
+      card: renderThinkingCard,
+    },
+    {
+      id: 'sliding',
+      icon: '▤',
+      name: '滑动窗口',
+      desc: '历史超出窗口时，最早的消息滚出',
+      available: MODE === 'webllm',
+      enabled: () => !!state.backend?.slidingEnabled(),
+      toggle: (on) => setSlidingTool(on),
+      card: renderSlidingCard,
+    },
+    {
+      id: 'search',
+      icon: '🌐',
+      name: '联网搜索',
+      desc: searchOk
+        ? `${SEARCH_MODE_LABELS[state.search.prefs.mode] || '联网搜索'}：把网页结果作为参考`
+        : cfg.enabled
+          ? '未配置可用的搜索源'
+          : '本站已关闭联网搜索',
+      available: searchOk,
+      enabled: () => !!state.search.prefs.enabled && searchOk,
+      toggle: (on) => setSearchTool(on),
+      card: renderSearchCard,
+    },
+  ];
 }
+
+function toolRow(def) {
+  const on = def.available && def.enabled();
+  const disabled = !def.available || !!state.streaming;
+  const input = node('input', {
+    type: 'checkbox',
+    'data-tool-toggle': def.id,
+    'aria-label': `${def.name}开关`,
+  });
+  input.checked = on;
+  input.disabled = disabled;
+  return node(
+    'div',
+    {
+      class: `tool-item${def.available ? '' : ' is-unavailable'}${state.toolCardId === def.id ? ' is-open' : ''}`,
+    },
+    node(
+      'button',
+      {
+        type: 'button',
+        class: 'tool-main',
+        'data-tool-open': def.id,
+        'aria-expanded': state.toolCardId === def.id ? 'true' : 'false',
+        'aria-controls': 'toolCard',
+      },
+      node('span', { class: 'tool-icon', 'aria-hidden': 'true' }, def.icon),
+      node(
+        'span',
+        { class: 'tool-text' },
+        node('span', { class: 'tool-name' }, def.name),
+        node('span', { class: 'tool-desc' }, def.desc),
+      ),
+      node('span', { class: 'tool-chevron', 'aria-hidden': 'true' }, '›'),
+    ),
+    node(
+      'label',
+      { class: 'tool-switch', title: def.available ? `开启或关闭${def.name}` : def.desc },
+      input,
+      node('span', { class: 'switch-track' }, node('span', { class: 'switch-dot' })),
+    ),
+  );
+}
+
+/** 重建工具行、角标与已展开的卡片。状态变化（换模型、改参数、开始生成）后调用。 */
+function refreshTools() {
+  if (!els.toolList) return;
+  const defs = toolDefs();
+  const focused = document.activeElement;
+  const focusKey = focused?.dataset?.toolToggle || focused?.dataset?.toolOpen || '';
+  const focusInside = !!(focused && els.toolList.contains(focused));
+  els.toolList.replaceChildren(...defs.map(toolRow));
+  const activeDefs = defs.filter((d) => d.available && d.enabled());
+  els.toolsBadge.hidden = activeDefs.length === 0;
+  els.toolsBadge.textContent = String(activeDefs.length);
+  els.toolsBtn.classList.toggle('has-active', activeDefs.length > 0);
+  els.toolsBtn.title = activeDefs.length
+    ? `工具（已开启：${activeDefs.map((d) => d.name).join('、')}）`
+    : '工具：思考模式、滑动窗口、联网搜索';
+  const current = defs.find((d) => d.id === state.toolCardId);
+  if (!current) closeToolCard();
+  else renderToolCard(current);
+  if (focusInside && focusKey) {
+    const again =
+      els.toolList.querySelector(`[data-tool-toggle="${focusKey}"]`) ||
+      els.toolList.querySelector(`[data-tool-open="${focusKey}"]`);
+    again?.focus({ preventScroll: true });
+  }
+}
+
+/** 卡片外壳：标题 + 当前状态 + 内容。 */
+function toolCardShell({ title, state: stateText, body }) {
+  return node(
+    'div',
+    { class: 'tool-card-inner' },
+    node(
+      'div',
+      { class: 'tool-card-head' },
+      node('span', { class: 'tool-card-title' }, title),
+      stateText ? node('span', { class: 'tool-card-state' }, stateText) : null,
+    ),
+    body,
+  );
+}
+
+function renderToolCard(def) {
+  els.toolCard.hidden = false;
+  els.toolCard.replaceChildren(def.card(def));
+}
+
+function closeToolCard() {
+  state.toolCardId = null;
+  if (els.toolCard) {
+    els.toolCard.hidden = true;
+    els.toolCard.replaceChildren();
+  }
+}
+
+/** 展开 / 收起某张卡片（同一时间只展开一张，再次点击同一行则收起）。 */
+function openToolCard(id) {
+  state.toolCardId = state.toolCardId === id ? null : id;
+  refreshTools();
+}
+
+function toggleToolsPanel(force) {
+  if (!els.toolsPanel) return;
+  const open = typeof force === 'boolean' ? force : els.toolsPanel.hidden;
+  els.toolsPanel.hidden = !open;
+  els.toolsBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    refreshTools();
+    els.toolList.querySelector('[data-tool-open]')?.focus({ preventScroll: true });
+  } else {
+    closeToolCard();
+  }
+}
+
+function renderThinkingCard() {
+  if (MODE !== 'webllm') {
+    return toolCardShell({
+      title: '思考模式',
+      state: '不可用',
+      body: node(
+        'div',
+        { class: 'tool-card-body' },
+        node('p', { class: 'muted small' }, '服务端模式下，是否输出思考过程由服务器端的模型决定，本站无法切换。'),
+      ),
+    });
+  }
+  const supported = MODE === 'webllm' && !!state.backend?.supportsThinking();
+  const on = supported && !!state.backend?.thinkingEnabled();
+  const eff = effectiveParams(state.backend.modelId);
+  const win = activeContextWindow(eff);
+  const body = node(
+    'div',
+    { class: 'tool-card-body' },
+    node(
+      'p',
+      {},
+      '开启后，推理模型（Qwen3、DeepSeek-R1 等）会先写出思考过程再回答；思考过程可折叠查看，不计入上下文窗口，也不会作为历史发送给模型。',
+    ),
+    node(
+      'p',
+      { class: 'muted small' },
+      supported
+        ? `当前模型：${modelDisplayName(state.backend.modelId)}。引擎窗口：${
+            on ? `${win} + ${eff.thinkingWindow}（思考窗口）= ${win + eff.thinkingWindow}` : String(win)
+          }。切换后会释放多余显存，下次发送时按新窗口重新加载模型。`
+        : '当前模型不是推理模型，开关不生效。切换到 Qwen3 / DeepSeek-R1 等推理模型后再试。',
+    ),
+    node('p', { class: 'tool-note' }, '关闭思考后回答更快，但复杂题目更容易出错；思考窗口用完时系统会强制输出答案。'),
+  );
+  return toolCardShell({
+    title: '思考模式',
+    state: supported ? (on ? '已开启' : '已关闭') : '不可用',
+    body,
+  });
+}
+
+function renderSlidingCard() {
+  if (MODE !== 'webllm') {
+    return toolCardShell({
+      title: '滑动窗口',
+      state: '不可用',
+      body: node(
+        'div',
+        { class: 'tool-card-body' },
+        node('p', { class: 'muted small' }, '服务端模式的上下文由服务器管理，本站不提供滑动窗口开关。'),
+      ),
+    });
+  }
+  const eff = effectiveParams(state.backend.modelId);
+  const on = !!state.backend?.slidingEnabled();
+  const win = activeContextWindow(eff);
+  const cfg = state.appConfig.webllm || {};
+  const body = node(
+    'div',
+    { class: 'tool-card-body' },
+    node(
+      'p',
+      {},
+      '开启后上下文窗口固定为滑动窗口大小，历史超出时最早的消息滚出窗口；管理员的更正、知识库与反馈始终保留在最前面。',
+    ),
+    node(
+      'p',
+      { class: 'muted small' },
+      on
+        ? `当前：滑动窗口 ${eff.slidingWindow} token（思考窗口另计）。历史不再按条数和字数截断。`
+        : `当前：上下文窗口 ${eff.contextWindow} token；历史按 ${cfg.maxMessages ?? 15} 条、${cfg.contextChars ?? 8000} 字截断。开启后按 ${eff.slidingWindow} 计算。`,
+    ),
+    node(
+      'p',
+      { class: 'tool-note' },
+      '窗口越大占用的显存越多。切换后会释放多余显存，下次发送时按新窗口加载；管理员可在参数中调整（滑动窗口 2048–20000，上下文窗口 4096–20000）。',
+    ),
+  );
+  return toolCardShell({ title: '滑动窗口', state: on ? '已开启' : '已关闭', body });
+}
+
+/** 搜索方式的两张可选卡片 + 搜索源说明 + 隐私说明（管理员还能就地配置搜索源）。 */
+function renderSearchCard() {
+  const cfg = state.search.config;
+  const prefs = state.search.prefs;
+  const usable = searchAvailable(cfg, state.search.settings);
+  const body = node('div', { class: 'tool-card-body' });
+
+  if (!cfg.enabled) {
+    body.append(
+      node(
+        'p',
+        { class: 'muted small' },
+        '部署者已在 config.json 中关闭联网搜索（webSearch.enabled = false）。本机管理员也无法开启。',
+      ),
+    );
+    return toolCardShell({ title: '联网搜索', state: '已关闭', body });
+  }
+
+  body.append(node('p', {}, '搜索方式：'));
+  const grid = node('div', { class: 'search-mode-grid' });
+  for (const mode of SEARCH_MODES) {
+    const active = prefs.mode === mode;
+    grid.append(
+      node(
+        'button',
+        {
+          type: 'button',
+          class: `search-mode-card${active ? ' is-active' : ''}`,
+          'data-search-mode': mode,
+          'aria-pressed': active ? 'true' : 'false',
+        },
+        node('span', { class: 'search-mode-name' }, SEARCH_MODE_LABELS[mode] || mode),
+        node(
+          'span',
+          { class: 'search-mode-desc' },
+          mode === 'quick'
+            ? '只用搜索结果摘要：快，一次请求'
+            : `再抓取前 ${cfg.smart.maxPages} 条结果的正文摘要：更准，稍慢`,
+        ),
+      ),
+    );
+  }
+  body.append(grid);
+
+  const advanced = planAdvanced(cfg, state.search.settings);
+  const keyless = planKeyless(cfg);
+  const names = (list) => list.map((p) => PROVIDER_LABELS[p.id] || p.id).join('、');
+  body.append(
+    node(
+      'p',
+      { class: 'muted small' },
+      usable
+        ? advanced.length
+          ? `搜索源：${names(advanced)}（优先，已在工具面板配置）→ 失败时用免费来源：${names(keyless) || '无'}。最多 ${cfg.maxResults} 条结果，超时 ${Math.round(cfg.timeoutMs / 1000)} 秒。`
+          : `搜索源（免费公开接口，无需 API Key、无需服务器，同时请求并合并）：${names(keyless) || '无'}。最多 ${cfg.maxResults} 条结果，超时 ${Math.round(cfg.timeoutMs / 1000)} 秒。`
+        : '没有可用的搜索源：请在 config.json 的 webSearch.providers 中启用维基百科等免费来源，或由管理员在下方填写 SearXNG / 自定义接口。',
+    ),
+  );
+  body.append(
+    node(
+      'p',
+      { class: 'tool-note' },
+      '不需要 API Key，也不需要服务器：搜索请求从你的浏览器直接发给上面的公开接口，只带由本条问题提取的查询词，不发送对话历史、模型设置或任何密钥。搜索结果只用于当次回答，不会写进之后的上下文；来源会列在回答下方，可以点开查看。免费接口都在境外，访问不到时会在回答下方写明原因，不影响正常回答。',
+    ),
+  );
+  if (prefs.enabled && usable) {
+    body.append(node('p', { class: 'muted small' }, `示例查询：「${buildSearchQuery(els.input?.value || '') || '（发送时从你的问题中提取）'}」`));
+  }
+  if (isAdmin()) {
+    const details = node(
+      'details',
+      { class: 'search-advanced' },
+      node('summary', { class: 'tool-subtitle' }, '进阶（可选）：自建搜索源'),
+    );
+    details.append(renderSearchSettings());
+    body.append(details);
+  }
+  return toolCardShell({
+    title: '联网搜索',
+    state: usable ? (prefs.enabled ? `已开启 · ${SEARCH_MODE_LABELS[prefs.mode]}` : '已关闭') : '不可用',
+    body,
+  });
+}
+
+/** 管理员：搜索源设置（仅本机 localStorage，不上传；与 config.json 的默认值叠加）。 */
+function renderSearchSettings() {
+  const settings = state.search.settings;
+  const field = (labelText, key, placeholder) =>
+    node(
+      'label',
+      { class: 'search-setting' },
+      node('span', { class: 'small muted' }, labelText),
+      node('input', {
+        type: 'url',
+        class: 'search-setting-input',
+        'data-search-setting': key,
+        placeholder,
+        value: settings[key] || '',
+        spellcheck: 'false',
+        autocomplete: 'off',
+      }),
+    );
+  const result = node('p', { class: 'muted small search-test-result', id: 'searchTestResult' });
+  const box = node(
+    'div',
+    { class: 'search-settings' },
+    node(
+      'p',
+      { class: 'muted small' },
+      '默认的三个免费来源不需要任何配置。下面几项只在你想搜索“整个网页”时才需要填，保存在本机，不上传。',
+    ),
+    field('SearXNG 地址（需开启 format=json 与跨域）', 'searxngBase', 'https://searx.example.com'),
+    field('自定义接口（返回 {results:[{title,url,snippet}]}）', 'customEndpoint', 'https://example.com/search'),
+    field('正文抓取模板（可选，智能搜索用，拼在原文地址前）', 'readerTemplate', 'https://r.jina.ai/'),
+    node(
+      'div',
+      { class: 'search-setting-actions' },
+      node('button', { type: 'button', class: 'btn ghost small', 'data-search-action': 'save' }, '保存'),
+      node('button', { type: 'button', class: 'btn ghost small', 'data-search-action': 'test' }, '测试搜索'),
+    ),
+    node('p', { class: 'tool-note' }, '维基百科不需要配置，除 SearXNG 与自定义接口外始终作为后备搜索源。'),
+    result,
+  );
+  return box;
+}
+
+/** 从卡片里的输入框读取搜索源设置。 */
+function readSearchSettingInputs() {
+  const out = { ...state.search.settings };
+  for (const input of els.toolCard.querySelectorAll('[data-search-setting]')) {
+    out[input.dataset.searchSetting] = input.value.trim();
+  }
+  return out;
+}
+
+async function saveSearchSettingsFromCard({ test = false } = {}) {
+  state.search.settings = readSearchSettingInputs();
+  saveProviderSettings(state.search.settings);
+  // 卡片会按新设置重建（搜索源顺序可能变化），因此先刷新再取结果节点
+  refreshTools();
+  const target = els.toolCard.querySelector('.search-test-result');
+  if (!test) {
+    if (target) target.textContent = '已保存（仅本机，不上传）。';
+    flashStatus('已保存搜索源设置（仅本机，不上传）。');
+    return;
+  }
+  if (target) target.textContent = '正在测试…';
+  try {
+    const res = await runWebSearch('二分查找 时间复杂度', {
+      config: state.search.config,
+      prefs: { ...state.search.prefs, enabled: true },
+      settings: state.search.settings,
+    });
+    if (target) {
+      target.textContent = res.ok
+        ? `测试成功：${res.results.length} 个结果（${PROVIDER_LABELS[res.provider] || res.provider}）。第一条：${res.results[0].title}`
+        : `测试失败：${res.reason || '没有结果'}`;
+    }
+  } catch (err) {
+    if (target) target.textContent = `测试失败：${err?.message || err}`;
+  }
+}
+
+/** 思考开关：改变引擎窗口，需要释放多余显存（生成中则等下次发送）。 */
+async function setThinkingTool(on) {
+  if (!state.backend) return;
+  state.backend.setThinking(on);
+  refreshTools();
+  const eff = effectiveParams(state.backend.modelId);
+  const win = activeContextWindow(eff);
+  const released = state.streaming ? false : await releaseStaleEngine();
+  const tail = released ? '已释放多余显存，' : '';
+  flashStatus(
+    on
+      ? `已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。${tail}下次发送时将按 ${win + eff.thinkingWindow} 窗口重新加载模型（思考内容不计入窗口）。`
+      : `已关闭思考模式：推理模型直接给出回答，速度更快。${tail}下次发送时将按 ${win} 窗口重新加载模型。`,
+  );
+}
+
+/** 滑动窗口开关：同样可能改变引擎窗口。 */
+async function setSlidingTool(on) {
+  if (!state.backend) return;
+  state.backend.setSliding(on);
+  refreshTools();
+  const eff = effectiveParams(state.backend.modelId);
+  const win = activeContextWindow(eff);
+  const released = state.streaming ? false : await releaseStaleEngine();
+  const tail = released ? '已释放多余显存，' : '';
+  flashStatus(
+    on
+      ? `已开启滑动窗口：上下文固定为 ${win}（思考窗口另计），超出的最早历史会滚出窗口，管理员信息始终保留。${tail}下次发送时按新窗口加载模型。`
+      : `已关闭滑动窗口：恢复为上下文窗口 ${eff.contextWindow}，并按 ${state.appConfig.webllm.maxMessages} 条、${state.appConfig.webllm.contextChars} 字限制历史。${tail}下次发送时按新窗口加载模型。`,
+  );
+}
+
+/** 本次发送是否要走联网搜索（开关已开，且至少有一个可用搜索源）。 */
+function shouldSearch() {
+  return !!state.search.prefs.enabled && searchAvailable(state.search.config, state.search.settings);
+}
+
+/** 联网搜索开关：只改本机偏好，不影响引擎窗口，因此不需要重新加载模型。 */
+function setSearchTool(on) {
+  if (on && !searchAvailable(state.search.config, state.search.settings)) {
+    showStatus('无法开启联网搜索：没有可用的搜索源。管理员可在工具面板中填写 SearXNG 或自定义接口。', { error: true });
+    refreshTools();
+    return;
+  }
+  state.search.prefs = { ...state.search.prefs, enabled: on, mode: state.search.prefs.mode };
+  saveSearchPrefs(state.search.prefs);
+  refreshTools();
+  flashStatus(
+    on
+      ? `已开启${SEARCH_MODE_LABELS[state.search.prefs.mode]}：发送问题时会先搜索网页，再把结果作为参考，来源列在回答下方。`
+      : '已关闭联网搜索：之后的回答不再访问网络。',
+  );
+}
+
 
 /** 当前生效的上下文窗口（滑动窗口开启时为滑动窗口大小，否则为上下文窗口）。 */
 function activeContextWindow(eff) {
@@ -1297,7 +1971,7 @@ async function applyPreset(id) {
   const preset = findPreset(id) || findPreset(DEFAULT_PRESET_ID);
   setThinkingPref(preset.thinking);
   renderPresetOptions();
-  refreshThinkToggle();
+  refreshTools();
   refreshParamViews();
   // 预设可能改变引擎窗口（上下文、滑动窗口、思考）：释放多余显存，下次发送时按新窗口加载
   const released = await releaseAfterSettingChange();
@@ -1305,11 +1979,26 @@ async function applyPreset(id) {
   flashStatus(`已切换到预设「${preset.label}」：${preset.note} ${tail}下次发送时按新参数生效。`);
 }
 
-function renderModelOptions(selectId = state.backend.modelId) {
+/** 窄屏下拉框只显示模型名（去掉“（非推理·小·纯文本…）”这类说明），完整标签保留在 data-label 与悬停提示中。 */
+function shortModelLabel(label) {
+  const text = String(label || '');
+  return text.split('（')[0].trim() || text;
+}
+
+/**
+ * 生成模型下拉框的子节点。
+ * compact 为 true 时（标题栏里的小下拉框）显示短名称，避免在 400px 宽时被截断。
+ */
+function buildModelOptions({ compact = false } = {}) {
+  const rename = (opt, label) => {
+    opt.dataset.short = shortModelLabel(label);
+    opt.textContent = compact ? opt.dataset.short : label;
+    return opt;
+  };
   // 官方模型的备注（参数量级、显存估计）放在悬停提示中，来自 config.json 的 webllm.models[].note
   const notes = new Map((state.appConfig?.webllm?.models || []).map((m) => [m.id, m.note || '']));
   const children = state.backend.models.map((m) => {
-    const opt = makeOption(m.id, m.label);
+    const opt = rename(makeOption(m.id, m.label), m.label);
     if (notes.get(m.id)) opt.title = notes.get(m.id);
     return opt;
   });
@@ -1319,7 +2008,7 @@ function renderModelOptions(selectId = state.backend.modelId) {
     const group = document.createElement('optgroup');
     group.label = '待转换（暂不可用）';
     for (const p of pending) {
-      const opt = makeOption(p.id, p.label);
+      const opt = rename(makeOption(p.id, p.label), p.label);
       opt.disabled = true;
       opt.title = p.note || p.label;
       group.append(opt);
@@ -1330,15 +2019,21 @@ function renderModelOptions(selectId = state.backend.modelId) {
   if (locals.length) {
     const group = document.createElement('optgroup');
     group.label = '新建AI';
-    for (const e of locals) group.append(makeOption(e.id, e.label));
+    for (const e of locals) group.append(rename(makeOption(e.id, e.label), e.label));
     children.push(group);
   }
-  els.modelSelect.replaceChildren(...children);
-  if ([...els.modelSelect.options].some((o) => o.value === selectId)) {
-    els.modelSelect.value = selectId;
+  return children;
+}
+
+/** 重建下拉框：官方模型在前，“新建AI”分组在后（仅本浏览器可用，不上传云端）。 */
+function renderModelOptions(selectId = state.backend.modelId) {
+  // 侧边栏的大下拉框 + 窄屏 / 嵌入时标题栏里的小下拉框，两者内容与选中项始终同步
+  for (const select of [els.modelSelect, els.modelSelectCompact]) {
+    if (!select) continue;
+    select.replaceChildren(...buildModelOptions({ compact: select === els.modelSelectCompact }));
+    if ([...select.options].some((o) => o.value === selectId)) select.value = selectId;
   }
-  refreshThinkToggle();
-  refreshSlidingToggle();
+  refreshTools();
 }
 
 /** 在下拉框中给已下载到本机的模型加上 ✓。 */
@@ -1346,9 +2041,12 @@ async function refreshModelCacheStatus() {
   if (MODE !== 'webllm' || !state.backend) return;
   try {
     const cached = await listCachedModelIds(await getRecords());
-    for (const opt of els.modelSelect.options) {
-      const label = opt.dataset.label || opt.value;
-      opt.textContent = cached.has(opt.value) ? `✓ ${label}` : label;
+    for (const select of [els.modelSelect, els.modelSelectCompact]) {
+      const compact = select === els.modelSelectCompact;
+      for (const opt of select?.options || []) {
+        const base = (compact ? opt.dataset.short : opt.dataset.label) || opt.dataset.label || opt.value;
+        opt.textContent = cached.has(opt.value) ? `✓ ${base}` : base;
+      }
     }
   } catch (err) {
     console.warn('无法检查模型缓存状态', err);
@@ -1477,8 +2175,7 @@ async function importModelFromFile(file, kind = 'import') {
     });
     renderModelOptions(record.model_id);
     state.backend.setModel(record.model_id);
-    refreshThinkToggle();
-  refreshSlidingToggle();
+    refreshTools();
     await refreshModelCacheStatus();
     renderLocalList();
     const carriedNote = carried ? `，并带入自定义参数（${paramSummary(carried)}）` : '';
@@ -2338,10 +3035,13 @@ els.input.addEventListener('keydown', (e) => {
 });
 els.composer.addEventListener('submit', (e) => {
   e.preventDefault();
+  // 工具面板里的搜索源输入框按 Enter 只应结束输入，不应发送消息
+  if (els.toolsPanel.contains(document.activeElement) && document.activeElement.matches('input, textarea')) return;
   const text = els.input.value;
   if (!text.trim()) return;
   els.input.value = '';
   autoGrow();
+  toggleToolsPanel(false);
   send(text);
 });
 els.stopBtn.addEventListener('click', stop);
@@ -2355,45 +3055,82 @@ els.historyBtn.addEventListener('click', () => {
   toggleHistory();
 });
 
-els.thinkToggle.addEventListener('change', async () => {
-  state.backend.setThinking(els.thinkToggle.checked);
-  const eff = effectiveParams(state.backend.modelId);
-  const win = activeContextWindow(eff);
-  // 引擎窗口随思考开关改变：释放多余显存（与参数、滑动窗口开关相同）；下次发送时按新窗口加载
-  const released = await releaseStaleEngine();
-  const tail = released ? '已释放多余显存，' : '';
-  flashStatus(
-    els.thinkToggle.checked
-      ? `已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。${tail}下次发送时将按 ${win + eff.thinkingWindow} 窗口重新加载模型（思考内容不计入窗口）。`
-      : `已关闭思考模式：推理模型直接给出回答，速度更快。${tail}下次发送时将按 ${win} 窗口重新加载模型。`,
-  );
+// ---------- 工具面板（思考模式 / 滑动窗口 / 联网搜索）的事件 ----------
+els.toolsBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  toggleToolsPanel();
 });
-
-els.slidingToggle.addEventListener('change', async () => {
-  state.backend.setSliding(els.slidingToggle.checked);
-  const eff = effectiveParams(state.backend.modelId);
-  const win = activeContextWindow(eff);
-  // 窗口改变后释放多余显存（与参数改变相同）；下次发送时按新窗口重新加载
-  const released = await releaseStaleEngine();
-  const tail = released ? '已释放多余显存，' : '';
-  flashStatus(
-    els.slidingToggle.checked
-      ? `已开启滑动窗口：上下文固定为 ${win}（思考窗口另计），超出的最早历史会滚出窗口，管理员信息始终保留。${tail}下次发送时按新窗口加载模型。`
-      : `已关闭滑动窗口：恢复为上下文窗口 ${eff.contextWindow}，并按 ${state.appConfig.webllm.maxMessages} 条、${state.appConfig.webllm.contextChars} 字限制历史。${tail}下次发送时按新窗口加载模型。`,
-  );
+els.toolsClose.addEventListener('click', () => {
+  toggleToolsPanel(false);
+  els.toolsBtn.focus({ preventScroll: true });
+});
+els.toolList.addEventListener('click', (e) => {
+  const row = e.target.closest('[data-tool-open]');
+  if (!row) return;
+  e.preventDefault();
+  openToolCard(row.dataset.toolOpen);
+});
+els.toolList.addEventListener('change', (e) => {
+  const input = e.target.closest('[data-tool-toggle]');
+  if (!input) return;
+  const def = toolDefs().find((d) => d.id === input.dataset.toolToggle);
+  if (!def || !def.available || state.streaming) {
+    refreshTools();
+    return;
+  }
+  def.toggle(input.checked);
+});
+els.toolCard.addEventListener('click', (e) => {
+  const modeBtn = e.target.closest('[data-search-mode]');
+  if (modeBtn) {
+    state.search.prefs = { ...state.search.prefs, mode: modeBtn.dataset.searchMode };
+    saveSearchPrefs(state.search.prefs);
+    refreshTools();
+    flashStatus(
+      `已切换为${SEARCH_MODE_LABELS[state.search.prefs.mode]}（仅本机保存）：${
+        state.search.prefs.mode === 'smart' ? '会额外抓取正文摘要，资料更完整，稍慢一些。' : '只用搜索结果摘要，更快。'
+      }`,
+    );
+    return;
+  }
+  const action = e.target.closest('[data-search-action]');
+  if (action) saveSearchSettingsFromCard({ test: action.dataset.searchAction === 'test' });
+});
+// 面板内输入框按 Enter 不提交聊天表单
+els.toolsPanel.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && e.target.matches('input')) e.preventDefault();
+});
+// 点击面板外部或按 Esc 收起
+document.addEventListener('click', (e) => {
+  if (els.toolsPanel.hidden) return;
+  // 面板内的点击会重绘工具行，事件冒泡到这里时 e.target 可能已经被移除，
+  // 因此优先用 composedPath()（在派发时计算，包含已脱离文档的祖先）判断点击来源。
+  const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+  if (path.includes(els.toolsPanel) || path.includes(els.toolsBtn)) return;
+  if (els.toolsPanel.contains(e.target) || els.toolsBtn.contains(e.target)) return;
+  toggleToolsPanel(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || els.toolsPanel.hidden) return;
+  toggleToolsPanel(false);
+  els.toolsBtn.focus({ preventScroll: true });
 });
 
 els.presetSelect?.addEventListener('change', () => applyPreset(els.presetSelect.value));
 
-els.modelSelect.addEventListener('change', () => {
-  state.backend.setModel(els.modelSelect.value);
+/** 切换模型：两个下拉框保持同步，并刷新工具面板（思考开关是否可用取决于模型）。 */
+function onModelChange(id) {
+  if (!id || state.streaming) return;
+  state.backend.setModel(id);
   // 切换模型即更改默认模型：保存在本浏览器，下次打开时使用
-  saveDefaultModel(els.modelSelect.value);
-  refreshThinkToggle();
-  refreshSlidingToggle();
+  saveDefaultModel(id);
+  els.modelSelect.value = id;
+  if (els.modelSelectCompact) els.modelSelectCompact.value = id;
+  refreshTools();
   renderParamOverrides();
   renderExportParamsOption();
-  const label = els.modelSelect.selectedOptions[0]?.textContent || els.modelSelect.value;
+  const select = els.modelSelectCompact && els.modelSelectCompact.value === id ? els.modelSelectCompact : els.modelSelect;
+  const label = select.selectedOptions[0]?.textContent || id;
   // 超大模型：显存需求远超普通显卡（如 RTX 4060 的 8 GB），需要提前提醒
   if (label.includes('超大')) {
     showStatus(
@@ -2404,7 +3141,10 @@ els.modelSelect.addEventListener('change', () => {
     return;
   }
   showStatus(`已切换到 ${label}，发送消息时将自动加载。之后的回答会标注为该 AI，并沿用本会话的上下文。`);
-});
+}
+
+els.modelSelect.addEventListener('change', () => onModelChange(els.modelSelect.value));
+els.modelSelectCompact?.addEventListener('change', () => onModelChange(els.modelSelectCompact.value));
 
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-action]');
@@ -3192,7 +3932,7 @@ function exitImageMode() {
   els.imagePanel.hidden = true;
   els.imageModeBtn.textContent = '生图';
   els.imageModeBtn.setAttribute('aria-pressed', 'false');
-  refreshThinkToggle();
+  refreshTools();
   flashStatus('已返回聊天。生图模型已释放；发送消息时将重新加载聊天模型。');
 }
 
@@ -3502,9 +4242,15 @@ async function init() {
   els.loginTitle.textContent = appName;
   document.title = appName;
 
+  // 联网搜索：站点配置 + 本机偏好 + 管理员搜索源设置
+  state.search.config = normalizeWebSearch(state.appConfig.webSearch);
+  state.search.settings = loadProviderSettings();
+  state.search.prefs = resolveSearchPrefs(state.search.config, loadSearchPrefs());
+
   state.backend = createBackend({ mode: MODE, appConfig: state.appConfig });
   // 生图按钮与事件需要在配置加载之后绑定
   initImageMode();
+  refreshTools();
   if (MODE === 'webllm') {
     // 启动时使用用户上次保存的默认模型（若仍在下拉框中），否则使用配置中的 defaultModel
     const availableIds = [...new Set([...state.backend.models.map((m) => m.id), ...loadLocalModels().map((e) => e.id)])];
@@ -3520,6 +4266,9 @@ async function init() {
     els.presetSelect.hidden = false;
     els.modelSelect.hidden = false;
     els.modelSelect.title = '✓ 表示模型已下载到本机，可离线使用';
+    // 窄屏 / iframe 嵌入时侧边栏隐藏，标题栏里的小下拉框提供同样的切换能力
+    els.modelSelectCompact.hidden = false;
+    els.modelSelectCompact.title = '选择模型（窄屏下与侧边栏的下拉框同步）';
     els.modelLabel.hidden = true;
     setTimeout(refreshModelCacheStatus, 0);
     refreshRoleUI();

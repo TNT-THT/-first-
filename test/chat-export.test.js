@@ -50,3 +50,33 @@ test('多行固定提示逐行加引用符号', () => {
   );
   assert.match(md, /> 系统提示：第一行\n>\n?> 第二行|> 系统提示：第一行\n> 第二行/);
 });
+
+test('联网搜索的来源作为参考链接附在对应回答之后', () => {
+  const md = buildConversationMarkdown(
+    {
+      title: 't',
+      messages: [
+        { role: 'user', content: '二分查找' },
+        {
+          role: 'assistant',
+          content: '答案见 [1]。',
+          model: 'm1',
+          modelLabel: 'AI',
+          search: {
+            status: 'done',
+            mode: 'quick',
+            provider: 'wikipedia',
+            results: [
+              { title: '二分查找', url: 'https://zh.wikipedia.org/wiki/a' },
+              { title: '没有地址', url: '' },
+            ],
+          },
+        },
+      ],
+    },
+    { now: NOW },
+  );
+  assert.match(md, /参考来源：/);
+  assert.match(md, /1\. \[二分查找\]\(https:\/\/zh\.wikipedia\.org\/wiki\/a\)/);
+  assert.equal(md.includes('没有地址'), false);
+});

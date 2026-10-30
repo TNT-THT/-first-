@@ -245,6 +245,40 @@
     "pendingModels": []
   },
   "systemPrompt": "你是一个有帮助的 AI 助手，可以回答各类问题。请使用用户提问的语言回答。数学公式使用 LaTeX（行内用 $...$，独立公式用 $$...$$），代码使用带语言标注的 Markdown 代码块。",
+  "webSearch": {
+    "enabled": true,
+    "defaultOn": false,
+    "defaultMode": "quick",
+    "maxResults": 5,
+    "maxSnippetChars": 240,
+    "timeoutMs": 8000,
+    "providers": [
+      "wikipedia",
+      "stackexchange",
+      "hackernews"
+    ],
+    "wikipedia": {
+      "lang": "zh",
+      "fallbackLang": "en"
+    },
+    "stackexchange": {
+      "site": "stackoverflow"
+    },
+    "searxng": {
+      "baseUrl": ""
+    },
+    "custom": {
+      "endpoint": ""
+    },
+    "smart": {
+      "maxPages": 3,
+      "readerTemplate": ""
+    },
+    "maxContextChars": {
+      "quick": 1600,
+      "smart": 3200
+    }
+  },
   "imageModels": [
     {
       "id": "sd15-nmkd-fp16",
