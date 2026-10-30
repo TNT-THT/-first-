@@ -1,10 +1,9 @@
 /**
  * 公开资料源的适配器（纯解析逻辑 + 可注入 fetch）。
  *
- * 默认来源包括维基百科、Stack Overflow、Hacker News 的公开 API，以及随
- * GitHub Pages 发布的中国 RSS/Atom 静态快照；它们都不是通用网页索引。
- * 深入检索会补取：维基百科导言、Stack Overflow 回答、HN 讨论摘录；静态
- * 快照只提供其受限摘要。其他网页正文只能通过部署者明确配置的受信任 reader 服务读取。
+ * 默认来源是维基百科、Stack Overflow、Hacker News 的公开 API；它们都不是
+ * 通用网页索引。深入检索会补取：维基百科导言、Stack Overflow 回答、HN 讨论
+ * 摘录。其他网页正文只能通过部署者明确配置的受信任 reader 服务读取。
  */
 
 import { cleanBaseUrl, readerUrlFor } from './config.js';
@@ -146,17 +145,6 @@ function asInt(value) {
   return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
-/** GitHub 静态索引只允许 HTTPS 条目，避免把不可信快照中的伪协议变成可点击链接。 */
-function safeHttpsResultUrl(value) {
-  try {
-    const url = new URL(String(value || ''));
-    if (url.protocol !== 'https:' || url.username || url.password || url.href.length > 2048) return '';
-    return url.href;
-  } catch {
-    return '';
-  }
-}
-
 function sourceDate(obj) {
   return pick(obj, ['publishedAt', 'published_at', 'publishedDate', 'date', 'timestamp', 'created_at', 'updated_at']) || obj?.creation_date || obj?.last_activity_date || '';
 }
@@ -222,45 +210,6 @@ export function parseCustom(payload) {
         snippet: stripHtml(pick(item, ['snippet', 'content', 'summary', 'description', 'text'])),
         publishedAt: sourceDate(item),
         provider: 'custom',
-      };
-    })
-    .filter(Boolean);
-}
-
-/**
- * 由 GitHub Actions 写入同站点静态文件的中国资料索引。
- * 运行时只请求当前 GitHub Pages 站点，不把用户查询发送给索引中的中国资料站点。
- */
-export const CHINA_STATIC_INDEX_URL = './data/china-sources.json';
-
-export function parseChinaStatic(payload) {
-  const sources = new Map(
-    (Array.isArray(payload?.sources) ? payload.sources : [])
-      .filter((source) => source && typeof source === 'object' && typeof source.id === 'string')
-      .map((source) => [source.id, source]),
-  );
-  const list = Array.isArray(payload?.items) ? payload.items : [];
-  return list
-    .map((item) => {
-      const url = safeHttpsResultUrl(pick(item, ['url', 'link']));
-      const title = stripHtml(pick(item, ['title']));
-      if (!url || !title) return null;
-      const sourceId = pick(item, ['source', 'sourceId']);
-      const source = sources.get(sourceId);
-      const sourceName = stripHtml(pick(item, ['sourceName', 'publisher']) || source?.label || '中国资料源');
-      const category = stripHtml(pick(item, ['category']) || String(source?.category || ''));
-      const kind = category ? `中文${category}资料摘要` : '中文资料摘要';
-      const evidenceKind = source?.status === 'stale' ? `${kind}（上次成功快照，可能过期）` : kind;
-      const indexUpdatedAt = source?.fetchedAt || payload?.generatedAt || '';
-      return {
-        title,
-        url,
-        snippet: stripHtml(pick(item, ['snippet', 'summary', 'description', 'content'])),
-        publishedAt: sourceDate(item),
-        provider: 'china-static',
-        sourceName,
-        evidenceKind,
-        ...(indexUpdatedAt ? { indexUpdatedAt } : {}),
       };
     })
     .filter(Boolean);
@@ -378,29 +327,6 @@ export async function searchDuckDuckGo({ query, limit = 5, maxSnippetChars = 240
   const params = new URLSearchParams({ q: query, format: 'json', no_html: '1', no_redirect: '1', skip_disambig: '1' });
   const payload = await fetchJson(`https://api.duckduckgo.com/?${params}`, { fetchImpl, signal, timeoutMs });
   return parseDuckDuckGo(payload, { maxSnippetChars }).slice(0, Math.max(1, limit));
-}
-
-/**
- * 读取随 GitHub Pages 发布的中国资料静态索引。它是本地相对路径，不包含查询参数，
- * 因而不会把用户问题或网络地址外发给原始中文资料站点。
- */
-export async function searchChinaStatic({ query, limit = 5, fetchImpl, signal, timeoutMs } = {}) {
-  const payload = await fetchJson(CHINA_STATIC_INDEX_URL, { fetchImpl, signal, timeoutMs });
-  if (payload?.schemaVersion !== 1 || !Array.isArray(payload?.sources) || !Array.isArray(payload?.items)) {
-    throw new Error('中国资料索引格式无效或尚未发布');
-  }
-  const results = parseChinaStatic(payload);
-  // 空索引不应被伪装成“没有相关结果”：首次部署或所有更新失败时要明确告知用户。
-  if (!results.length) {
-    const states = payload.sources.map((source) => String(source?.status || '')).filter(Boolean);
-    if (states.includes('pending')) throw new Error('中国资料索引尚未生成首个快照');
-    if (states.length && states.every((state) => state === 'error')) {
-      throw new Error('中国资料索引更新失败，暂无可用快照');
-    }
-  }
-  // 静态文件不是搜索 API：先在完整快照内做本地相关性筛选，再限制条数，
-  // 否则较早但真正相关的条目会被最新的无关新闻挤掉。
-  return (query ? filterRelevantResults(query, results) : results).slice(0, Math.max(1, limit));
 }
 
 /** 维基百科搜索（可传多个语言，前一个没有结果时再试另一个）。 */
@@ -533,7 +459,6 @@ export function runProvider(id, options = {}) {
   if (id === 'stackexchange') return searchStackExchange(options);
   if (id === 'hackernews') return searchHackerNews(options);
   if (id === 'duckduckgo') return searchDuckDuckGo(options);
-  if (id === 'china-static') return searchChinaStatic(options);
   if (id === 'searxng') return searchSearxng(options);
   if (id === 'custom') return searchCustom(options);
   throw new Error(`未知的搜索源：${id}`);
