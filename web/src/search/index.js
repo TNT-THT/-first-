@@ -8,10 +8,13 @@
  *
  * 隐私：搜索请求直接从浏览器发给搜索服务，只包含提取出的查询词，
  * 不发送对话历史、模型设置或任何密钥。
+ *
+ * **请求次数不变**：每个来源每次提问只发一个请求（维基百科原有的中/英文站回退仍算两次），
+ * 这里只是把每个来源的结果状态（成功 / 无结果 / 失败）记录下来，供界面显示用。
  */
 
 import { DEFAULT_WEB_SEARCH, planAdvanced, planKeyless, resolveSearchPrefs } from './config.js';
-import { buildSearchQuery, wikipediaLangs } from './query.js';
+import { buildSearchQuery, searchKeywords, wikipediaLangs } from './query.js';
 import { enrichWithExtracts, runProvider } from './providers.js';
 import { interleaveByProvider, mergeResults } from './context.js';
 
@@ -21,7 +24,8 @@ function isAbort(err, signal) {
 
 function providerOptions(id, { query, url, config, settings, fetchImpl, signal, timeoutMs }) {
   return {
-    query,
+    // 用一个“关键词式”查询（去掉疑问句式），每个来源依旧只发一个请求
+    query: searchKeywords(query) || query,
     // wikipedia 的 langs / stackexchange 的 site 都来自站点配置
     langs: id === 'wikipedia' ? wikipediaLangs(query, config.wikipedia) : undefined,
     site: id === 'stackexchange' ? config.stackexchange?.site : undefined,
@@ -57,16 +61,19 @@ export async function runWebSearch(text, options = {}) {
 
   const query = buildSearchQuery(text);
   const mode = prefs.mode === 'smart' ? 'smart' : 'quick';
-  if (!query) return { ok: false, query: '', mode, reason: '没有问题文本可用于搜索' };
-  if (!config?.enabled) return { ok: false, query, mode, reason: '站点已关闭联网搜索' };
+  if (!query) return { ok: false, query: '', mode, reason: '没有问题文本可用于搜索', attempts: [] };
+  if (!config?.enabled) return { ok: false, query, mode, reason: '站点已关闭联网搜索', attempts: [] };
 
   const advanced = planAdvanced(config, settings);
   const keyless = planKeyless(config);
   if (!advanced.length && !keyless.length) {
-    return { ok: false, query, mode, reason: '没有可用的搜索源' };
+    return { ok: false, query, mode, reason: '没有可用的搜索源', attempts: [] };
   }
 
   const errors = [];
+  // 每个来源的结果状态：ok（有结果）/ empty（没有结果）/ error（请求失败）。
+  // 只用于界面显示“为什么只搜到一个来源”，不产生额外请求。
+  const attempts = [];
   const finish = async (usable, providerIds) => {
     const enriched =
       mode === 'smart'
@@ -88,6 +95,7 @@ export async function runWebSearch(text, options = {}) {
       provider: providerIds[0],
       providers: providerIds,
       results: enriched,
+      attempts,
       errors,
       now,
     };
@@ -103,12 +111,15 @@ export async function runWebSearch(text, options = {}) {
       });
       const results = mergeResults(raw, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars });
       if (results.length) {
+        attempts.push({ id: target.id, status: 'ok', count: results.length });
         advancedResults.push({ id: target.id, results });
         break; // 进阶来源通常已经覆盖整个网页，不再重复请求其它进阶来源
       }
+      attempts.push({ id: target.id, status: 'empty', count: 0 });
       errors.push({ id: target.id, message: '没有搜索结果' });
     } catch (err) {
       if (isAbort(err, signal)) throw err;
+      attempts.push({ id: target.id, status: 'error', count: 0, message: String(err?.message || err).slice(0, 120) });
       errors.push({ id: target.id, message: err?.message || String(err) });
     }
   }
@@ -119,7 +130,7 @@ export async function runWebSearch(text, options = {}) {
   // 2) 免费来源（免密钥、允许跨域）：并行请求，合并去重
   if (!keyless.length) {
     const reason = errors.map((e) => e.message).filter(Boolean).slice(0, 2).join('；');
-    return { ok: false, query, mode, reason: reason || '搜索失败', errors };
+    return { ok: false, query, mode, reason: reason || '搜索失败', attempts, errors };
   }
   const settled = await Promise.allSettled(
     keyless.map((target) =>
@@ -138,9 +149,20 @@ export async function runWebSearch(text, options = {}) {
         limit: config.maxResults,
         maxSnippetChars: config.maxSnippetChars,
       });
-      if (results.length) groups.push({ id, results });
-      else errors.push({ id, message: '没有搜索结果' });
+      if (results.length) {
+        attempts.push({ id, status: 'ok', count: results.length });
+        groups.push({ id, results });
+      } else {
+        attempts.push({ id, status: 'empty', count: 0 });
+        errors.push({ id, message: '没有搜索结果' });
+      }
     } else {
+      attempts.push({
+        id,
+        status: 'error',
+        count: 0,
+        message: String(outcome.reason?.message || outcome.reason).slice(0, 120),
+      });
       errors.push({ id, message: outcome.reason?.message || String(outcome.reason) });
     }
   });
@@ -154,5 +176,5 @@ export async function runWebSearch(text, options = {}) {
     );
   }
   const reason = errors.map((e) => e.message).filter(Boolean).slice(0, 2).join('；');
-  return { ok: false, query, mode, reason: reason || '搜索失败', errors };
+  return { ok: false, query, mode, reason: reason || '搜索失败', attempts, errors };
 }

@@ -115,7 +115,9 @@ import {
 import { buildSearchQuery } from './search/query.js';
 import {
   buildSearchBlock,
+  compactAttempts,
   compactSources,
+  describeAttempts,
   hostOf,
   sanitizeUrl,
   searchSummary,
@@ -457,7 +459,15 @@ function paintSearchCard(bubble, msg) {
   }
   const results = Array.isArray(info.results) ? info.results : [];
   const done = info.status === 'done' && results.length > 0;
-  const key = [info.status, info.mode, info.query, results.length, info.reason || ''].join('|');
+  const attempts = describeAttempts(info.attempts, { providerLabels: PROVIDER_LABELS });
+  const key = [
+    info.status,
+    info.mode,
+    info.query,
+    results.length,
+    info.reason || '',
+    attempts.map((a) => `${a.id}:${a.status}:${a.count}`).join(','),
+  ].join('|');
   if (box.dataset.key === key) return;
   box.dataset.key = key;
   box.classList.toggle('is-error', info.status === 'error');
@@ -477,14 +487,38 @@ function paintSearchCard(bubble, msg) {
     for (const r of results) {
       const url = sanitizeUrl(r.url);
       if (!url) continue;
-      const li = node('li', {});
-      li.append(node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: r.title || url }));
       const host = hostOf(url);
-      if (host) li.append(node('span', { class: 'search-host' }, host));
-      if (r.snippet) li.append(node('span', { class: 'search-snippet' }, r.snippet));
+      // 标题为空（个别接口只返回正文）时用域名兜底，链接文字始终可见
+      const title = String(r.title || '').trim() || host || url;
+      const li = node('li', {});
+      li.append(node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: title }));
+      if (host && host !== title) li.append(node('span', { class: 'search-host' }, host));
+      if (String(r.snippet || '').trim()) li.append(node('span', { class: 'search-snippet' }, r.snippet));
       list.append(li);
     }
     body.append(list);
+    // 多来源时总是列出来（默认折叠）：既证明不是只搜了一个网站，
+    // 也能看清哪个来源无结果 / 失败，避免把“某站没有收录”误当成“事情没发生”。
+    if (attempts.length >= 2) {
+      const statusList = node('ul', { class: 'search-attempts' });
+      for (const a of attempts) {
+        const label =
+          a.status === 'ok'
+            ? `返回 ${a.count} 条结果`
+            : a.status === 'empty'
+              ? '没有结果'
+              : `请求失败${a.message ? `：${a.message}` : ''}`;
+        statusList.append(node('li', { class: `search-attempt-${a.status}` }, `${a.label}：${label}`));
+      }
+      body.append(
+        node(
+          'details',
+          { class: 'search-attempts-box' },
+          node('summary', { class: 'muted small' }, `各来源情况（${attempts.length} 个来源，点开查看）`),
+          statusList,
+        ),
+      );
+    }
     body.append(
       node(
         'p',
@@ -502,16 +536,11 @@ function paintSearchCard(bubble, msg) {
       : info.status === 'error'
         ? `🌐 联网搜索失败${info.reason ? `（${info.reason}）` : ''}，本条回答未使用搜索结果`
         : '🌐 没有找到相关结果，本条回答未使用搜索结果';
-  if (info.status === 'error' && Array.isArray(info.failures) && info.failures.length) {
+  const failed = attempts.filter((a) => a.status !== 'ok');
+  if (info.status === 'error' && failed.length) {
     const ul = node('ul', { class: 'search-failures' });
-    for (const f of info.failures) {
-      ul.append(
-        node(
-          'li',
-          {},
-          `${PROVIDER_LABELS[f.id] || f.id}：${f.message || '请求失败'}`,
-        ),
-      );
+    for (const a of failed) {
+      ul.append(node('li', {}, `${a.label}：${a.status === 'empty' ? '没有结果' : a.message || '请求失败'}`));
     }
     body.append(ul);
     body.append(
@@ -1103,6 +1132,7 @@ async function send(rawText) {
             mode: res.mode,
             provider: res.provider,
             providers: res.providers,
+            attempts: compactAttempts(res.attempts),
             results: compactSources(res.results, { limit: state.search.config.maxResults }),
             at: Date.now(),
           };
@@ -1119,11 +1149,8 @@ async function send(rawText) {
             query: res.query || query,
             mode: res.mode,
             reason: res.reason,
-            // 记下每个来源失败的原因（最多 3 条），用于说明“是不是网络不通”
-            failures: (res.errors || []).slice(0, 3).map((e) => ({
-              id: e.id,
-              message: String(e.message || '').slice(0, 120),
-            })),
+            // 记下每个来源的状态与失败原因（最多 6 条），用于说明“为什么没搜到”
+            attempts: compactAttempts(res.attempts),
           };
         }
       } catch (err) {

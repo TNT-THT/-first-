@@ -12,7 +12,14 @@ import {
   saveSearchPrefs,
   searchAvailable,
 } from '../web/src/search/config.js';
-import { buildSearchQuery, wikipediaLangs } from '../web/src/search/query.js';
+import {
+  buildSearchQuery,
+  queryForLang,
+  searchKeywords,
+  translateQuery,
+  wikipediaLangs,
+  zhKeywords,
+} from '../web/src/search/query.js';
 import {
   parseCustom,
   parseDuckDuckGo,
@@ -24,7 +31,9 @@ import {
 } from '../web/src/search/providers.js';
 import {
   buildSearchBlock,
+  compactAttempts,
   compactSources,
+  describeAttempts,
   interleaveByProvider,
   mergeResults,
   sanitizeUrl,
@@ -307,7 +316,7 @@ test('来源摘要文案：搜索中 / 失败 / 成功', () => {
     searchSummary({ status: 'done', mode: 'smart', provider: 'wikipedia', results: [{ url: 'https://a' }] }, {
       providerLabels: { wikipedia: '维基百科' },
     }),
-    /智能搜索：1 个来源（维基百科）/,
+    /智能搜索：1 条结果（维基百科）/,
   );
 });
 
@@ -571,5 +580,144 @@ test('来源摘要：多个搜索源时一起列出', () => {
     { status: 'done', mode: 'quick', provider: 'wikipedia', providers: ['wikipedia', 'stackexchange'], results: [{ url: 'https://a' }] },
     { providerLabels: { wikipedia: '维基百科', stackexchange: 'Stack Overflow' } },
   );
-  assert.match(text, /快速搜索：1 个来源（维基百科 \+ Stack Overflow）/);
+  assert.match(text, /快速搜索：1 条结果（维基百科 \+ Stack Overflow）/);
+});
+
+// ---------- 查询改写（不增加请求次数） ----------
+test('发送给搜索引擎的是关键词式查询，而不是整句疑问句', () => {
+  assert.equal(searchKeywords('2026年诺贝尔物理学奖的获得者是谁？'), '2026年诺贝尔物理学奖');
+  assert.equal(searchKeywords('二分查找的时间复杂度是多少？'), '二分查找的时间复杂度');
+  assert.equal(searchKeywords('What is the time complexity of binary search?'), 'time complexity of binary search');
+  // 单字不能乱删：有向图 / 在线 等词必须保持原样
+  assert.equal(zhKeywords('有向图的最短路径'), '有向图的最短路径');
+  assert.equal(searchKeywords('帮我查一下 在线判题系统'), '在线判题系统');
+  assert.equal(searchKeywords(''), '');
+});
+
+test('中文问题在英文站回退时用翻译后的查询（同一个请求）', () => {
+  assert.equal(searchKeywords('2026年诺贝尔物理学奖的获得者是谁？'), '2026年诺贝尔物理学奖');
+  assert.equal(queryForLang('2026年诺贝尔物理学奖', 'en'), '2026 Nobel Prize in Physics');
+  // 默认语言（中文站）保持原样；英文问题在英文站也保持原样
+  assert.equal(queryForLang('2026年诺贝尔物理学奖', 'zh'), '2026年诺贝尔物理学奖');
+  assert.equal(queryForLang('binary search', 'en'), 'binary search');
+  assert.equal(queryForLang('', 'en'), '');
+  // 词典里没有的词不硬翻
+  assert.equal(translateQuery('有向图最短路径'), '');
+});
+
+test('请求次数不变：每个免费来源每次提问只发一个请求', async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(String(url));
+    const u = String(url);
+    if (u.includes('wikipedia.org')) return { ok: true, json: async () => WIKI_PAYLOAD };
+    if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => ({ items: [{ title: 'SO', link: 'https://so/1', body: 'x' }] }) };
+    if (u.includes('hn.algolia.com')) return { ok: true, json: async () => ({ hits: [{ title: 'HN', url: 'https://hn/1', objectID: '1' }] }) };
+    throw new Error(u);
+  };
+  const res = await runWebSearch('2026年诺贝尔物理学奖的获得者是谁？', {
+    config: normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews'] }),
+    prefs: { enabled: true, mode: 'quick' },
+    fetchImpl,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(urls.length, 3, '三个来源各一个请求');
+  // 查询已改写成关键词
+  assert.ok(urls.some((u) => u.includes(encodeURIComponent('2026年诺贝尔物理学奖'))));
+  assert.ok(urls.some((u) => u.includes(encodeURIComponent('Nobel Prize in Physics'))) === false, '英文站没有回退时不翻');
+});
+
+test('维基百科中文站没有结果时用英文站回退：中文查询翻成英文，仍然只多一个请求', async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('zh.wikipedia.org')) return { ok: true, json: async () => ({ query: { search: [] } }) };
+    if (u.includes('en.wikipedia.org')) {
+      return { ok: true, json: async () => ({ query: { search: [{ title: 'Nobel Prize in Physics', snippet: '2026: Francis Halzen' }] } }) };
+    }
+    throw new Error(u);
+  };
+  const res = await runWebSearch('2026年诺贝尔物理学奖的获得者是谁？', {
+    config: normalizeWebSearch({ providers: ['wikipedia'], wikipedia: { lang: 'zh', fallbackLang: 'en' } }),
+    prefs: { enabled: true, mode: 'quick' },
+    fetchImpl,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(urls.length, 2, '中/英文站各一个请求');
+  assert.match(urls[0], /zh\.wikipedia\.org/);
+  assert.match(urls[1], /en\.wikipedia\.org/);
+  assert.equal(
+    new URL(urls[1]).searchParams.get('srsearch'),
+    '2026 Nobel Prize in Physics',
+    '英文站用的是翻译后的查询',
+  );
+  assert.match(res.results[0].title, /Nobel Prize in Physics/);
+});
+
+// ---------- 来源状态（只影响显示，不增加请求） ----------
+test('记录每个来源的状态：成功 / 无结果 / 失败', async () => {
+  const res = await runWebSearch('二分查找', {
+    config: normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews'] }),
+    prefs: { enabled: true, mode: 'quick' },
+    fetchImpl: fakeFetch({
+      'list=search': WIKI_PAYLOAD,
+      'api.stackexchange.com': new Error('Failed to fetch'),
+      'hn.algolia.com': { hits: [] },
+    }),
+  });
+  assert.equal(res.ok, true);
+  const byId = Object.fromEntries(res.attempts.map((a) => [a.id, a]));
+  assert.equal(byId.wikipedia.status, 'ok');
+  assert.equal(byId.wikipedia.count, 2);
+  assert.equal(byId.stackexchange.status, 'error');
+  assert.match(byId.stackexchange.message, /Failed to fetch/);
+  assert.equal(byId.hackernews.status, 'empty');
+  // 保存到历史的精简版本
+  const saved = compactAttempts(res.attempts);
+  assert.deepEqual(saved.map((a) => a.status), ['ok', 'error', 'empty']);
+  const described = describeAttempts(saved, { providerLabels: { stackexchange: 'Stack Overflow' } });
+  assert.equal(described[1].label, 'Stack Overflow');
+});
+
+test('摘要里写明哪些来源没有结果或失败，避免让人以为只搜了一个网站', () => {
+  const text = searchSummary(
+    {
+      status: 'done',
+      mode: 'quick',
+      provider: 'wikipedia',
+      providers: ['wikipedia'],
+      results: [{ url: 'https://a' }],
+      attempts: [
+        { id: 'wikipedia', status: 'ok', count: 1 },
+        { id: 'stackexchange', status: 'error', message: 'Failed to fetch' },
+        { id: 'hackernews', status: 'empty', count: 0 },
+      ],
+    },
+    { providerLabels: { wikipedia: '维基百科', stackexchange: 'Stack Overflow', hackernews: 'Hacker News' } },
+  );
+  assert.match(text, /快速搜索：1 条结果（维基百科；Stack Overflow（失败）、Hacker News（无结果））/);
+});
+
+test('标题为空的结果在解析阶段就丢掉，不会生成空白条目', async () => {
+  assert.deepEqual(parseWikipedia({ query: { search: [{ title: '  ', snippet: 'x' }] } }), []);
+  assert.deepEqual(parseStackExchange({ items: [{ link: 'https://so/1', title: '' }] }), []);
+  assert.deepEqual(parseHackerNews({ hits: [{ url: 'https://hn/1', title: null, objectID: '1' }] }), []);
+});
+
+test('标题为空的来源用域名兜底，不会出现空白条目', () => {
+  const saved = compactSources([{ title: '', url: 'https://example.com/a?x=1', snippet: '' }]);
+  assert.equal(saved[0].title, 'example.com');
+  assert.equal(saved[0].url, 'https://example.com/a?x=1');
+});
+
+test('资料块写明“今天”和“资料没提到不等于不存在”', () => {
+  const now = new Date(2026, 9, 30, 9, 5);
+  const block = buildSearchBlock([{ title: 'A', url: 'https://a.example.com', snippet: 'b' }], {
+    query: 'q',
+    now,
+  });
+  assert.match(block, /今天是 2026-10-30 09:05/);
+  assert.match(block, /不等于这件事没有发生/);
+  assert.match(block, /没有搜到可靠信息/);
 });

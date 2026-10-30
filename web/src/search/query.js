@@ -83,3 +83,115 @@ export function wikipediaLangs(query, { lang = 'zh', fallbackLang = 'en' } = {})
   const second = first === lang ? fallbackLang : lang;
   return [...new Set([first, second].filter(Boolean))];
 }
+
+/**
+ * 常见专有名词的中英对照。维基百科、Stack Overflow 等英文来源对英文条目更全，
+ * 中文问题只查中文站经常“查无此条”（例如“2026 年诺贝尔物理学奖”在中文站可能还没有条目），
+ * 因此维基百科的英文站回退会先把这些词换成英文，再发**同一个**请求（不增加请求次数）。
+ * 只收录确定、无歧义的写法；没有命中时不会生成英文查询。
+ */
+export const TERM_GLOSSARY = {
+  诺贝尔物理学奖: 'Nobel Prize in Physics',
+  诺贝尔化学奖: 'Nobel Prize in Chemistry',
+  诺贝尔生理学或医学奖: 'Nobel Prize in Physiology or Medicine',
+  诺贝尔医学奖: 'Nobel Prize in Physiology or Medicine',
+  诺贝尔文学奖: 'Nobel Prize in Literature',
+  诺贝尔和平奖: 'Nobel Peace Prize',
+  诺贝尔经济学奖: 'Nobel Memorial Prize in Economic Sciences',
+  图灵奖: 'Turing Award',
+  菲尔兹奖: 'Fields Medal',
+  阿贝尔奖: 'Abel Prize',
+  普利策奖: 'Pulitzer Prize',
+  奥斯卡: 'Academy Awards',
+  世界杯: 'FIFA World Cup',
+  奥运会: 'Olympic Games',
+  人工智能: 'artificial intelligence',
+  机器学习: 'machine learning',
+  深度学习: 'deep learning',
+  大语言模型: 'large language model',
+  量子计算: 'quantum computing',
+  区块链: 'blockchain',
+};
+
+/**
+ * 中文里对检索没有帮助的词。只收多字词：单字（“有”“的”“在”）往往是词的一部分，
+ * 删掉会破坏原意（例如“有向图” → “向图”），因此一律保留。
+ */
+const ZH_STOPWORDS = [
+  '请问', '想问一下', '想问', '想知道', '帮我查一下', '帮我查', '帮我', '告诉我', '介绍一下', '解释一下',
+  '的获得者是谁', '的获得者', '获得者', '的得主', '得主是谁', '得主', '是谁', '是什么', '有哪些', '是哪个',
+  '为什么', '怎么样', '怎么办', '如何获取', '多少', '是否', '能不能', '有没有', '一下',
+];
+
+/** 英文里可以从查询中去掉的词：疑问词与冠词（保留 in / of / for 等介词，英文检索需要它们）。 */
+const EN_STOPWORDS = ['what', 'who', 'whom', 'whose', 'when', 'where', 'why', 'how', 'which', 'is', 'are', 'was', 'were', 'do', 'does', 'did', 'the', 'a', 'an'];
+
+function stripStopwords(text, list) {
+  let s = ` ${String(text || '')} `;
+  for (const w of [...list].sort((a, b) => b.length - a.length)) {
+    const re = /^[\x00-\x7f]+$/.test(w) ? new RegExp(`(^|\\s)${w}(?=\\s|$)`, 'gi') : new RegExp(w, 'g');
+    s = s.replace(re, ' ');
+  }
+  return s.replace(/[\s\u3000]+/g, ' ').trim();
+}
+
+function tidy(text) {
+  return String(text || '')
+    .replace(/[，。！？、；：""''（）()【】\[\]…—?!,.;:"'()]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** 中文查询的关键词式写法：只去掉明显的疑问句式，保留专有名词与单字。 */
+export function zhKeywords(text) {
+  const q = tidy(stripStopwords(tidy(text), ZH_STOPWORDS));
+  // 只清理句末残留的单字虚词（“是多少”→“多少”之后剩下的“是”），句中的单字一律保留
+  return q.length > 2 ? q.replace(/[是的有在了呢吗吧啊]+$/, '').trim() || q : q;
+}
+
+/** 英文查询的关键词式写法：去掉疑问词与冠词，保留介词。 */
+export function enKeywords(text) {
+  return tidy(stripStopwords(tidy(text), EN_STOPWORDS));
+}
+
+/** 把中文里的常见专有名词换成英文；没有命中或翻不干净时返回空串。 */
+export function translateQuery(text) {
+  let s = String(text || '');
+  let hit = false;
+  for (const [zh, en] of Object.entries(TERM_GLOSSARY).sort((a, b) => b[0].length - a[0].length)) {
+    if (s.includes(zh)) {
+      s = s.split(zh).join(` ${en} `);
+      hit = true;
+    }
+  }
+  if (!hit) return '';
+  s = s.replace(/[年月份]/g, ' ');
+  s = tidy(stripStopwords(tidy(s), ZH_STOPWORDS));
+  s = tidy(stripStopwords(s, EN_STOPWORDS));
+  // 还残留大量汉字说明没有真正翻译过去，作为英文查询没有意义
+  if (!/[a-z]{2,}/i.test(s)) return '';
+  const cjk = (s.match(/[\u3400-\u9fff]/g) || []).length;
+  if (cjk > s.length * 0.3) return '';
+  return s.slice(0, 120);
+}
+
+/**
+ * 真正发给搜索引擎的查询（只生成一个，**不增加请求次数**）：
+ * 中文问题去掉“的获得者是谁”这类疑问句式；英文问题去掉 what/who/the 这类词。
+ * 关键词式查询比整句疑问句更容易命中条目（维基百科尤其明显）。
+ */
+export function searchKeywords(text) {
+  const cleaned = pickSentence(stripForQuery(text), 120) || String(text || '');
+  if (!cleaned) return '';
+  const narrowed = hasCjk(cleaned) ? zhKeywords(cleaned) : enKeywords(cleaned);
+  return (narrowed.length >= 2 ? narrowed : cleaned).replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+/**
+ * 某个语言的站点该用的查询：中文问题在英文站回退时先翻成英文（同一个请求，只是换了更可能命中的词）。
+ */
+export function queryForLang(query, lang, { defaultLang = 'zh' } = {}) {
+  if (!query) return query;
+  if (lang && lang !== defaultLang && hasCjk(query)) return translateQuery(query) || query;
+  return query;
+}

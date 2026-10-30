@@ -179,13 +179,20 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
   const card = assistant.querySelector('.search-card');
   assert.ok(card, '回答下方应出现搜索来源卡片');
   // 三个免费来源并行请求并合并，摘要里列出全部贡献了结果的来源
-  assert.match(card.querySelector('summary').textContent, /智能搜索：3 个来源（维基百科 \+ Stack Overflow \+ Hacker News）/);
+  assert.match(card.querySelector('summary').textContent, /智能搜索：3 条结果（维基百科 \+ Stack Overflow \+ Hacker News）/);
   const links = [...card.querySelectorAll('.search-sources a')];
   assert.equal(links.length, 3);
   assert.equal(links[0].textContent, '二分查找');
   assert.equal(links[0].getAttribute('href'), 'https://zh.wikipedia.org/wiki/%E4%BA%8C%E5%88%86%E6%9F%A5%E6%89%BE');
   assert.equal(links[1].getAttribute('href'), 'https://stackoverflow.com/questions/1');
   assert.equal(links[2].getAttribute('href'), 'https://example.com/bs');
+
+  // “各来源情况”：多来源时默认折叠列出，让人看到确实搜了三个网站
+  const statusBox = card.querySelector('.search-attempts-box');
+  assert.ok(statusBox, '多来源时应显示各来源情况');
+  const statuses = [...statusBox.querySelectorAll('.search-attempts li')].map((li) => li.textContent);
+  assert.equal(statuses.length, 3);
+  assert.ok(statuses.every((t) => /返回 \d+ 条结果/.test(t)), statuses.join('/'));
 
   // 来源清单写入本机会话：刷新页面后仍能回看
   const store = JSON.parse(localStorage.getItem('oj-ai.sessions.v1'));
@@ -195,6 +202,15 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
   assert.equal(saved.search.provider, 'wikipedia');
   assert.deepEqual(saved.search.providers, ['wikipedia', 'stackexchange', 'hackernews']);
   assert.equal(saved.search.results[0].title, '二分查找');
+  // 各来源状态也随会话保存（不额外发请求）
+  assert.deepEqual(
+    saved.search.attempts.map((a) => [a.id, a.status]),
+    [
+      ['wikipedia', 'ok'],
+      ['stackexchange', 'ok'],
+      ['hackernews', 'ok'],
+    ],
+  );
 
   // Node 中没有 WebGPU：回答应给出可读的错误，而不是静默失败
   assert.match(assistant.textContent, /WebGPU/);
@@ -234,6 +250,49 @@ test('联网搜索全部失败时：卡片写明每个来源的错误与网络�
     assert.ok(failures.some((t) => t.startsWith('维基百科：')));
     assert.ok(failures.some((t) => t.startsWith('Stack Overflow：')));
     assert.match(card.textContent, /境外/);
+  } finally {
+    globalThis.fetch = realFetch;
+    window.fetch = realFetch;
+  }
+});
+
+test('部分来源无结果 / 失败时：卡片列出各来源情况，回答照常生成', async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('wikipedia.org') && u.includes('list=search')) {
+      return { ok: true, json: async () => WIKI };
+    }
+    if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => ({ items: [] }) };
+    if (u.includes('hn.algolia.com')) throw new TypeError('Failed to fetch');
+    if (u.includes('config.json')) return { ok: true, json: async () => config };
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  window.fetch = globalThis.fetch;
+  try {
+    $('#input').value = '二分查找的时间复杂度？';
+    $('#composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 400));
+
+    const assistant = [...document.querySelectorAll('.msg.assistant')].pop();
+    const card = assistant.querySelector('.search-card');
+    assert.ok(card, '有结果时也应显示来源卡片');
+    assert.equal(card.classList.contains('is-error'), false);
+
+    // 只有维基百科有结果，但卡片明确列出另外两个来源的空/失败状态
+    const statuses = [...card.querySelectorAll('.search-attempts li')].map((li) => li.textContent);
+    assert.equal(statuses.length, 3);
+    assert.equal(statuses[0], '维基百科：返回 1 条结果');
+    assert.equal(statuses[1], 'Stack Overflow：没有结果');
+    assert.match(statuses[2], /^Hacker News：请求失败/);
+
+    // 状态随会话保存，刷新后仍能看到“为什么只有一个来源”
+    const store = JSON.parse(localStorage.getItem('oj-ai.sessions.v1'));
+    const saved = store.sessions[0].messages.filter((m) => m.role === 'assistant' && m.search).pop();
+    assert.deepEqual(
+      saved.search.attempts.map((a) => a.status),
+      ['ok', 'empty', 'error'],
+    );
   } finally {
     globalThis.fetch = realFetch;
     window.fetch = realFetch;
