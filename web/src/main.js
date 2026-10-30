@@ -464,7 +464,7 @@ function paintSearchCard(bubble, msg) {
   const results = Array.isArray(info.results) ? info.results : [];
   const done = info.status === 'done' && results.length > 0;
   const attempts = describeAttempts(info.attempts, { providerLabels: PROVIDER_LABELS });
-  const citations = auditCitations(msg.content, results.length);
+  const citations = auditCitations(msg.content, results.length, { sources: results });
   const key = [
     info.status,
     info.mode,
@@ -475,6 +475,8 @@ function paintSearchCard(bubble, msg) {
     info.partial ? 'partial' : '',
     citations.references.join(','),
     citations.invalid.join(','),
+    citations.weak?.join(',') || '',
+    info.plan?.en || '',
     attempts.map((a) => `${a.id}:${a.status}:${a.count}:${a.message}`).join(','),
   ].join('|');
   if (box.dataset.key === key) return;
@@ -490,6 +492,12 @@ function paintSearchCard(bubble, msg) {
     box.open = true;
     return;
   }
+  if (info.status === 'skipped') {
+    // 寒暄 / 纯代码 / 空白：不发起请求，也不应显示“检索失败”。
+    summary.textContent = `🌐 ${searchSummary(info, { providerLabels: PROVIDER_LABELS })}`;
+    body.append(node('p', { class: 'muted small' }, '本条消息没有需要联网核实的内容，因此没有发起任何网络请求。'));
+    return;
+  }
   if (done) {
     summary.textContent = `🌐 ${searchSummary(info, { providerLabels: PROVIDER_LABELS })}（点击展开）`;
     const list = node('ol', { class: 'search-sources' });
@@ -501,7 +509,7 @@ function paintSearchCard(bubble, msg) {
       const li = node('li', {});
       li.append(node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: title }));
       if (host && host !== title) li.append(node('span', { class: 'search-host' }, host));
-      if (r.publishedAt) li.append(node('span', { class: 'search-host' }, `资料日期：${String(r.publishedAt).slice(0, 10)}`));
+      if (r.publishedAt) li.append(node('span', { class: 'search-host' }, `来源时间：${String(r.publishedAt).slice(0, 10)}`));
       if (r.evidenceKind) li.append(node('span', { class: 'search-host' }, `资料类型：${r.evidenceKind}`));
       if (String(r.snippet || '').trim()) li.append(node('span', { class: 'search-snippet' }, r.snippet));
       // 透明展示模型实际收到的正文/答案摘录，而非只展示更短的搜索摘要。
@@ -549,13 +557,33 @@ function paintSearchCard(bubble, msg) {
     if (citations.invalid.length) {
       body.append(node('p', { class: 'search-note' }, `回答出现不存在的资料编号：[${citations.invalid.join(']、[')}]。请勿把它当作有效引用。`));
     }
+    if (citations.weak?.length) {
+      body.append(
+        node(
+          'p',
+          { class: 'search-note' },
+          `引用 [${citations.weak.join(']、[')}] 与对应资料摘录几乎没有共同词，关联较弱，请打开来源核实。`,
+        ),
+      );
+    }
+    if (info.plan?.en) {
+      const source =
+        info.plan.enSource === 'glossary'
+          ? '术语表翻译（保留问题意图）'
+          : info.plan.enSource === 'fragment'
+            ? '问题中的英文技术片段'
+            : info.plan.enSource === 'langlinks'
+              ? '维基条目名（langlinks）'
+              : '自动生成';
+      body.append(node('p', { class: 'search-note' }, `英文源实际查询：「${info.plan.en}」（来源：${source}）`));
+    }
     body.append(
       node(
         'p',
         { class: 'search-note' },
         info.mode === 'smart'
           ? `深入检索：优先补取维基导言、Stack Overflow 回答或 HN 讨论；其他来源只有在配置正文读取服务时才会补正文。${info.partial ? ' 本次到达总超时，已保留已拿到的资料。' : ''}`
-          : `快速检索：只使用资料源返回的摘要；它不是完整网页抓取，也不保证覆盖整个互联网。${info.partial ? ' 本次到达总超时，来源可能不完整。' : ''}`,
+          : `快速检索：补取前几条维基导言 / Stack Overflow 答案，其余使用来源摘要；它不是完整网页抓取，也不保证覆盖整个互联网。${info.partial ? ' 本次到达总超时，来源可能不完整。' : ''}`,
       ),
     );
     return;
@@ -1141,6 +1169,25 @@ async function send(rawText) {
 
   // 本次提问的联网资料检索资料块（只在本次请求中使用；历史里只保存来源清单）
   let searchBlock = '';
+  // 模型加载与网络检索并行：检索最多 12 秒，串行会让首字延迟直接叠加。
+  // 加载失败/取消不在这里抛出，等检索结束后统一处理，避免未处理的 rejection。
+  let preload = null;
+  let searchPhaseDone = false;
+  if (shouldSearch() && !state.backend.isReady()) {
+    let latest = null;
+    const promise = state.backend.ensureReady(
+      ({ progress, text: t }) => {
+        latest = { progress, text: t };
+        if (searchPhaseDone) {
+          const pct = Math.round(progress * 100);
+          showStatus(`正在加载模型 ${pct}%${t ? `：${t}` : ''}`, { progress });
+        }
+      },
+      { signal: controller.signal },
+    );
+    promise.catch(() => {});
+    preload = { promise, latest: () => latest };
+  }
   try {
     // ---------- 联网资料检索 ----------
     // 先搜索再加载模型：搜索只需要网络，失败也不影响正常回答（会明确标注“未使用搜索结果”）
@@ -1189,6 +1236,9 @@ async function send(rawText) {
               provider: evidenceProviders[0] || res.provider,
               providers: evidenceProviders,
               attempts: compactAttempts(res.attempts),
+              plan: res.plan
+                ? { en: res.plan.en || '', enSource: res.plan.enSource || '', keyword: res.plan.keyword || '' }
+                : null,
               results: compactSources(evidence.results, { limit: state.search.config.maxResults }),
               at: Date.now(),
               retrievedAt: res.now || new Date().toISOString(),
@@ -1198,6 +1248,14 @@ async function send(rawText) {
             searchBlock = evidence.block;
             showStatus(`已完成联网资料检索（${evidence.results.length} 条资料${res.cached ? '，使用页面缓存' : ''}），正在生成回答…`);
           }
+        } else if (res.skipped) {
+          // 寒暄 / 纯代码 / 空白：没有发起请求，显示「已跳过」而不是「失败」。
+          assistantMsg.search = {
+            status: 'skipped',
+            query: res.query || '',
+            mode: res.mode,
+            reason: res.reason || '',
+          };
         } else {
           assistantMsg.search = {
             status: 'error',
@@ -1237,18 +1295,35 @@ async function send(rawText) {
       return;
     }
 
+    searchPhaseDone = true;
+    let preloadResult = null;
+    if (preload) {
+      // 与检索并行启动的加载：这里只等它结束（进度已由回调上报）。
+      preloadResult = await preload.promise;
+    }
     if (!state.backend.isReady()) {
       paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在加载模型…' });
+      const latest = preload?.latest?.();
+      if (latest) {
+        const pct = Math.round((latest.progress || 0) * 100);
+        showStatus(`正在加载模型 ${pct}%${latest.text ? `：${latest.text}` : ''}`, { progress: latest.progress || 0 });
+      }
       // 加载可以被停止按钮取消（signal），长时间没有进展会超时并提示重试
-      const loaded = await state.backend.ensureReady(({ progress, text: t }) => {
-        if (t) progressText = t;
-        const pct = Math.round(progress * 100);
-        showStatus(`正在加载模型 ${pct}%${t ? `：${t}` : ''}`, { progress });
-      }, { signal: controller.signal });
+      const loaded =
+        preloadResult ??
+        (await state.backend.ensureReady(({ progress, text: t }) => {
+          if (t) progressText = t;
+          const pct = Math.round(progress * 100);
+          showStatus(`正在加载模型 ${pct}%${t ? `：${t}` : ''}`, { progress });
+        }, { signal: controller.signal }));
       await refreshIdleStatus();
       refreshModelCacheStatus();
       // 输出自检的结果（异常、已切换到 fp32 等）
       if (loaded?.note) showStatus(loaded.note, { error: loaded.healthy === false });
+    } else if (preloadResult?.note) {
+      await refreshIdleStatus();
+      refreshModelCacheStatus();
+      showStatus(preloadResult.note, { error: preloadResult.healthy === false });
     }
 
     let loopDetected = false;

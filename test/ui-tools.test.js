@@ -189,13 +189,17 @@ test('发送时先联网资料检索：来源卡片显示在回答下方，并�
   const card = await waitFor(() => assistant.querySelector('.search-card')?.dataset.key?.startsWith('done|') && assistant.querySelector('.search-card'));
   assert.ok(card, '回答下方应出现资料来源卡片');
   // 三个公开 API 并行；摘要披露各来源合计命中的资料数。
-  assert.match(card.querySelector('summary').textContent, /深入检索：3 条资料（维基百科 \+ Stack Overflow \+ Hacker News）/);
+  // 结果按相关性排序，来源顺序不再固定；摘要只保证三个来源都被列出。
+  assert.match(
+    card.querySelector('summary').textContent,
+    /深入检索：3 条资料（(?:维基百科|Stack Overflow|Hacker News)(?: \+ (?:维基百科|Stack Overflow|Hacker News)){2}）/,
+  );
   const links = [...card.querySelectorAll('.search-sources a')];
   assert.equal(links.length, 3);
-  assert.equal(links[0].textContent, '二分查找');
-  assert.equal(links[0].getAttribute('href'), 'https://zh.wikipedia.org/wiki/%E4%BA%8C%E5%88%86%E6%9F%A5%E6%89%BE');
-  assert.equal(links[1].getAttribute('href'), 'https://stackoverflow.com/questions/1');
-  assert.equal(links[2].getAttribute('href'), 'https://example.com/bs');
+  const byTitle = new Map(links.map((a) => [a.textContent, a.getAttribute('href')]));
+  assert.equal(byTitle.get('二分查找'), 'https://zh.wikipedia.org/wiki/%E4%BA%8C%E5%88%86%E6%9F%A5%E6%89%BE');
+  assert.ok([...byTitle.values()].includes('https://stackoverflow.com/questions/1'));
+  assert.ok([...byTitle.values()].includes('https://example.com/bs'));
 
   // “各来源情况”：多来源时默认折叠列出，让人看到各公开 API 均被检查
   const statusBox = card.querySelector('.search-attempts-box');
@@ -209,9 +213,10 @@ test('发送时先联网资料检索：来源卡片显示在回答下方，并�
   const saved = store.sessions[0].messages.find((m) => m.role === 'assistant' && m.search);
   assert.ok(saved, '来源应随会话保存');
   assert.equal(saved.search.status, 'done');
-  assert.equal(saved.search.provider, 'wikipedia');
-  assert.deepEqual(saved.search.providers, ['wikipedia', 'stackexchange', 'hackernews']);
-  assert.equal(saved.search.results[0].title, '二分查找');
+  // 结果按相关性排序，第一条可能是任一来源；只断言来源集合与资料内容。
+  assert.equal(saved.search.results.length, 3);
+  assert.deepEqual([...saved.search.providers].sort(), ['hackernews', 'stackexchange', 'wikipedia']);
+  assert.ok(saved.search.results.some((r) => r.title === '二分查找'));
   // 各来源状态也随会话保存（不额外发请求）
   assert.deepEqual(
     saved.search.attempts.map((a) => [a.id, a.status]),

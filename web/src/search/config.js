@@ -29,6 +29,10 @@ export const DEFAULT_WEB_SEARCH = {
   defaultOn: false,
   defaultMode: 'quick',
   maxResults: 5,
+  // 每个来源最多占几个编号：避免一个话痨来源挤掉更权威的结果。
+  maxPerProvider: 2,
+  // 相关性门槛（0–1）：低于它的候选不进入资料块，见 query.js scoreResult。
+  minRelevance: 0.28,
   maxSnippetChars: 240,
   // 单个请求与一次完整检索的预算分开，避免一个慢源拖住回答。
   timeoutMs: 8000,
@@ -37,11 +41,13 @@ export const DEFAULT_WEB_SEARCH = {
   cacheTtlMs: 5 * 60 * 1000,
   providers: ['wikipedia', 'stackexchange', 'hackernews'],
   wikipedia: { lang: 'zh', fallbackLang: 'en' },
-  stackexchange: { site: 'stackoverflow' },
+  stackexchange: { site: 'stackoverflow', acceptedOnly: true },
   searxng: { baseUrl: '' },
   custom: { endpoint: '' },
-  smart: { maxPages: 3, readerTemplate: '' },
-  maxContextChars: { quick: 2400, smart: 4800 },
+  // 两种模式都补正文；快速模式只补前 2 条，深入模式补前 5 条并读 HN 讨论。
+  quick: { maxPages: 2 },
+  smart: { maxPages: 5, readerTemplate: '' },
+  maxContextChars: { quick: 3200, smart: 6000 },
 };
 
 const MAX_CONFIG_URL_CHARS = 2048;
@@ -139,6 +145,11 @@ export function normalizeWebSearch(raw) {
     defaultOn: src.defaultOn === true,
     defaultMode: SEARCH_MODES.includes(src.defaultMode) ? src.defaultMode : d.defaultMode,
     maxResults: clampInt(src.maxResults, 1, 10, d.maxResults),
+    maxPerProvider: clampInt(src.maxPerProvider, 1, 5, d.maxPerProvider),
+    minRelevance: (() => {
+      const n = Number(src.minRelevance);
+      return Number.isFinite(n) ? Math.min(0.9, Math.max(0.05, n)) : d.minRelevance;
+    })(),
     maxSnippetChars: clampInt(src.maxSnippetChars, 80, 600, d.maxSnippetChars),
     timeoutMs: clampInt(src.timeoutMs, 2000, 20000, d.timeoutMs),
     totalTimeoutMs: clampInt(src.totalTimeoutMs, 3000, 30000, d.totalTimeoutMs),
@@ -150,16 +161,20 @@ export function normalizeWebSearch(raw) {
     },
     stackexchange: {
       site: typeof se.site === 'string' && /^[a-z0-9.]+$/.test(se.site.trim()) ? se.site.trim() : d.stackexchange.site,
+      acceptedOnly: se.acceptedOnly !== false,
     },
     searxng: { baseUrl: cleanBaseUrl(searx.baseUrl) },
     custom: { endpoint: cleanBaseUrl(custom.endpoint) },
+    quick: {
+      maxPages: clampInt(src.quick?.maxPages, 0, 5, d.quick.maxPages),
+    },
     smart: {
       maxPages: clampInt(smart.maxPages, 0, 5, d.smart.maxPages),
       readerTemplate: cleanReaderTemplate(smart.readerTemplate),
     },
     maxContextChars: {
-      quick: clampInt(ctx.quick, 400, 12000, d.maxContextChars.quick),
-      smart: clampInt(ctx.smart, 400, 16000, d.maxContextChars.smart),
+      quick: clampInt(ctx.quick, 800, 16000, d.maxContextChars.quick),
+      smart: clampInt(ctx.smart, 800, 20000, d.maxContextChars.smart),
     },
   };
 }
@@ -246,7 +261,7 @@ export function planAdvanced(config, settings = {}) {
   return plan;
 }
 
-/** 无密钥资料源，来自 config.json 的 providers（含本仓库的中国资料静态索引）。 */
+/** 无密钥资料源，来自 config.json 的 providers。 */
 export function planKeyless(config) {
   const cfg = config || DEFAULT_WEB_SEARCH;
   return (cfg.providers || [])

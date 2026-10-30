@@ -1,16 +1,28 @@
 /**
  * 联网资料检索的编排（纯逻辑，fetch 与缓存可注入）。
  *
- * - 默认资料源与管理员配置源并行请求、合并去重；任一源不能独占答案；
- * - 深入模式补取维基导言、Stack Overflow 回答、HN 讨论摘录；
- * - 单个请求与全局检索各有超时；成功结果可使用页面内短缓存；
- * - 查询经过敏感信息检查，疑似凭据绝不外发。
+ * 设计要点（对应评估报告 2.x / 3.x 的整改）：
+ * - 查询规划：先尝试术语表翻译（保留问题意图），再退到英文技术片段，最后才用维基条目名；
+ *   三者都拿不到时不把中文原句发给看不懂中文的接口。
+ * - 来源取舍：所有来源并发检索，结果按「相关性分数 × 来源权重」排序，
+ *   并保证来源多样性；不再让 HN 标题和维基正文同权轮流占编号。
+ * - 证据质量：快速模式也会补取前 N 条的维基导言 / SO 答案，
+ *   让「搜到了」真的等于「有内容可读」；HN 只有讨论（smart）时才补，避免标题占位。
+ * - 失败路径仍然显式：每个来源的状态、部分结果、缓存命中都带回来。
  */
 
 import { DEFAULT_WEB_SEARCH, planProviders, resolveSearchPrefs } from './config.js';
-import { analyzeSearchInput, filterRelevantResults, hasCjk, searchKeywords, translateQuery, wikipediaLangs } from './query.js';
+import {
+  analyzeSearchInput,
+  composeEnQuery,
+  hasCjk,
+  isTrivialQuery,
+  searchKeywords,
+  translateQuery,
+  wikipediaLangs,
+} from './query.js';
 import { enrichWithExtracts, resolveEnQuery, runProvider } from './providers.js';
-import { interleaveByProvider, mergeResults } from './context.js';
+import { mergeResults, rankResults } from './context.js';
 
 /** 只接受英文查询的公开源：中文原句发过去必然空手，还暴露访客 IP。 */
 const EN_ONLY_PROVIDERS = new Set(['stackexchange', 'hackernews', 'duckduckgo']);
@@ -50,11 +62,13 @@ function clone(value) {
 
 function providerOptions(id, { query, enQuery, url, config, settings, fetchImpl, signal, timeoutMs }) {
   const cjk = hasCjk(query);
+  const base = searchKeywords(query) || query;
   return {
-    query: EN_ONLY_PROVIDERS.has(id) && cjk && enQuery ? enQuery : searchKeywords(query) || query,
+    query: EN_ONLY_PROVIDERS.has(id) && cjk ? enQuery || '' : base,
     langs: id === 'wikipedia' ? wikipediaLangs(query, config.wikipedia) : undefined,
     ...(id === 'wikipedia' ? { enQuery, defaultLang: config.wikipedia?.lang || 'zh' } : {}),
     site: id === 'stackexchange' ? config.stackexchange?.site : undefined,
+    acceptedOnly: id === 'stackexchange' ? config.stackexchange?.acceptedOnly !== false : undefined,
     baseUrl: url,
     endpoint: url,
     limit: config.maxResults,
@@ -66,16 +80,20 @@ function providerOptions(id, { query, enQuery, url, config, settings, fetchImpl,
   };
 }
 
-function cacheKey(query, mode, config, settings, targets) {
+function cacheKey(query, mode, config, settings, targets, enQuery) {
   return JSON.stringify({
     query,
     mode,
+    enQuery,
     targets: targets.map((target) => [target.id, target.url || '']),
     maxResults: config.maxResults,
     maxSnippetChars: config.maxSnippetChars,
+    maxPerProvider: config.maxPerProvider,
+    minRelevance: config.minRelevance,
     wikipedia: config.wikipedia,
     stackexchange: config.stackexchange,
-    smart: mode === 'smart' ? { maxPages: config.smart?.maxPages, readerTemplate: settings.readerTemplate || config.smart?.readerTemplate || '' } : null,
+    pages: mode === 'smart' ? config.smart?.maxPages : config.quick?.maxPages,
+    readerTemplate: settings.readerTemplate || config.smart?.readerTemplate || '',
   });
 }
 
@@ -101,9 +119,33 @@ function writeCache(cache, key, ttlMs, nowMs, value) {
   while (cache.size > 30) cache.delete(cache.keys().next().value);
 }
 
+/** 每个来源的结果先按 snippet 长度归一化、去重，再统一排序。 */
+function normalizeAll(groups, config, mode) {
+  const all = [];
+  for (const group of groups) {
+    for (const item of group.results) {
+      // 快速模式不读取 HN 讨论，只有标题的条目等于零证据：直接排除，
+      // 避免它占掉一个 [编号] 和约 130 字符的元数据。
+      if (mode === 'quick' && item.titleOnly) continue;
+      all.push({ ...item, provider: item.provider || group.id });
+    }
+  }
+  return mergeResults(all, { limit: 40, maxSnippetChars: config.maxSnippetChars });
+}
+
+function rankPlan(list, { query, enQuery, config }) {
+  return rankResults(list, {
+    query,
+    translations: enQuery ? [enQuery] : [],
+    limit: config.maxResults,
+    maxPerProvider: config.maxPerProvider ?? 2,
+    minScore: config.minRelevance ?? 0.28,
+  });
+}
+
 /**
  * 执行一次联网资料检索。
- * @returns Promise<{ok, query, mode, provider?, providers?, results?, attempts?, errors?, reason?, cached?}>
+ * @returns Promise<{ok, skipped?, query, mode, plan?, provider?, providers?, results?, attempts?, errors?, reason?, cached?}>
  */
 export async function runWebSearch(text, options = {}) {
   const {
@@ -121,9 +163,15 @@ export async function runWebSearch(text, options = {}) {
   const query = analyzed.query;
   const mode = prefs?.mode === 'smart' ? 'smart' : 'quick';
   if (currentAnalysis.blocked || analyzed.blocked) {
-    return { ok: false, query: '', mode, reason: currentAnalysis.reason || analyzed.reason, attempts: [] };
+    return { ok: false, blocked: true, query: '', mode, reason: currentAnalysis.reason || analyzed.reason, attempts: [] };
   }
-  if (!query) return { ok: false, query: '', mode, reason: '没有可安全外发的问题文本可用于检索', attempts: [] };
+  // 纯代码 / 空白 / 寒暄：不发任何请求，界面应显示「已跳过」而不是「失败」。
+  if (!query) {
+    return { ok: false, skipped: true, query: '', mode, reason: '没有需要联网检索的文本（纯代码或空白）', attempts: [] };
+  }
+  if (isTrivialQuery(query)) {
+    return { ok: false, skipped: true, query, mode, reason: '寒暄或极短消息，无需联网检索', attempts: [] };
+  }
   if (!config?.enabled) return { ok: false, query, mode, reason: '站点已关闭联网资料检索', attempts: [] };
   if (!prefs?.enabled) return { ok: false, query, mode, reason: '联网资料检索未开启', attempts: [] };
 
@@ -132,12 +180,21 @@ export async function runWebSearch(text, options = {}) {
 
   const nowMs = Date.now();
   const ttlMs = Math.max(0, Number(options.cacheTtlMs ?? config.cacheTtlMs ?? 0) || 0);
-  const key = cacheKey(query, mode, config, settings, targets);
+  const timeoutMs = options.timeoutMs ?? config.timeoutMs ?? DEFAULT_WEB_SEARCH.timeoutMs;
+  const totalTimeoutMs = options.totalTimeoutMs ?? config.totalTimeoutMs ?? DEFAULT_WEB_SEARCH.totalTimeoutMs;
+
+  // ---- 跨语言查询规划：翻译（保留意图）→ 技术片段 → 维基条目名 ----
+  const cjkQuery = hasCjk(query);
+  const keywordQuery = searchKeywords(query) || query;
+  const needEn = cjkQuery && targets.some((t) => EN_ONLY_PROVIDERS.has(t.id) || t.id === 'wikipedia');
+  let enQuery = cjkQuery ? composeEnQuery(keywordQuery) : '';
+  let enSource = '';
+  if (enQuery) enSource = translateQuery(keywordQuery) ? 'glossary' : 'fragment';
+
+  const key = cacheKey(query, mode, config, settings, targets, enQuery);
   const cached = readCache(cache, key, ttlMs, nowMs);
   if (cached) return { ...cached, cached: true };
 
-  const timeoutMs = options.timeoutMs ?? config.timeoutMs ?? DEFAULT_WEB_SEARCH.timeoutMs;
-  const totalTimeoutMs = options.totalTimeoutMs ?? config.totalTimeoutMs ?? DEFAULT_WEB_SEARCH.totalTimeoutMs;
   const controller = new AbortController();
   let deadlineHit = false;
   const forwardOuterAbort = () => controller.abort(outerSignal?.reason);
@@ -145,29 +202,26 @@ export async function runWebSearch(text, options = {}) {
     if (outerSignal.aborted) throw makeAbortError(outerSignal);
     outerSignal.addEventListener?.('abort', forwardOuterAbort, { once: true });
   }
+  const startedAt = Date.now();
   const deadline = setTimeout(() => {
     deadlineHit = true;
     controller.abort(new Error('联网资料检索总超时'));
   }, Math.max(1000, totalTimeoutMs));
   const signal = controller.signal;
+  const remainingMs = () => Math.max(1000, Math.min(timeoutMs, totalTimeoutMs - (Date.now() - startedAt)));
 
   try {
     const errors = [];
     const attempts = [];
 
-    // ---- 跨语言解析（仅中文查询） ----
-    // 英文源只接受可靠的英文查询：优先本地术语表；没有命中时用维基百科
-    // langlinks 做免费、免密钥、CORS 开放的翻译（一次请求，页面级短缓存）。
-    // 两者都拿不到时跳过英文源——绝不把中文原句发给注定看不懂的接口。
-    const cjkQuery = hasCjk(query);
-    const keywordQuery = searchKeywords(query) || query;
-    const needEnQuery = cjkQuery && targets.some((t) => EN_ONLY_PROVIDERS.has(t.id) || t.id === 'wikipedia');
-    let enQuery = needEnQuery ? translateQuery(keywordQuery) : '';
-    if (needEnQuery && !enQuery) {
-      const langKey = JSON.stringify({ langlink: query, lang: config.wikipedia?.lang || 'zh' });
+    // 术语表与技术片段都没有英文时，才用维基 langlinks 兜底（一次请求 + 页面缓存）。
+    // langlinks 内部会校验首条命中的相关性，避免把无关条目的英文名发给所有英文源。
+    if (needEn && !enQuery) {
+      const langKey = JSON.stringify({ langlink: keywordQuery, lang: config.wikipedia?.lang || 'zh' });
       const langCached = readCache(cache, langKey, ttlMs, nowMs);
       if (langCached) {
         enQuery = langCached.en || '';
+        if (enQuery) enSource = 'langlinks';
       } else {
         try {
           enQuery = await awaitWithSignal(
@@ -176,10 +230,11 @@ export async function runWebSearch(text, options = {}) {
               lang: config.wikipedia?.lang || 'zh',
               fetchImpl,
               signal,
-              timeoutMs,
+              timeoutMs: remainingMs(),
             }),
             signal,
           );
+          if (enQuery) enSource = 'langlinks';
           writeCache(cache, langKey, ttlMs, nowMs, { en: enQuery });
         } catch (err) {
           if (outerSignal?.aborted) throw makeAbortError(outerSignal);
@@ -195,7 +250,10 @@ export async function runWebSearch(text, options = {}) {
           return Promise.resolve({ __skipped: CJK_SKIP_MESSAGE });
         }
         return awaitWithSignal(
-          runProvider(target.id, providerOptions(target.id, { query, enQuery, url: target.url, config, settings, fetchImpl, signal, timeoutMs })),
+          runProvider(
+            target.id,
+            providerOptions(target.id, { query, enQuery, url: target.url, config, settings, fetchImpl, signal, timeoutMs }),
+          ),
           signal,
         );
       }),
@@ -203,7 +261,6 @@ export async function runWebSearch(text, options = {}) {
     if (outerSignal?.aborted) throw makeAbortError(outerSignal);
 
     const groups = [];
-    const relevanceQuery = keywordQuery;
     settled.forEach((outcome, i) => {
       const id = targets[i].id;
       if (outcome.status === 'fulfilled') {
@@ -211,11 +268,7 @@ export async function runWebSearch(text, options = {}) {
           attempts.push({ id, status: 'skipped', count: 0, message: outcome.value.__skipped });
           return;
         }
-        const results = filterRelevantResults(
-          relevanceQuery,
-          mergeResults(outcome.value, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars }),
-          { translations: enQuery ? [enQuery] : [] },
-        );
+        const results = Array.isArray(outcome.value) ? outcome.value : [];
         if (results.length) {
           attempts.push({ id, status: 'ok', count: results.length });
           groups.push({ id, results });
@@ -231,34 +284,55 @@ export async function runWebSearch(text, options = {}) {
       }
     });
 
-    const merged = interleaveByProvider(groups, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars });
-    if (!merged.length) {
+    // 两种模式都补正文，差别只在页数与是否读 HN 讨论。
+    const pages = Math.max(0, Number(mode === 'smart' ? config.smart?.maxPages : config.quick?.maxPages) || 0);
+
+    // 统一归一化 → 相关性排序 → 取前 N（不再按来源轮流坐庄）。
+    const ranked = rankPlan(normalizeAll(groups, config, mode), { query: keywordQuery, enQuery, config });
+    if (!ranked.length) {
       // 报错文案去重：四个源同时“没有相关结果”不该复读四遍；
       // 来源自己的具体诊断（如 SearXNG 返回 HTTP 503）排在通用文案前面。
       const messages = [...new Set(errors.map((error) => error.message).filter(Boolean))];
       const ordered = [...messages.filter((m) => m !== '没有相关结果'), ...messages.filter((m) => m === '没有相关结果')];
       const reason = deadlineHit
         ? '联网资料检索总超时，未拿到可用结果'
-        : ordered.slice(0, 3).join('；') || '资料检索失败';
-      return { ok: false, query, mode, reason, attempts, errors };
+        : groups.length
+          ? '检索到的候选与问题相关性不足或没有可读正文，未达到资料门槛'
+          : ordered.slice(0, 3).join('；') || '资料检索失败';
+      return { ok: false, query, mode, plan: { keyword: keywordQuery, en: enQuery, enSource, providers: groups.map((g) => g.id), pages }, reason, attempts, errors };
     }
 
-    let results = merged;
-    if (mode === 'smart' && !deadlineHit) {
+    let results = ranked;
+    if (pages > 0 && !deadlineHit) {
       try {
-        results = mergeResults(
-          await awaitWithSignal(
-            enrichWithExtracts(merged, {
-              maxPages: config.smart?.maxPages ?? 0,
-              readerTemplate: settings.readerTemplate || config.smart?.readerTemplate || '',
-              stackexchangeSite: config.stackexchange?.site,
-              fetchImpl,
-              signal,
-              timeoutMs,
-            }),
+        const enriched = await awaitWithSignal(
+          enrichWithExtracts(ranked, {
+            maxPages: pages,
+            readerTemplate: settings.readerTemplate || config.smart?.readerTemplate || '',
+            stackexchangeSite: config.stackexchange?.site,
+            includeHackerNews: mode === 'smart',
+            includeWikipedia: true,
+            includeStackExchange: true,
+            fetchImpl,
             signal,
-          ),
-          { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars },
+            timeoutMs: remainingMs(),
+          }),
+          signal,
+        );
+        // 正文到手后重新算分：有正文的条目通常更值得占编号。
+        const enrichedList = mergeResults(enriched, { limit: 40, maxSnippetChars: config.maxSnippetChars }).filter(
+          // 补正文后仍然只有标题（HN 无帖文/评论）的条目没有证据价值，不占编号。
+          (item) => !(item.titleOnly && !item.extract),
+        );
+        results = rankResults(
+          enrichedList,
+          {
+            query: keywordQuery,
+            translations: enQuery ? [enQuery] : [],
+            limit: config.maxResults,
+            maxPerProvider: config.maxPerProvider ?? 2,
+            minScore: config.minRelevance ?? 0.28,
+          },
         );
       } catch (err) {
         if (outerSignal?.aborted) throw makeAbortError(outerSignal);
@@ -267,12 +341,33 @@ export async function runWebSearch(text, options = {}) {
       }
     }
 
+    // 补正文后可能把「只有标题」的候选全部排除：此时宁可明说没有可用资料，
+    // 也不要返回一个 ok=true 但 results=[] 的“成功”结果。
+    if (!results.length) {
+      return {
+        ok: false,
+        query,
+        mode,
+        plan: { keyword: keywordQuery, en: enQuery, enSource, providers: groups.map((g) => g.id), pages },
+        reason: '检索到的候选没有可读正文或摘要，本条回答未使用资料',
+        attempts,
+        errors,
+      };
+    }
+
     const result = {
       ok: true,
       query,
       mode,
-      provider: groups[0]?.id,
-      providers: groups.map((group) => group.id),
+      plan: {
+        keyword: keywordQuery,
+        en: enQuery,
+        enSource,
+        providers: groups.map((group) => group.id),
+        pages,
+      },
+      provider: results[0]?.provider || groups[0]?.id,
+      providers: [...new Set(results.map((item) => item.provider).filter(Boolean))],
       results,
       attempts,
       errors,

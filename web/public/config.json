@@ -264,7 +264,8 @@
       "fallbackLang": "en"
     },
     "stackexchange": {
-      "site": "stackoverflow"
+      "site": "stackoverflow",
+      "acceptedOnly": true
     },
     "searxng": {
       "baseUrl": ""
@@ -273,12 +274,17 @@
       "endpoint": ""
     },
     "smart": {
-      "maxPages": 3,
+      "maxPages": 5,
       "readerTemplate": ""
     },
     "maxContextChars": {
-      "quick": 2400,
-      "smart": 4800
+      "quick": 3200,
+      "smart": 6000
+    },
+    "maxPerProvider": 2,
+    "minRelevance": 0.28,
+    "quick": {
+      "maxPages": 2
     }
   },
   "imageModels": [

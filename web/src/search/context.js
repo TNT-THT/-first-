@@ -6,6 +6,8 @@
  * 清理控制字符、边界标记和常见提示注入语句。
  */
 
+import { scoreResult, textTokens } from './query.js';
+
 export const MAX_SOURCE_URL_CHARS = 2048;
 
 /** 同时用于本地 WebLLM 与远程后端的高优先级防提示注入守则。 */
@@ -117,6 +119,8 @@ export function normalizeResult(result, { maxSnippetChars = 240 } = {}) {
     ...(extract ? { extract } : {}),
     ...(publishedAt ? { publishedAt } : {}),
     ...(evidenceKind ? { evidenceKind } : {}),
+    // 只有标题的条目（HN story 没有正文）在排序时降权，并在没有讨论摘录时排除。
+    ...(result?.titleOnly ? { titleOnly: true } : {}),
     provider,
   };
   // 这些字段只给深入检索的 provider 使用，永远不直接拼入模型资料块。
@@ -165,6 +169,82 @@ export function interleaveByProvider(groups, { limit = 5, maxSnippetChars = 240 
       if (out.length >= Math.max(1, limit)) break;
     }
     if (!added) break;
+  }
+  return out;
+}
+
+/**
+ * 按相关性排序并做来源配额：分数来自 query.js 的加权术语覆盖，
+ * 来源权重修正「HN 标题 / 维基条目 / SO 答案」的证据价值差异。
+ *
+ * 与 interleaveByProvider 的区别：不再「每个来源轮流坐庄、同权占编号」，
+ * 而是先看相关性，再保证来源多样性（默认每源最多 2 条）。
+ * 来源自己的排序仍被信任：每个来源的最高分条目即使低于门槛也会保留 1 条，
+ * 避免「一个词都没命中」的极端情况下把整个来源误杀。
+ */
+const PROVIDER_WEIGHT = {
+  custom: 1.08,
+  searxng: 1.08,
+  stackexchange: 1.05,
+  wikipedia: 1,
+  duckduckgo: 0.95,
+  hackernews: 0.6,
+};
+
+export function rankResults(
+  results,
+  { query = '', translations = [], limit = 5, maxPerProvider = 2, minScore = 0.28 } = {},
+) {
+  const items = (Array.isArray(results) ? results : [])
+    .map((r, index) => {
+      const score = query ? scoreResult(query, r, { translations }) : 1;
+      const provider = String(r?.provider || '');
+      const weight = PROVIDER_WEIGHT[provider] ?? 0.9;
+      const titleOnlyPenalty = r?.titleOnly && !r?.extract ? 0.45 : 1;
+      const bodyBonus = r?.extract ? 1.05 : 1;
+      return { result: r, index, score, rankScore: score * weight * titleOnlyPenalty * bodyBonus };
+    })
+    .filter((item) => item.result?.url);
+
+  const groups = new Map();
+  for (const item of items) {
+    const key = String(item.result.provider || '');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  const kept = [];
+  for (const list of groups.values()) {
+    list.sort((a, b) => b.rankScore - a.rankScore);
+    list.forEach((item, i) => {
+      if (i === 0 && item.score > 0.08) kept.push(item);
+      else if (item.score >= minScore) kept.push(item);
+    });
+  }
+
+  kept.sort((a, b) => b.rankScore - a.rankScore || a.index - b.index);
+  const used = new Map();
+  const seen = new Set();
+  const out = [];
+  const take = (item) => {
+    const key = String(item.result.url).replace(/#.*$/, '');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    out.push(item.result);
+    const provider = String(item.result.provider || '');
+    used.set(provider, (used.get(provider) || 0) + 1);
+    return true;
+  };
+  for (const item of kept) {
+    if (out.length >= Math.max(1, limit)) break;
+    const provider = String(item.result.provider || '');
+    if ((used.get(provider) || 0) >= Math.max(1, maxPerProvider)) continue;
+    take(item);
+  }
+  if (out.length < Math.max(1, limit)) {
+    for (const item of kept) {
+      if (out.length >= Math.max(1, limit)) break;
+      take(item);
+    }
   }
   return out;
 }
@@ -243,7 +323,9 @@ export function prepareSearchEvidence(
 
   for (let i = 0; i < list.length; i += 1) {
     const r = list[i];
-    const usesExtract = mode === 'smart' && !!r.extract;
+    // 正文（维基导言 / SO 答案 / 读者摘录）只要拿到就用：快速模式现在也会补前 N 条，
+    // 若仍按 mode==='smart' 才使用，会让补取到的答案白白浪费。
+    const usesExtract = !!r.extract;
     const rawBody = usesExtract ? r.extract : r.snippet;
     const body = sanitizeEvidenceText(rawBody, { maxChars: 800 }) || '（无可用摘录）';
     // 原始 URL 不进 prompt；域名只作来源提示，也必须有上限，避免畸形长主机名耗尽预算。
@@ -302,18 +384,43 @@ export function withSearchContext(messages, block) {
 }
 
 /** 分析回答中的编号引用；只能验证编号存在，不能伪装成事实蕴含验证。 */
-export function auditCitations(text, sourceCount) {
+export function auditCitations(text, sourceCount, { sources = [] } = {}) {
   const refs = new Set();
   const invalid = new Set();
   const max = Math.max(0, Number(sourceCount) || 0);
+  const value = String(text || '');
   const re = /\[(\d{1,4})\]/g;
   let match;
-  while ((match = re.exec(String(text || '')))) {
+  while ((match = re.exec(value))) {
     const n = Number(match[1]);
     if (n >= 1 && n <= max) refs.add(n);
     else invalid.add(n);
   }
-  return { references: [...refs].sort((a, b) => a - b), invalid: [...invalid].sort((a, b) => a - b) };
+  // 词面支持度：只能说明「这句话与该资料摘录几乎没有共同词」，
+  // 不能证明事实蕴含；界面把它标成「关联较弱，建议核实」而不是「错误」。
+  const weak = [];
+  const list = Array.isArray(sources) ? sources : [];
+  if (list.length) {
+    const sentences = value.split(/(?<=[。！？!?；;\n])/).filter((x) => x.trim());
+    for (const n of [...refs]) {
+      const source = list[n - 1];
+      if (!source) continue;
+      const sourceTokens = textTokens(`${source.title || ''} ${source.evidence || source.snippet || ''}`);
+      if (!sourceTokens.size) continue;
+      const cited = sentences.filter((sentence) => new RegExp(`\\[${n}\\]`).test(sentence));
+      if (!cited.length) continue;
+      const supported = cited.some((sentence) => {
+        for (const token of textTokens(sentence)) if (sourceTokens.has(token)) return true;
+        return false;
+      });
+      if (!supported) weak.push(n);
+    }
+  }
+  return {
+    references: [...refs].sort((a, b) => a - b),
+    invalid: [...invalid].sort((a, b) => a - b),
+    weak: [...new Set(weak)].sort((a, b) => a - b),
+  };
 }
 
 /** 界面用的来源状态列表。 */
@@ -331,6 +438,7 @@ export function describeAttempts(attempts, { providerLabels = {} } = {}) {
 export function searchSummary(search, { providerLabels = {} } = {}) {
   if (!search) return '';
   if (search.status === 'searching') return `正在检索公开资料：${oneLine(search.query, 40) || '…'}`;
+  if (search.status === 'skipped') return `本条无需联网检索（已跳过${search.reason ? `：${search.reason}` : ''}）`;
   if (search.status === 'error') return `联网资料检索失败${search.reason ? `（${search.reason}）` : ''}，本条回答未使用资料`;
   const n = Array.isArray(search.results) ? search.results.length : 0;
   if (!n) return '联网资料检索没有找到结果，本条回答未使用资料';

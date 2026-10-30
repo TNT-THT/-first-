@@ -7,7 +7,7 @@
  */
 
 import { cleanBaseUrl, readerUrlFor } from './config.js';
-import { filterRelevantResults, hasCjk, queryForLang } from './query.js';
+import { filterRelevantResults, hasCjk, queryForLang, scoreResult, textTokens } from './query.js';
 
 /**
  * 原生 fetch 会响应 AbortSignal，但可注入 fetch / 少数 polyfill 不一定会。
@@ -235,6 +235,9 @@ export function parseStackExchange(payload, { site = 'stackoverflow', maxSnippet
         site,
         ...(questionId !== null ? { questionId } : {}),
         ...(acceptedAnswerId !== null ? { acceptedAnswerId } : {}),
+        ...(Number.isFinite(Number(item?.score)) ? { voteScore: Number(item.score) } : {}),
+        ...(Number.isFinite(Number(item?.answer_count)) ? { answerCount: Number(item.answer_count) } : {}),
+        ...(item?.is_answered === true ? { isAnswered: true } : {}),
       };
     })
     .filter(Boolean);
@@ -251,13 +254,19 @@ export function parseHackerNews(payload, { maxSnippetChars = 240 } = {}) {
         (objectID ? `https://news.ycombinator.com/item?id=${encodeURIComponent(objectID)}` : '');
       const title = stripHtml(pick(hit, ['title', 'story_title']));
       if (!url || !title) return null;
-      const text = stripHtml(pick(hit, ['story_text', 'comment_text', 'title']));
+      const body = stripHtml(pick(hit, ['story_text', 'comment_text']));
+      // story 命中通常没有正文：snippet 会退化成标题本身。标记出来，
+      // 让排序把「零信息条目」降到后面，而不是和维基正文同权占编号。
+      const titleOnly = !body;
+      const text = body || title;
       return {
         title,
         url,
         snippet: text.slice(0, Math.max(0, maxSnippetChars)),
         publishedAt: sourceDate(hit),
         provider: 'hackernews',
+        ...(titleOnly ? { titleOnly: true } : {}),
+        ...(Number.isFinite(Number(hit?.points)) ? { voteScore: Number(hit.points) } : {}),
         ...(objectID ? { storyId: objectID } : {}),
       };
     })
@@ -294,6 +303,7 @@ export async function searchStackExchange({
   site = 'stackoverflow',
   limit = 5,
   maxSnippetChars = 240,
+  acceptedOnly = false,
   fetchImpl,
   signal,
   timeoutMs,
@@ -306,6 +316,9 @@ export async function searchStackExchange({
     pagesize: String(Math.min(10, Math.max(1, limit))),
     filter: 'withbody',
   });
+  // 有采纳答案的问题才可能提供「答案级」证据；快速模式也会补取一条答案，
+  // 因此先把明显没有答案的问题排除，避免拿一堆问题题干当资料。
+  if (acceptedOnly) params.set('accepted', 'True');
   const payload = await fetchJson(`https://api.stackexchange.com/2.3/search/advanced?${params}`, {
     fetchImpl,
     signal,
@@ -340,6 +353,9 @@ export async function searchWikipedia({
   enQuery = '',
   defaultLang = 'zh',
 } = {}) {
+  // 弱命中的保底结果先记下来，但不阻止继续尝试下一语言：
+  // 英文站常常能给出比中文站“只沾一个词”的条目更准确的答案。
+  let fallback = [];
   for (const lang of langs) {
     const glossaryResult = queryForLang(query, lang, { defaultLang });
     let localizedQuery = glossaryResult;
@@ -361,14 +377,17 @@ export async function searchWikipedia({
       origin: '*',
     });
     const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, { fetchImpl, signal, timeoutMs });
-    const results = filterRelevantResults(
-      localizedQuery,
-      parseWikipedia(payload, { lang }),
-      { translations: enQuery ? [enQuery] : [] },
-    );
+    const parsed = parseWikipedia(payload, { lang });
+    const results = filterRelevantResults(localizedQuery, parsed, { translations: enQuery ? [enQuery] : [] });
     if (results.length) return results;
+    // 对比类问题（“X 和 Y 的区别”）里，单个实体的条目只命中一个词就会被门槛挡住；
+    // 来源自己的第一条只要还有词面交集，就交给上层排序决定去留（每源最多 1 条）。
+    if (!fallback.length) {
+      const top = parsed[0];
+      if (top && scoreResult(localizedQuery, top, { translations: enQuery ? [enQuery] : [] }) > 0.05) fallback = [top];
+    }
   }
-  return [];
+  return fallback;
 }
 
 /**
@@ -393,8 +412,15 @@ export async function resolveEnQuery({ query, lang = 'zh', fetchImpl, signal, ti
   const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, { fetchImpl, signal, timeoutMs });
   const pages = payload?.query?.pages;
   if (!pages || typeof pages !== 'object') return '';
+  const wanted = textTokens(trimmed);
   for (const page of Object.values(pages)) {
     if (!page || typeof page !== 'object' || !Array.isArray(page.langlinks)) continue;
+    // 维基搜索按 OR 匹配返回首条命中；不校验相关性就把它的英文名发给 SO/HN，
+    // 会把整轮英文检索带到无关主题上（见评估报告 P0-3）。
+    const pageTokens = textTokens(`${page.title || ''} ${page.snippet || ''}`);
+    let overlap = 0;
+    for (const token of wanted) if (pageTokens.has(token)) overlap += 1;
+    if (wanted.size && overlap / wanted.size < 0.2) continue;
     const link = page.langlinks.find((item) => item?.lang === 'en');
     const title = typeof link?.['*'] === 'string' ? link['*'] : typeof link?.title === 'string' ? link.title : '';
     if (title.trim()) return stripHtml(title).slice(0, 120);
@@ -620,16 +646,26 @@ async function mapWithConcurrency(items, concurrency, worker) {
  */
 export async function enrichWithExtracts(
   results,
-  { maxPages = 3, readerTemplate = '', stackexchangeSite = 'stackoverflow', fetchImpl, signal, timeoutMs } = {},
+  {
+    maxPages = 3,
+    readerTemplate = '',
+    stackexchangeSite = 'stackoverflow',
+    includeHackerNews = true,
+    includeWikipedia = true,
+    includeStackExchange = true,
+    fetchImpl,
+    signal,
+    timeoutMs,
+  } = {},
 ) {
   const list = Array.isArray(results) ? results.slice(0, Math.max(0, maxPages)) : [];
   if (!list.length) return Array.isArray(results) ? results : [];
   const out = results.map((r) => ({ ...r }));
   try {
     await Promise.all([
-      enrichWikipediaExtracts(out, list, { fetchImpl, signal, timeoutMs }),
-      enrichStackExchangeAnswers(out, list, { site: stackexchangeSite, fetchImpl, signal, timeoutMs }),
-      enrichHackerNewsDiscussions(out, list, { fetchImpl, signal, timeoutMs }),
+      includeWikipedia ? enrichWikipediaExtracts(out, list, { fetchImpl, signal, timeoutMs }) : null,
+      includeStackExchange ? enrichStackExchangeAnswers(out, list, { site: stackexchangeSite, fetchImpl, signal, timeoutMs }) : null,
+      includeHackerNews ? enrichHackerNewsDiscussions(out, list, { fetchImpl, signal, timeoutMs }) : null,
     ]);
   } catch (err) {
     if (globallyAborted(signal)) throw err;

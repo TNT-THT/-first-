@@ -19,7 +19,11 @@ import {
   buildSearchQuery,
   filterRelevantResults,
   searchInputForTurn,
+  composeEnQuery,
+  isSearchWorthwhile,
+  isTrivialQuery,
   queryForLang,
+  scoreResult,
   searchKeywords,
   translateQuery,
   wikipediaLangs,
@@ -46,6 +50,7 @@ import {
   describeAttempts,
   interleaveByProvider,
   mergeResults,
+  rankResults,
   prepareSearchEvidence,
   sanitizeUrl,
   sanitizeEvidenceText,
@@ -129,8 +134,13 @@ test('站点配置的数值夹到允许范围，未知搜索源被丢弃', () =>
     ['stackexchange', 'hackernews', 'duckduckgo'],
   );
   assert.equal(cfg.wikipedia.lang, 'ZH-CN');
-  assert.equal(cfg.maxContextChars.quick, 400);
-  assert.equal(cfg.maxContextChars.smart, 16000);
+  assert.equal(cfg.maxContextChars.quick, 800);
+  assert.equal(cfg.maxContextChars.smart, 20000);
+  assert.equal(cfg.maxPerProvider, 2);
+  assert.equal(cfg.minRelevance, 0.28);
+  assert.equal(cfg.quick.maxPages, 2);
+  assert.equal(cfg.smart.maxPages, 5);
+  assert.equal(cfg.stackexchange.acceptedOnly, true);
 });
 
 test('服务地址限制为 HTTPS 或本机 HTTP；正文模板保留拼接边界', () => {
@@ -408,13 +418,18 @@ test('超长 URL 被拒绝，疑似提示注入文本在进入资料块前被过
   assert.equal(block.includes('ignore previous instructions'), false);
 });
 
-test('深入检索优先使用正文摘要', () => {
+test('只要拿到正文就优先使用正文（两种模式一致），没有正文才退回摘要', () => {
   const results = [{ title: 'A', url: 'https://a.example.com', snippet: '短摘要', extract: '更长的正文摘要' }];
-  const block = buildSearchBlock(results, { query: 'q', mode: 'smart' });
-  assert.match(block, /更长的正文摘要/);
+  const smart = buildSearchBlock(results, { query: 'q', mode: 'smart' });
+  assert.match(smart, /更长的正文摘要/);
+  // 快速模式现在也会补取前 N 条正文，因此同样应使用正文而不是丢掉它。
   const quick = buildSearchBlock(results, { query: 'q', mode: 'quick' });
-  assert.match(quick, /短摘要/);
-  assert.equal(quick.includes('更长的正文摘要'), false);
+  assert.match(quick, /更长的正文摘要/);
+  const snippetOnly = buildSearchBlock([{ title: 'B', url: 'https://b.example.com', snippet: '只有摘要' }], {
+    query: 'q',
+    mode: 'quick',
+  });
+  assert.match(snippetOnly, /只有摘要/);
 });
 
 test('资料块只拼到最后一条用户消息，且不修改原数组', () => {
@@ -747,11 +762,11 @@ test('中文问题在英文站回退时用翻译后的查询（同一个请求�
   assert.equal(queryForLang('binary search', 'en'), 'binary search');
   assert.equal(queryForLang('', 'en'), '');
   // 常见刷题术语有明确词典翻译；其他残留中文的查询仍不会硬翻
-  assert.equal(translateQuery('有向图最短路径'), '有向图 shortest path');
+  assert.equal(translateQuery('有向图最短路径'), 'directed graph shortest path');
   assert.equal(translateQuery('完全未知的中文专名'), '');
 });
 
-test('请求次数不变：每个免费来源每次提问只发一个请求', async () => {
+test('每个免费来源一次搜索请求；正文补充另算一次，且总数可预期', async () => {
   const urls = [];
   const fetchImpl = async (url) => {
     urls.push(String(url));
@@ -767,7 +782,9 @@ test('请求次数不变：每个免费来源每次提问只发一个请求', as
     fetchImpl,
   });
   assert.equal(res.ok, true);
-  assert.equal(urls.length, 3, '三个来源各一个请求');
+  // 三个来源各一次搜索 + 快速模式补取前 2 条的维基导言（1 个批量请求）。
+  assert.equal(urls.length, 4, '3 次搜索 + 1 次导言补充');
+  assert.equal(urls.filter((u) => u.includes('prop=extracts')).length, 1);
   // 查询已改写成关键词
   assert.ok(urls.some((u) => u.includes(encodeURIComponent('二分查找'))));
   assert.ok(urls.some((u) => u.includes(encodeURIComponent('Nobel Prize in Physics'))) === false, '英文站没有回退时不翻');
@@ -790,11 +807,13 @@ test('维基百科中文站没有结果时用英文站回退：中文查询翻�
     fetchImpl,
   });
   assert.equal(res.ok, true);
-  assert.equal(urls.length, 2, '中/英文站各一个请求');
-  assert.match(urls[0], /zh\.wikipedia\.org/);
-  assert.match(urls[1], /en\.wikipedia\.org/);
+  const searches = urls.filter((u) => u.includes('list=search'));
+  assert.equal(searches.length, 2, '中/英文站各一次搜索');
+  assert.equal(urls.filter((u) => u.includes('prop=extracts')).length, 1, '英文结果补一次导言');
+  assert.match(searches[0], /zh\.wikipedia\.org/);
+  assert.match(searches[1], /en\.wikipedia\.org/);
   assert.equal(
-    new URL(urls[1]).searchParams.get('srsearch'),
+    new URL(searches[1]).searchParams.get('srsearch'),
     '2026 Nobel Prize in Physics',
     '英文站用的是翻译后的查询',
   );
@@ -883,7 +902,7 @@ test('资料块标明检索时间而不把“今天”伪装成来源时效，�
   assert.match(block, /检索时间（浏览器本地）：2026-10-30 09:05/);
   assert.match(block, /日期：2020-01-02/);
   assert.match(block, /可能错误、过时/);
-  assert.deepEqual(auditCitations('结论见 [1] 和 [99]', 2), { references: [1], invalid: [99] });
+  assert.deepEqual(auditCitations('结论见 [1] 和 [99]', 2), { references: [1], invalid: [99], weak: [] });
 });
 
 
@@ -1003,11 +1022,13 @@ test('runWebSearch 尊重开关并使用仅页面内的短缓存', async () => {
 
   const cache = createSearchCache();
   const first = await runWebSearch('二分查找', { config: cfg, prefs: { enabled: true, mode: 'quick' }, fetchImpl, cache });
-  const second = await runWebSearch('二分查找', { config: cfg, prefs: { enabled: true, mode: 'quick' }, fetchImpl, cache });
   assert.equal(first.ok, true);
+  const afterFirst = calls;
+  assert.ok(afterFirst >= 1);
+  const second = await runWebSearch('二分查找', { config: cfg, prefs: { enabled: true, mode: 'quick' }, fetchImpl, cache });
   assert.equal(second.ok, true);
   assert.equal(second.cached, true);
-  assert.equal(calls, 1);
+  assert.equal(calls, afterFirst, '缓存命中不再发请求');
 });
 
 test('总超时会停止慢资料源、保留已到手的部分资料且不缓存超时快照', async () => {
@@ -1136,15 +1157,15 @@ test('词典没命中的中文概念用 langlinks 翻译后请求 SO/HN 与英�
     const u = String(url);
     urls.push(u);
     if (u.includes('generator=search')) {
-      return { ok: true, json: async () => ({ query: { pages: { 1: { title: '红黑树', langlinks: [{ lang: 'en', '*': 'Red–black tree' }] } } } }) };
+      return { ok: true, json: async () => ({ query: { pages: { 1: { title: '卡尔曼滤波', langlinks: [{ lang: 'en', '*': 'Kalman filter' }] } } } }) };
     }
     if (u.includes('zh.wikipedia.org')) return { ok: true, json: async () => ({ query: { search: [] } }) };
-    if (u.includes('en.wikipedia.org')) return { ok: true, json: async () => ({ query: { search: [{ title: 'Red–black tree', snippet: 'self-balancing binary search tree' }] } }) };
-    if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => ({ items: [{ title: 'Red–black tree deletion', link: 'https://so.example/q/1', body: 'rotations' }] }) };
+    if (u.includes('en.wikipedia.org')) return { ok: true, json: async () => ({ query: { search: [{ title: 'Kalman filter', snippet: 'Kalman filtering estimates the state of a linear dynamic system' }] } }) };
+    if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => ({ items: [{ title: 'Kalman filter tuning', link: 'https://so.example/q/1', body: 'noise covariance tuning' }] }) };
     if (u.includes('hn.algolia.com')) return { ok: true, json: async () => ({ hits: [] }) };
     throw new Error(u);
   };
-  const res = await runWebSearch('红黑树是怎么保持平衡的？', {
+  const res = await runWebSearch('卡尔曼滤波怎么调参？', {
     config: normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews'] }),
     prefs: { enabled: true, mode: 'quick' },
     fetchImpl,
@@ -1153,12 +1174,12 @@ test('词典没命中的中文概念用 langlinks 翻译后请求 SO/HN 与英�
   // langlink 翻译恰好一次请求
   assert.equal(urls.filter((u) => u.includes('generator=search')).length, 1);
   // SO / 英文维基收到的是英文查询，不再是中文原句
-  const soUrl = urls.find((u) => u.includes('api.stackexchange.com'));
-  assert.ok(new URL(soUrl).searchParams.get('q').includes('Red'), 'SO 收到英文查询');
-  const enUrl = urls.find((u) => u.includes('en.wikipedia.org'));
-  assert.match(new URL(enUrl).searchParams.get('srsearch'), /Red/);
+  const soUrl = urls.find((u) => u.includes('api.stackexchange.com') && !u.includes('/answers'));
+  assert.ok(new URL(soUrl).searchParams.get('q').includes('Kalman'), 'SO 收到英文查询');
+  const enUrl = urls.find((u) => u.includes('en.wikipedia.org') && u.includes('list=search'));
+  assert.match(new URL(enUrl).searchParams.get('srsearch'), /Kalman/);
   // 英文权威结果经翻译变体被接受，不再被整体误杀
-  assert.ok(res.results.some((r) => /Red–black tree/.test(r.title) || r.provider === 'wikipedia'));
+  assert.ok(res.results.some((r) => /Kalman/.test(r.title) || r.provider === 'wikipedia'));
 });
 
 test('翻译不可得时跳过英文源（不发请求、不外泄查询），中文源照常', async () => {
@@ -1244,8 +1265,272 @@ test('全部来源失败时原因不复读“没有相关结果”，具体诊�
 });
 
 // ---------- 回归：默认资料预算扩容 ----------
-test('默认资料块预算为快速 2400 / 深入 4800', () => {
+test('默认资料块预算为快速 3200 / 深入 6000（配合两种模式都取正文）', () => {
   const cfg = normalizeWebSearch(undefined);
-  assert.equal(cfg.maxContextChars.quick, 2400);
-  assert.equal(cfg.maxContextChars.smart, 4800);
+  assert.equal(cfg.maxContextChars.quick, 3200);
+  assert.equal(cfg.maxContextChars.smart, 6000);
+  assert.equal(cfg.quick.maxPages, 2);
+  assert.equal(cfg.smart.maxPages, 5);
+});
+
+// ---------- 回归：查询保真、相关性打分、排序与「已跳过」 ----------
+test('自然语言问题不再被当成 shell 命令（Python/Git/HTTP/docker 开头）', () => {
+  const cases = [
+    'Python 列表和元组的区别',
+    'Git rebase 和 merge 的区别',
+    'Node.js 和 Deno 的区别',
+    'npm 和 yarn 怎么选',
+    'http 和 https 的区别',
+    'set 和 dict 的区别',
+    'docker 容器启动就退出',
+    'npm install 很慢怎么办',
+  ];
+  for (const text of cases) {
+    assert.ok(buildSearchQuery(text).length > 0, `不应为空查询：${text}`);
+  }
+  // 真实命令仍然被移除（不因为放宽自然语言判断而外发命令/凭据）
+  assert.equal(buildSearchQuery('git status'), '');
+  assert.equal(buildSearchQuery('docker run -it ubuntu bash'), '');
+  assert.equal(buildSearchQuery('curl -H "Authorization: Bearer sk-live-EXAMPLE_SECRET" https://api.example.test'), '');
+  // 英文自然语言提问不被误杀
+  assert.equal(buildSearchQuery('npm install fails with EACCES'), 'npm install fails with EACCES');
+  assert.equal(buildSearchQuery('git merge conflict resolution'), 'git merge conflict resolution');
+});
+
+test('短技术词与英文词形变化能命中（AI / Go / goroutines）', () => {
+  assert.ok(
+    scoreResult('AI 对齐问题是什么', { title: 'AI 对齐', snippet: '人工智能对齐研究如何让系统符合人类意图。' }) >= 0.3,
+  );
+  assert.ok(
+    scoreResult('Go 的 goroutine 和线程有什么区别', { title: 'Goroutines vs threads', snippet: 'Goroutines are multiplexed onto OS threads.' }, {
+      translations: ['Goroutine'],
+    }) >= 0.3,
+  );
+  // 无关的平衡树仍然被挡住
+  assert.ok(
+    scoreResult('红黑树是怎么保持平衡的', { title: 'B树', snippet: 'B树是一种平衡的多路查找树。' }) < 0.3,
+  );
+});
+
+test('相关性排序：按分数而非来源轮流坐庄，并限制单来源配额', () => {
+  const query = '二分查找';
+  const results = [
+    { title: '二分查找 - 维基百科', url: 'https://wiki.example/1', snippet: '二分查找是一种在有序数组中查找的算法', provider: 'wikipedia' },
+    { title: '二分查找 变体', url: 'https://wiki.example/2', snippet: '二分查找的边界条件', provider: 'wikipedia' },
+    { title: '二分查找 第三篇', url: 'https://wiki.example/3', snippet: '二分查找', provider: 'wikipedia' },
+    { title: 'How to implement binary search', url: 'https://so.example/1', snippet: '二分查找的实现与边界', provider: 'stackexchange' },
+    { title: 'Show HN: 二分查找可视化', url: 'https://hn.example/1', snippet: 'Show HN: 二分查找可视化', provider: 'hackernews', titleOnly: true },
+  ];
+  const ranked = rankResults(results, { query, limit: 3, maxPerProvider: 2 });
+  assert.equal(ranked.length, 3);
+  assert.ok(ranked.filter((r) => r.provider === 'wikipedia').length <= 2, '维基最多 2 条');
+  assert.ok(ranked.some((r) => r.provider === 'stackexchange'), '其他来源不应被挤掉');
+  // 只有标题的 HN 条目排在维基正文之后
+  const withHn = rankResults(results, { query, limit: 5, maxPerProvider: 2 });
+  const hnIndex = withHn.findIndex((r) => r.provider === 'hackernews');
+  const wikiIndex = withHn.findIndex((r) => r.provider === 'wikipedia');
+  assert.ok(hnIndex === -1 || hnIndex > wikiIndex, '标题条目不应排在正文之前');
+});
+
+test('langlinks 只接受与查询相关的首条命中，避免污染英文源', async () => {
+  const irrelevant = await resolveEnQuery({
+    query: 'segmentation fault 怎么解决',
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ query: { pages: { 1: { title: '微软雅黑', langlinks: [{ lang: 'en', '*': 'Microsoft YaHei' }] } } } }),
+    }),
+  });
+  assert.equal(irrelevant, '');
+  const relevant = await resolveEnQuery({
+    query: '段错误怎么解决',
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ query: { pages: { 1: { title: '段错误', langlinks: [{ lang: 'en', '*': 'Segmentation fault' }] } } } }),
+    }),
+  });
+  assert.equal(relevant, 'Segmentation fault');
+});
+
+test('英文查询优先级：完整翻译（保留意图）→ 技术片段 → 维基条目名', () => {
+  assert.equal(composeEnQuery('红黑树是怎么保持平衡的'), 'red-black tree maintain balance');
+  assert.equal(composeEnQuery('为什么 CUDA out of memory'), 'CUDA out of memory');
+  assert.equal(composeEnQuery('卡尔曼滤波怎么调参', { topic: 'Kalman filter' }), 'Kalman filter');
+});
+
+test('快速模式也会补取维基导言与 SO 答案，而不只是题干', async () => {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('prop=extracts')) {
+      return {
+        ok: true,
+        json: async () => ({
+          query: { pages: { 1: { title: '红黑树', extract: '红黑树通过给节点着色并约束路径颜色来保持平衡，插入删除后用旋转与重新着色恢复性质。' } } },
+        }),
+      };
+    }
+    if (u.includes('zh.wikipedia.org')) {
+      return {
+        ok: true,
+        json: async () => ({ query: { search: [{ title: '红黑树', snippet: '红黑树是一种自平衡二叉查找树。' }] } }),
+      };
+    }
+    if (u.includes('/answers')) {
+      return {
+        ok: true,
+        json: async () => ({ items: [{ question_id: 123, answer_id: 456, is_accepted: true, score: 20, body: '<p>Rotations and recolouring keep the red-black invariants.</p>' }] }),
+      };
+    }
+    if (u.includes('api.stackexchange.com')) {
+      return {
+        ok: true,
+        json: async () => ({
+          items: [{ title: 'How does a red-black tree stay balanced?', link: 'https://so.example/q/123', body: 'red-black tree balance', question_id: 123, accepted_answer_id: 456 }],
+        }),
+      };
+    }
+    if (u.includes('hn.algolia.com')) return { ok: true, json: async () => ({ hits: [] }) };
+    throw new Error(u);
+  };
+  const res = await runWebSearch('红黑树是怎么保持平衡的？', {
+    config: normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews'] }),
+    prefs: { enabled: true, mode: 'quick' },
+    fetchImpl,
+  });
+  assert.equal(res.ok, true);
+  const kinds = res.results.map((r) => r.evidenceKind || '');
+  assert.ok(kinds.includes('维基百科导言'), `应有维基导言：${kinds.join('/')}`);
+  assert.ok(kinds.includes('Stack Overflow 采纳答案'), `应有 SO 答案：${kinds.join('/')}`);
+  assert.ok(res.results.every((r) => r.provider !== 'hackernews'), '快速模式不把只有标题的 HN 条目当资料');
+});
+
+test('寒暄与纯代码消息：不发请求，状态为 skipped 而不是 error', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    throw new Error('不应请求');
+  };
+  const cfg = normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews'] });
+  const hello = await runWebSearch('你好', { config: cfg, prefs: { enabled: true, mode: 'quick' }, fetchImpl });
+  assert.equal(hello.ok, false);
+  assert.equal(hello.skipped, true);
+  assert.match(hello.reason, /寒暄|无需/);
+  const code = await runWebSearch('```py\nprint(1)\n```', { config: cfg, prefs: { enabled: true, mode: 'quick' }, fetchImpl });
+  assert.equal(code.skipped, true);
+  assert.equal(calls, 0, 'skipped 不应发起任何网络请求');
+  assert.match(searchSummary({ status: 'skipped', reason: '寒暄或极短消息' }), /已跳过/);
+  assert.equal(isSearchWorthwhile('你好').ok, false);
+  assert.equal(isSearchWorthwhile('二分查找的时间复杂度').ok, true);
+  assert.equal(isTrivialQuery('谢谢'), true);
+});
+
+test('隐私 fail-closed 覆盖连接串、命令行密码、云密钥与中文口令', () => {
+  const blocked = [
+    '帮我看看 mysql -u root -pSuperSecret123 为什么连不上',
+    'postgres://admin:hunter2@10.0.0.5:5432/prod 连不上',
+    '我的密码是 8f3a9c2b1d 但是登录失败',
+    'AKIAIOSFODNN7EXAMPLE 这个 access key 无效',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefgh 过期了',
+  ];
+  for (const text of blocked) {
+    const analyzed = analyzeSearchInput(text);
+    assert.equal(analyzed.blocked, true, text);
+    assert.equal(analyzed.query, '', text);
+  }
+  // 正常技术讨论不应被误判
+  for (const text of ['password 字段应该怎么加密存储', 'cookie 和 session 有什么区别', 'token 是什么，JWT 怎么用']) {
+    assert.equal(analyzeSearchInput(text).blocked, false, text);
+  }
+});
+
+test('引用审计：编号有效但与该资料几乎没有共同词时标为弱关联', () => {
+  const result = auditCitations('二分查找的时间复杂度是 O(log n) [1]。今天的天气很好 [2]。', 2, {
+    sources: [
+      { title: '二分查找', evidence: '二分查找是一种在有序数组中查找元素的算法。' },
+      { title: '二分查找', evidence: '二分查找是一种在有序数组中查找元素的算法。' },
+    ],
+  });
+  assert.deepEqual(result.references, [1, 2]);
+  assert.deepEqual(result.weak, [2]);
+});
+
+test('返回可解释的查询计划：术语表翻译优先，且不触发 langlinks 请求', async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('prop=extracts')) return { ok: true, json: async () => ({ query: { pages: {} } }) };
+    if (u.includes('zh.wikipedia.org')) {
+      return { ok: true, json: async () => ({ query: { search: [{ title: '红黑树', snippet: '红黑树是一种自平衡二叉查找树，通过旋转保持平衡。' }] } }) };
+    }
+    if (u.includes('/answers')) return { ok: true, json: async () => ({ items: [] }) };
+    if (u.includes('api.stackexchange.com')) {
+      return { ok: true, json: async () => ({ items: [{ title: 'red-black tree balance', link: 'https://so.example/q/1', body: 'rotations', question_id: 1, answer_count: 0 }] }) };
+    }
+    if (u.includes('hn.algolia.com')) return { ok: true, json: async () => ({ hits: [] }) };
+    throw new Error(u);
+  };
+  const res = await runWebSearch('红黑树是怎么保持平衡的？', {
+    config: normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews'] }),
+    prefs: { enabled: true, mode: 'quick' },
+    fetchImpl,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.plan.en, 'red-black tree maintain balance');
+  assert.equal(res.plan.enSource, 'glossary');
+  assert.equal(urls.filter((u) => u.includes('generator=search')).length, 0, '有词典翻译时不再请求 langlinks');
+  const soUrl = urls.find((u) => u.includes('api.stackexchange.com') && u.includes('/search/advanced'));
+  assert.match(new URL(soUrl).searchParams.get('q'), /red-black tree maintain balance/);
+  // 有采纳答案偏好的站点配置会体现在请求里
+  assert.equal(new URL(soUrl).searchParams.get('accepted'), 'True');
+});
+
+test('只有标题的 HN 条目不会占资料编号', async () => {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u.includes('hn.algolia.com') && /\/items\//.test(u)) return { ok: true, json: async () => ({ text: '', children: [] }) };
+    if (u.includes('hn.algolia.com')) {
+      return { ok: true, json: async () => ({ hits: [{ objectID: '1', title: 'Show HN: 二分查找可视化', url: 'https://hn.example/1' }] }) };
+    }
+    throw new Error(u);
+  };
+  for (const mode of ['quick', 'smart']) {
+    const res = await runWebSearch('二分查找', {
+      config: normalizeWebSearch({ providers: ['hackernews'] }),
+      prefs: { enabled: true, mode },
+      fetchImpl,
+    });
+    assert.equal(res.ok, false, `${mode}：没有正文时不应声称成功`);
+    assert.match(res.reason, /没有/);
+    assert.equal((res.results || []).length, 0);
+  }
+});
+
+test('中文站的弱命中保底不会阻止英文站回退', async () => {
+  const urls = [];
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes('prop=extracts')) return { ok: true, json: async () => ({ query: { pages: {} } }) };
+    if (u.includes('zh.wikipedia.org')) {
+      // 只沾到一个词：不应作为最终答案，也不应阻止英文站
+      return { ok: true, json: async () => ({ query: { search: [{ title: '查找', snippet: '查找是指搜索数据。' }] } }) };
+    }
+    if (u.includes('en.wikipedia.org')) {
+      return {
+        ok: true,
+        json: async () => ({
+          query: { search: [{ title: 'Binary search', snippet: 'Binary search runs in O(log n); time complexity analysis.' }] },
+        }),
+      };
+    }
+    throw new Error(u);
+  };
+  const res = await runWebSearch('二分查找的时间复杂度', {
+    config: normalizeWebSearch({ providers: ['wikipedia'], wikipedia: { lang: 'zh', fallbackLang: 'en' } }),
+    prefs: { enabled: true, mode: 'quick' },
+    fetchImpl,
+  });
+  assert.equal(res.ok, true);
+  assert.ok(urls.some((u) => u.includes('en.wikipedia.org')), '应回退到英文站');
+  assert.equal(res.results[0].title, 'Binary search');
 });
