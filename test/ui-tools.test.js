@@ -2,7 +2,7 @@
 //
 // 这里不模拟 WebGPU（本机模型无法在 Node 中加载），只验证界面逻辑：
 // 工具面板的展开 / 收起、三张卡片、开关状态与本机偏好、窄屏下拉框与侧边栏同步、
-// 以及“发送 → 联网搜索 → 来源卡片 → 来源写入会话”的完整流程（搜索用假的 fetch）。
+// 以及“发送 → 联网资料检索 → 来源卡片 → 来源写入会话”的完整流程（搜索用假的 fetch）。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -67,6 +67,8 @@ globalThis.fetch = async (url) => {
   if (u.includes('wikipedia.org') && u.includes('list=search')) return { ok: true, json: async () => WIKI };
   if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => SO };
   if (u.includes('hn.algolia.com')) return { ok: true, json: async () => HN };
+  // 中国资料索引由 GitHub Actions 生成、随当前站点发布；空索引也应是透明的“无结果”。
+  if (u.includes('china-sources.json')) return { ok: true, json: async () => ({ schemaVersion: 1, sources: [{ status: 'ok' }], items: [] }) };
   if (u.includes('config.json')) return { ok: true, json: async () => config };
   throw new Error(`unexpected fetch: ${u}`);
 };
@@ -90,6 +92,17 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => [...document.querySelectorAll(sel)];
 const tick = (ms = 10) => new Promise((r) => setTimeout(r, ms));
 
+/** 等待异步 UI 状态，避免在并行运行其它测试文件时依赖固定 400ms 时序。 */
+async function waitFor(check, { timeout = 1500, interval = 20 } = {}) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const value = check();
+    if (value) return value;
+    await tick(interval);
+  }
+  return check();
+}
+
 test('启动后两个模型下拉框内容一致，窄屏下拉框可用', () => {
   assert.equal($('#login').hidden, true, '静态模式应直接进入聊天');
   assert.equal($('#main').hidden, false);
@@ -102,7 +115,7 @@ test('启动后两个模型下拉框内容一致，窄屏下拉框可用', () =>
 });
 
 test('工具面板：三行工具、可展开卡片、开关写入本机偏好', async () => {
-  assert.equal($('#toolList').children.length, 3, '应有思考模式、滑动窗口、联网搜索三项');
+  assert.equal($('#toolList').children.length, 3, '应有思考模式、滑动窗口、联网资料检索三项');
   assert.equal($('#toolsPanel').hidden, true);
   $('#toolsBtn').click();
   assert.equal($('#toolsPanel').hidden, false, '点击工具按钮应展开面板');
@@ -112,9 +125,10 @@ test('工具面板：三行工具、可展开卡片、开关写入本机偏好',
   $('#toolList [data-tool-open="search"]').click();
   assert.equal($('#toolCard').hidden, false, '点行应展开卡片');
   assert.match($('#toolCard').textContent, /搜索方式/);
-  // 开箱即用：三个免费来源，无需 API Key、无需服务器；进阶设置默认折叠
-  assert.match($('#toolCard').textContent, /无需 API Key、无需服务器/);
+  // 默认资料源不需要密钥，但产品不再把它们伪称为完整互联网资料检索。
   assert.match($('#toolCard').textContent, /维基百科、Stack Overflow、Hacker News/);
+  assert.match($('#toolCard').textContent, /不是完整互联网索引/);
+  assert.match($('#toolCard').textContent, /疑似密钥.*跳过联网检索/);
   // 非管理员不显示自建搜索源设置（用不上，也不该被误以为必须配置）
   assert.equal($('#toolCard .search-advanced'), null);
   assert.equal($$('#toolCard [data-search-mode]').length, 2);
@@ -125,7 +139,7 @@ test('工具面板：三行工具、可展开卡片、开关写入本机偏好',
   assert.equal(JSON.parse(localStorage.getItem('oj-ai.search.v1')).mode, 'smart');
   assert.equal($('#toolCard [data-search-mode="smart"]').getAttribute('aria-pressed'), 'true');
 
-  // 开启联网搜索：角标显示已开启数量
+  // 开启联网资料检索：角标显示已开启数量
   const searchSwitch = $('#toolList [data-tool-toggle="search"]');
   assert.equal(searchSwitch.disabled, false);
   searchSwitch.checked = true;
@@ -169,17 +183,15 @@ test('模型下拉框同步：在窄屏下拉框中切换，侧边栏跟着变�
   assert.equal(localStorage.getItem('oj-ai.defaultModel.v1'), target);
 });
 
-test('发送时先联网搜索：来源卡片显示在回答下方，并随会话保存', async () => {
+test('发送时先联网资料检索：来源卡片显示在回答下方，并随会话保存', async () => {
   $('#input').value = '二分查找的时间复杂度是多少？请解释一下这段代码为什么 TLE。';
   $('#composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-  await new Promise((r) => setTimeout(r, 400));
-
-  const assistant = [...document.querySelectorAll('.msg.assistant')].pop();
+  const assistant = await waitFor(() => [...document.querySelectorAll('.msg.assistant')].pop());
   assert.ok(assistant, '应出现助手消息');
-  const card = assistant.querySelector('.search-card');
-  assert.ok(card, '回答下方应出现搜索来源卡片');
-  // 三个免费来源并行请求并合并，摘要里列出全部贡献了结果的来源
-  assert.match(card.querySelector('summary').textContent, /智能搜索：3 条结果（维基百科 \+ Stack Overflow \+ Hacker News）/);
+  const card = await waitFor(() => assistant.querySelector('.search-card')?.dataset.key?.startsWith('done|') && assistant.querySelector('.search-card'));
+  assert.ok(card, '回答下方应出现资料来源卡片');
+  // 公开 API 与同站中国资料索引并行；摘要同时披露静态索引本轮没有匹配结果。
+  assert.match(card.querySelector('summary').textContent, /深入检索：3 条资料（维基百科 \+ Stack Overflow \+ Hacker News；中国资料索引（GitHub 更新）（无结果））/);
   const links = [...card.querySelectorAll('.search-sources a')];
   assert.equal(links.length, 3);
   assert.equal(links[0].textContent, '二分查找');
@@ -187,12 +199,13 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
   assert.equal(links[1].getAttribute('href'), 'https://stackoverflow.com/questions/1');
   assert.equal(links[2].getAttribute('href'), 'https://example.com/bs');
 
-  // “各来源情况”：多来源时默认折叠列出，让人看到确实搜了三个网站
+  // “各来源情况”：多来源时默认折叠列出，让人看到各公开 API 与静态索引均被检查
   const statusBox = card.querySelector('.search-attempts-box');
   assert.ok(statusBox, '多来源时应显示各来源情况');
   const statuses = [...statusBox.querySelectorAll('.search-attempts li')].map((li) => li.textContent);
-  assert.equal(statuses.length, 3);
-  assert.ok(statuses.every((t) => /返回 \d+ 条结果/.test(t)), statuses.join('/'));
+  assert.equal(statuses.length, 4);
+  assert.ok(statuses.slice(0, 3).every((t) => /返回 \d+ 条资料/.test(t)), statuses.join('/'));
+  assert.equal(statuses[3], '中国资料索引（GitHub 更新）：没有相关结果');
 
   // 来源清单写入本机会话：刷新页面后仍能回看
   const store = JSON.parse(localStorage.getItem('oj-ai.sessions.v1'));
@@ -209,6 +222,7 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
       ['wikipedia', 'ok'],
       ['stackexchange', 'ok'],
       ['hackernews', 'ok'],
+      ['china-static', 'empty'],
     ],
   );
 
@@ -216,11 +230,11 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
   assert.match(assistant.textContent, /WebGPU/);
 });
 
-test('联网搜索全部失败时：卡片写明每个来源的错误与网络提示，回答照常生成', async () => {
+test('联网资料检索全部失败时：卡片写明每个来源的错误与网络提示，回答照常生成', async () => {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.includes('wikipedia.org') || u.includes('api.stackexchange.com') || u.includes('hn.algolia.com')) {
+    if (u.includes('wikipedia.org') || u.includes('api.stackexchange.com') || u.includes('hn.algolia.com') || u.includes('china-sources.json')) {
       throw new TypeError('Failed to fetch');
     }
     if (u.includes('config.json')) return { ok: true, json: async () => config };
@@ -238,18 +252,18 @@ test('联网搜索全部失败时：卡片写明每个来源的错误与网络�
     document.body.click();
     $('#input').value = '二分查找的时间复杂度？';
     $('#composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 400));
 
-    const assistant = [...document.querySelectorAll('.msg.assistant')].pop();
-    const card = assistant.querySelector('.search-card');
-    assert.ok(card, '失败时也应显示来源卡片');
+    const assistant = await waitFor(() => [...document.querySelectorAll('.msg.assistant')].pop());
+    const card = await waitFor(() => assistant?.querySelector('.search-card')?.dataset.key?.startsWith('error|') && assistant.querySelector('.search-card'));
+    assert.ok(card, '失败时也应显示资料来源卡片');
     assert.equal(card.classList.contains('is-error'), true);
-    assert.match(card.querySelector('summary').textContent, /联网搜索失败/);
+    assert.match(card.querySelector('summary').textContent, /联网资料检索未使用/);
     const failures = [...card.querySelectorAll('.search-failures li')].map((li) => li.textContent);
-    assert.equal(failures.length, 3);
+    assert.equal(failures.length, 4);
     assert.ok(failures.some((t) => t.startsWith('维基百科：')));
     assert.ok(failures.some((t) => t.startsWith('Stack Overflow：')));
-    assert.match(card.textContent, /境外/);
+    assert.ok(failures.some((t) => t.startsWith('中国资料索引（GitHub 更新）：')));
+    assert.match(card.textContent, /公开 API 与 GitHub 定时生成/);
   } finally {
     globalThis.fetch = realFetch;
     window.fetch = realFetch;
@@ -265,6 +279,7 @@ test('部分来源无结果 / 失败时：卡片列出各来源情况，回答�
     }
     if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => ({ items: [] }) };
     if (u.includes('hn.algolia.com')) throw new TypeError('Failed to fetch');
+    if (u.includes('china-sources.json')) return { ok: true, json: async () => ({ schemaVersion: 1, sources: [{ status: 'ok' }], items: [] }) };
     if (u.includes('config.json')) return { ok: true, json: async () => config };
     throw new Error(`unexpected fetch: ${u}`);
   };
@@ -272,26 +287,26 @@ test('部分来源无结果 / 失败时：卡片列出各来源情况，回答�
   try {
     $('#input').value = '二分查找的时间复杂度？';
     $('#composer').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
-    await new Promise((r) => setTimeout(r, 400));
 
-    const assistant = [...document.querySelectorAll('.msg.assistant')].pop();
-    const card = assistant.querySelector('.search-card');
-    assert.ok(card, '有结果时也应显示来源卡片');
+    const assistant = await waitFor(() => [...document.querySelectorAll('.msg.assistant')].pop());
+    const card = await waitFor(() => assistant?.querySelector('.search-card')?.dataset.key?.startsWith('done|') && assistant.querySelector('.search-card'));
+    assert.ok(card, '有结果时也应显示资料来源卡片');
     assert.equal(card.classList.contains('is-error'), false);
 
-    // 只有维基百科有结果，但卡片明确列出另外两个来源的空/失败状态
+    // 只有维基百科有结果，但卡片明确列出其余公开 API 与 GitHub 静态索引的状态。
     const statuses = [...card.querySelectorAll('.search-attempts li')].map((li) => li.textContent);
-    assert.equal(statuses.length, 3);
-    assert.equal(statuses[0], '维基百科：返回 1 条结果');
-    assert.equal(statuses[1], 'Stack Overflow：没有结果');
-    assert.match(statuses[2], /^Hacker News：请求失败/);
+    assert.equal(statuses.length, 4);
+    assert.equal(statuses[0], '维基百科：返回 1 条资料');
+    assert.equal(statuses[1], 'Stack Overflow：没有相关结果');
+    assert.match(statuses[2], /^Hacker News：(请求失败|Failed to fetch)/);
+    assert.equal(statuses[3], '中国资料索引（GitHub 更新）：没有相关结果');
 
     // 状态随会话保存，刷新后仍能看到“为什么只有一个来源”
     const store = JSON.parse(localStorage.getItem('oj-ai.sessions.v1'));
     const saved = store.sessions[0].messages.filter((m) => m.role === 'assistant' && m.search).pop();
     assert.deepEqual(
       saved.search.attempts.map((a) => a.status),
-      ['ok', 'empty', 'error'],
+      ['ok', 'empty', 'error', 'empty'],
     );
   } finally {
     globalThis.fetch = realFetch;

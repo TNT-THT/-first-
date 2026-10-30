@@ -252,10 +252,13 @@
     "maxResults": 5,
     "maxSnippetChars": 240,
     "timeoutMs": 8000,
+    "totalTimeoutMs": 12000,
+    "cacheTtlMs": 300000,
     "providers": [
       "wikipedia",
       "stackexchange",
-      "hackernews"
+      "hackernews",
+      "china-static"
     ],
     "wikipedia": {
       "lang": "zh",

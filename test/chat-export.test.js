@@ -51,7 +51,7 @@ test('多行固定提示逐行加引用符号', () => {
   assert.match(md, /> 系统提示：第一行\n>\n?> 第二行|> 系统提示：第一行\n> 第二行/);
 });
 
-test('联网搜索的来源作为参考链接附在对应回答之后', () => {
+test('联网资料检索的来源作为参考链接附在对应回答之后', () => {
   const md = buildConversationMarkdown(
     {
       title: 't',

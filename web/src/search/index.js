@@ -1,33 +1,52 @@
 /**
- * 联网搜索的编排（纯逻辑，fetch 与存储可注入，便于测试）。
+ * 联网资料检索的编排（纯逻辑，fetch 与缓存可注入）。
  *
- * **前提：没有 API Key，也没有独立服务器。**
- * - 免费来源（维基百科、Stack Overflow、Hacker News）并行请求、合并去重，任何一个失败都不影响其它；
- * - 管理员另填了 SearXNG / 自定义接口时，先用它们（能搜整个网页），拿不到结果再用免费来源；
- * - 智能搜索（smart）在结果上再补一段正文摘要。
- *
- * 隐私：搜索请求直接从浏览器发给搜索服务，只包含提取出的查询词，
- * 不发送对话历史、模型设置或任何密钥。
- *
- * **请求次数不变**：每个来源每次提问只发一个请求（维基百科原有的中/英文站回退仍算两次），
- * 这里只是把每个来源的结果状态（成功 / 无结果 / 失败）记录下来，供界面显示用。
+ * - 默认资料源与管理员配置源并行请求、合并去重；任一源不能独占答案；
+ * - 深入模式补取维基导言、Stack Overflow 回答、HN 讨论摘录；
+ * - 单个请求与全局检索各有超时；成功结果可使用页面内短缓存；
+ * - 查询经过敏感信息检查，疑似凭据绝不外发。
  */
 
-import { DEFAULT_WEB_SEARCH, planAdvanced, planKeyless, resolveSearchPrefs } from './config.js';
-import { buildSearchQuery, filterRelevantResults, searchKeywords, wikipediaLangs } from './query.js';
+import { DEFAULT_WEB_SEARCH, planProviders, resolveSearchPrefs } from './config.js';
+import { analyzeSearchInput, filterRelevantResults, searchKeywords, wikipediaLangs } from './query.js';
 import { enrichWithExtracts, runProvider } from './providers.js';
 import { interleaveByProvider, mergeResults } from './context.js';
 
-function isAbort(err, signal) {
-  return !!signal?.aborted || err?.name === 'AbortError';
+function makeAbortError(signal) {
+  return Object.assign(new Error(signal?.reason?.message || '已取消'), { name: 'AbortError' });
 }
 
+/** 不假设底层 fetch 一定兑现 AbortSignal，确保全局 deadline 不会无限等待。 */
+function awaitWithSignal(value, signal) {
+  if (!signal) return Promise.resolve(value);
+  if (signal.aborted) return Promise.reject(makeAbortError(signal));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(makeAbortError(signal));
+    };
+    const cleanup = () => signal.removeEventListener?.('abort', onAbort);
+    signal.addEventListener?.('abort', onAbort, { once: true });
+    Promise.resolve(value).then(
+      (result) => {
+        cleanup();
+        resolve(result);
+      },
+      (err) => {
+        cleanup();
+        reject(err);
+      },
+    );
+  });
+}
+
+function clone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
 
 function providerOptions(id, { query, url, config, settings, fetchImpl, signal, timeoutMs }) {
   return {
-    // 用一个“关键词式”查询（去掉疑问句式），每个来源依旧只发一个请求
     query: searchKeywords(query) || query,
-    // wikipedia 的 langs / stackexchange 的 site 都来自站点配置
     langs: id === 'wikipedia' ? wikipediaLangs(query, config.wikipedia) : undefined,
     site: id === 'stackexchange' ? config.stackexchange?.site : undefined,
     baseUrl: url,
@@ -41,13 +60,44 @@ function providerOptions(id, { query, url, config, settings, fetchImpl, signal, 
   };
 }
 
+function cacheKey(query, mode, config, settings, targets) {
+  return JSON.stringify({
+    query,
+    mode,
+    targets: targets.map((target) => [target.id, target.url || '']),
+    maxResults: config.maxResults,
+    maxSnippetChars: config.maxSnippetChars,
+    wikipedia: config.wikipedia,
+    stackexchange: config.stackexchange,
+    smart: mode === 'smart' ? { maxPages: config.smart?.maxPages, readerTemplate: settings.readerTemplate || config.smart?.readerTemplate || '' } : null,
+  });
+}
+
+/** 创建仅当前页面存活的短缓存；调用方不应把它持久化到 localStorage。 */
+export function createSearchCache() {
+  return new Map();
+}
+
+function readCache(cache, key, ttlMs, nowMs) {
+  if (!(cache instanceof Map) || !ttlMs) return null;
+  const entry = cache.get(key);
+  if (!entry || nowMs - entry.at > ttlMs) {
+    cache.delete(key);
+    return null;
+  }
+  return clone(entry.value);
+}
+
+function writeCache(cache, key, ttlMs, nowMs, value) {
+  if (!(cache instanceof Map) || !ttlMs) return;
+  cache.set(key, { at: nowMs, value: clone(value) });
+  // 防止长会话无限增长；最近 30 个查询已足够覆盖“重试/重新生成”。
+  while (cache.size > 30) cache.delete(cache.keys().next().value);
+}
+
 /**
- * 执行一次联网搜索。
- * @param {string} text 用户的原消息
- * @param {{config?: object, prefs?: object, settings?: object, fetchImpl?: Function,
- *          signal?: AbortSignal, timeoutMs?: number}} options
- * @returns {Promise<{ok: boolean, query: string, mode: string, provider?: string, providers?: string[],
- *                    results?: object[], reason?: string, errors?: Array<{id: string, message: string}>}>}
+ * 执行一次联网资料检索。
+ * @returns Promise<{ok, query, mode, provider?, providers?, results?, attempts?, errors?, reason?, cached?}>
  */
 export async function runWebSearch(text, options = {}) {
   const {
@@ -55,133 +105,133 @@ export async function runWebSearch(text, options = {}) {
     prefs = resolveSearchPrefs(config),
     settings = {},
     fetchImpl,
-    signal,
-    now = new Date(),
+    signal: outerSignal,
+    cache,
   } = options;
-  const timeoutMs = options.timeoutMs ?? config.timeoutMs ?? DEFAULT_WEB_SEARCH.timeoutMs;
-
-  const query = buildSearchQuery(options.queryText || text);
-  const mode = prefs.mode === 'smart' ? 'smart' : 'quick';
-  if (!query) return { ok: false, query: '', mode, reason: '没有问题文本可用于搜索', attempts: [] };
-  if (!config?.enabled) return { ok: false, query, mode, reason: '站点已关闭联网搜索', attempts: [] };
-
-  const advanced = planAdvanced(config, settings);
-  const keyless = planKeyless(config);
-  if (!advanced.length && !keyless.length) {
-    return { ok: false, query, mode, reason: '没有可用的搜索源', attempts: [] };
+  // 即使短追问改用上一轮主题检索，也要先审查当前整条消息；不能因为它不会
+  // 成为查询词，就绕过“含凭据时完全不联网”的隐私承诺。
+  const currentAnalysis = analyzeSearchInput(text);
+  const analyzed = analyzeSearchInput(options.queryText || text);
+  const query = analyzed.query;
+  const mode = prefs?.mode === 'smart' ? 'smart' : 'quick';
+  if (currentAnalysis.blocked || analyzed.blocked) {
+    return { ok: false, query: '', mode, reason: currentAnalysis.reason || analyzed.reason, attempts: [] };
   }
+  if (!query) return { ok: false, query: '', mode, reason: '没有可安全外发的问题文本可用于检索', attempts: [] };
+  if (!config?.enabled) return { ok: false, query, mode, reason: '站点已关闭联网资料检索', attempts: [] };
+  if (!prefs?.enabled) return { ok: false, query, mode, reason: '联网资料检索未开启', attempts: [] };
 
-  const errors = [];
-  // 每个来源的结果状态：ok（有结果）/ empty（没有结果）/ error（请求失败）。
-  // 只用于界面显示“为什么只搜到一个来源”，不产生额外请求。
-  const attempts = [];
-  const finish = async (usable, providerIds) => {
-    const enriched =
-      mode === 'smart'
-        ? mergeResults(
-            await enrichWithExtracts(usable, {
+  const targets = planProviders(config, settings);
+  if (!targets.length) return { ok: false, query, mode, reason: '没有可用的资料源', attempts: [] };
+
+  const nowMs = Date.now();
+  const ttlMs = Math.max(0, Number(options.cacheTtlMs ?? config.cacheTtlMs ?? 0) || 0);
+  const key = cacheKey(query, mode, config, settings, targets);
+  const cached = readCache(cache, key, ttlMs, nowMs);
+  if (cached) return { ...cached, cached: true };
+
+  const timeoutMs = options.timeoutMs ?? config.timeoutMs ?? DEFAULT_WEB_SEARCH.timeoutMs;
+  const totalTimeoutMs = options.totalTimeoutMs ?? config.totalTimeoutMs ?? DEFAULT_WEB_SEARCH.totalTimeoutMs;
+  const controller = new AbortController();
+  let deadlineHit = false;
+  const forwardOuterAbort = () => controller.abort(outerSignal?.reason);
+  if (outerSignal) {
+    if (outerSignal.aborted) throw makeAbortError(outerSignal);
+    outerSignal.addEventListener?.('abort', forwardOuterAbort, { once: true });
+  }
+  const deadline = setTimeout(() => {
+    deadlineHit = true;
+    controller.abort(new Error('联网资料检索总超时'));
+  }, Math.max(1000, totalTimeoutMs));
+  const signal = controller.signal;
+
+  try {
+    const errors = [];
+    const attempts = [];
+    // 所有来源并发，避免“自定义源超时两次才开始默认源”的串行卡顿。
+    const settled = await Promise.allSettled(
+      targets.map((target) =>
+        awaitWithSignal(
+          runProvider(target.id, providerOptions(target.id, { query, url: target.url, config, settings, fetchImpl, signal, timeoutMs })),
+          signal,
+        ),
+      ),
+    );
+    if (outerSignal?.aborted) throw makeAbortError(outerSignal);
+
+    const groups = [];
+    const relevanceQuery = searchKeywords(query) || query;
+    settled.forEach((outcome, i) => {
+      const id = targets[i].id;
+      if (outcome.status === 'fulfilled') {
+        const results = filterRelevantResults(
+          relevanceQuery,
+          mergeResults(outcome.value, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars }),
+        );
+        if (results.length) {
+          attempts.push({ id, status: 'ok', count: results.length });
+          groups.push({ id, results });
+        } else {
+          attempts.push({ id, status: 'empty', count: 0 });
+          errors.push({ id, message: '没有相关结果' });
+        }
+      } else {
+        const timedOut = deadlineHit || signal.aborted || outcome.reason?.name === 'AbortError';
+        const message = deadlineHit || signal.aborted ? '本次检索总超时' : String(outcome.reason?.message || outcome.reason).slice(0, 120);
+        attempts.push({ id, status: timedOut ? 'timeout' : 'error', count: 0, message });
+        errors.push({ id, message });
+      }
+    });
+
+    const merged = interleaveByProvider(groups, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars });
+    if (!merged.length) {
+      const reason = deadlineHit
+        ? '联网资料检索总超时，未拿到可用结果'
+        : errors.map((error) => error.message).filter(Boolean).slice(0, 2).join('；') || '资料检索失败';
+      return { ok: false, query, mode, reason, attempts, errors };
+    }
+
+    let results = merged;
+    if (mode === 'smart' && !deadlineHit) {
+      try {
+        results = mergeResults(
+          await awaitWithSignal(
+            enrichWithExtracts(merged, {
               maxPages: config.smart?.maxPages ?? 0,
               readerTemplate: settings.readerTemplate || config.smart?.readerTemplate || '',
+              stackexchangeSite: config.stackexchange?.site,
               fetchImpl,
               signal,
               timeoutMs,
             }),
-            { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars },
-          )
-        : usable;
-    return {
+            signal,
+          ),
+          { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars },
+        );
+      } catch (err) {
+        if (outerSignal?.aborted) throw makeAbortError(outerSignal);
+        // 正文补充失败时保留已经检索到的摘要，不假装“深入资料”一定存在。
+        errors.push({ id: 'enrichment', message: deadlineHit ? '正文补充超时，已保留搜索摘要' : String(err?.message || err).slice(0, 120) });
+      }
+    }
+
+    const result = {
       ok: true,
       query,
       mode,
-      provider: providerIds[0],
-      providers: providerIds,
-      results: enriched,
+      provider: groups[0]?.id,
+      providers: groups.map((group) => group.id),
+      results,
       attempts,
       errors,
-      now,
+      now: new Date(nowMs).toISOString(),
+      ...(deadlineHit ? { partial: true } : {}),
     };
-  };
-
-  // 1) 进阶来源（需要管理员配置）：按优先级依次尝试，失败换下一个
-  const advancedResults = [];
-  for (const target of advanced) {
-    if (signal?.aborted) throw Object.assign(new Error('已取消'), { name: 'AbortError' });
-    try {
-      const raw = await runProvider(target.id, {
-        ...providerOptions(target.id, { query, url: target.url, config, settings, fetchImpl, signal, timeoutMs }),
-      });
-      const results = filterRelevantResults(
-        query,
-        mergeResults(raw, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars }),
-      );
-      if (results.length) {
-        attempts.push({ id: target.id, status: 'ok', count: results.length });
-        advancedResults.push({ id: target.id, results });
-        break; // 进阶来源通常已经覆盖整个网页，不再重复请求其它进阶来源
-      }
-      attempts.push({ id: target.id, status: 'empty', count: 0 });
-      errors.push({ id: target.id, message: '没有搜索结果' });
-    } catch (err) {
-      if (isAbort(err, signal)) throw err;
-      attempts.push({ id: target.id, status: 'error', count: 0, message: String(err?.message || err).slice(0, 120) });
-      errors.push({ id: target.id, message: err?.message || String(err) });
-    }
+    // 部分结果是超时快照，不缓存，避免下一次发送被旧的、不完整的来源列表固定住。
+    if (!deadlineHit) writeCache(cache, key, ttlMs, nowMs, result);
+    return result;
+  } finally {
+    clearTimeout(deadline);
+    outerSignal?.removeEventListener?.('abort', forwardOuterAbort);
   }
-  if (advancedResults.length) {
-    return finish(advancedResults[0].results, [advancedResults[0].id]);
-  }
-
-  // 2) 免费来源（免密钥、允许跨域）：并行请求，合并去重
-  if (!keyless.length) {
-    const reason = errors.map((e) => e.message).filter(Boolean).slice(0, 2).join('；');
-    return { ok: false, query, mode, reason: reason || '搜索失败', attempts, errors };
-  }
-  const settled = await Promise.allSettled(
-    keyless.map((target) =>
-      runProvider(
-        target.id,
-        providerOptions(target.id, { query, url: '', config, settings, fetchImpl, signal, timeoutMs }),
-      ),
-    ),
-  );
-  if (signal?.aborted) throw Object.assign(new Error('已取消'), { name: 'AbortError' });
-  const groups = [];
-  settled.forEach((outcome, i) => {
-    const id = keyless[i].id;
-    if (outcome.status === 'fulfilled') {
-      const results = filterRelevantResults(
-        query,
-        mergeResults(outcome.value, {
-          limit: config.maxResults,
-          maxSnippetChars: config.maxSnippetChars,
-        }),
-      );
-      if (results.length) {
-        attempts.push({ id, status: 'ok', count: results.length });
-        groups.push({ id, results });
-      } else {
-        attempts.push({ id, status: 'empty', count: 0 });
-        errors.push({ id, message: '没有搜索结果' });
-      }
-    } else {
-      attempts.push({
-        id,
-        status: 'error',
-        count: 0,
-        message: String(outcome.reason?.message || outcome.reason).slice(0, 120),
-      });
-      errors.push({ id, message: outcome.reason?.message || String(outcome.reason) });
-    }
-  });
-
-  // 各来源轮流取，避免某一来源占满全部名额
-  const merged = interleaveByProvider(groups, { limit: config.maxResults });
-  if (merged.length) {
-    return finish(
-      merged,
-      groups.map((g) => g.id),
-    );
-  }
-  const reason = errors.map((e) => e.message).filter(Boolean).slice(0, 2).join('；');
-  return { ok: false, query, mode, reason: reason || '搜索失败', attempts, errors };
 }

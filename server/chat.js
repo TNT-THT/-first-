@@ -1,3 +1,5 @@
+import { SEARCH_EVIDENCE_SYSTEM_GUARD } from '../web/src/search/context.js';
+
 export const LIMITS = {
   maxMessages: 60,
   maxMessageChars: 20000,
@@ -63,7 +65,7 @@ export async function proxyChatStream({ cfg, messages, res, signal }) {
       },
       body: JSON.stringify({
         model: cfg.llmModel,
-        messages: [{ role: 'system', content: cfg.systemPrompt }, ...messages],
+        messages: [{ role: 'system', content: `${cfg.systemPrompt}\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}` }, ...messages],
         temperature: cfg.llmTemperature,
         stream: true,
       }),

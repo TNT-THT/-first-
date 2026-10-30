@@ -99,6 +99,7 @@ import {
 } from './adaptation.js';
 import { buildConversationMarkdown, conversationFilename } from './chat-export.js';
 import {
+  cleanReaderTemplate,
   loadProviderSettings,
   loadSearchPrefs,
   normalizeWebSearch,
@@ -114,16 +115,17 @@ import {
 } from './search/config.js';
 import { buildSearchQuery, searchInputForTurn } from './search/query.js';
 import {
-  buildSearchBlock,
+  auditCitations,
   compactAttempts,
   compactSources,
   describeAttempts,
   hostOf,
+  prepareSearchEvidence,
   sanitizeUrl,
   searchSummary,
   withSearchContext,
 } from './search/context.js';
-import { runWebSearch } from './search/index.js';
+import { createSearchCache, runWebSearch } from './search/index.js';
 import {
   buildContext,
   createSession,
@@ -289,8 +291,8 @@ const state = {
   clearArmed: false,
   foldSessionId: null, // 当前折叠状态对应的会话
   visibleStart: 0, // 历史会话中第一条已渲染消息的下标（之前的消息折叠）
-  // 联网搜索：站点配置（config.json 的 webSearch）+ 本机偏好 + 管理员搜索源设置
-  search: { config: normalizeWebSearch(null), prefs: { enabled: false, mode: 'quick' }, settings: {} },
+  // 联网资料检索：站点配置 + 本机偏好 + 管理员来源设置；缓存仅保存在当前页面内存。
+  search: { config: normalizeWebSearch(null), prefs: { enabled: false, mode: 'quick' }, settings: {}, cache: createSearchCache() },
   toolCardId: null, // 工具面板中当前展开的卡片 id
 };
 
@@ -419,6 +421,8 @@ function paintAssistant(bubble, msg, { streaming = false, label = '正在思考�
   if (!parts.answer && streaming) {
     const hint = thinkingLive ? '正在思考…' : thinking ? '正在回答…' : label;
     answerEl.innerHTML = typingHtml(hint);
+    // 搜索发生在模型加载前；此时也要立刻展示检索状态，不能等模型产出首个 token。
+    paintSearchCard(bubble, msg);
     return;
   }
   let html = sanitize(renderMarkdown(parts.answer));
@@ -435,7 +439,7 @@ function paintAssistant(bubble, msg, { streaming = false, label = '正在思考�
 }
 
 /**
- * 联网搜索的来源卡片（回答下方，可折叠）。
+ * 联网资料检索的来源卡片（回答下方，可折叠）。
  * 搜索中显示进度；失败或没有结果时明确写出“本条回答未使用搜索结果”，避免用户误以为搜过了。
  * 标题、摘要、地址一律以纯文本写入，链接只允许 http(s)。
  */
@@ -460,13 +464,18 @@ function paintSearchCard(bubble, msg) {
   const results = Array.isArray(info.results) ? info.results : [];
   const done = info.status === 'done' && results.length > 0;
   const attempts = describeAttempts(info.attempts, { providerLabels: PROVIDER_LABELS });
+  const citations = auditCitations(msg.content, results.length);
   const key = [
     info.status,
     info.mode,
     info.query,
     results.length,
     info.reason || '',
-    attempts.map((a) => `${a.id}:${a.status}:${a.count}`).join(','),
+    info.cached ? 'cached' : '',
+    info.partial ? 'partial' : '',
+    citations.references.join(','),
+    citations.invalid.join(','),
+    attempts.map((a) => `${a.id}:${a.status}:${a.count}:${a.message}`).join(','),
   ].join('|');
   if (box.dataset.key === key) return;
   box.dataset.key = key;
@@ -476,8 +485,8 @@ function paintSearchCard(bubble, msg) {
   body.replaceChildren();
 
   if (info.status === 'searching') {
-    summary.textContent = `🌐 正在联网搜索「${info.query || '…'}」…`;
-    body.append(node('p', { class: 'muted small' }, '正在检索网页，结果会作为本条回答的参考。'));
+    summary.textContent = `🌐 正在检索公开资料「${info.query || '…'}」…`;
+    body.append(node('p', { class: 'muted small' }, '只会外发安全提取后的查询词；检测到疑似凭据时会跳过检索。'));
     box.open = true;
     return;
   }
@@ -488,26 +497,40 @@ function paintSearchCard(bubble, msg) {
       const url = sanitizeUrl(r.url);
       if (!url) continue;
       const host = hostOf(url);
-      // 标题为空（个别接口只返回正文）时用域名兜底，链接文字始终可见
       const title = String(r.title || '').trim() || host || url;
       const li = node('li', {});
       li.append(node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: title }));
       if (host && host !== title) li.append(node('span', { class: 'search-host' }, host));
+      if (r.sourceName) li.append(node('span', { class: 'search-host' }, `发布方：${r.sourceName}`));
+      if (r.publishedAt) li.append(node('span', { class: 'search-host' }, `资料日期：${String(r.publishedAt).slice(0, 10)}`));
+      if (r.indexUpdatedAt) li.append(node('span', { class: 'search-host' }, `索引更新：${String(r.indexUpdatedAt).slice(0, 10)}`));
+      if (r.evidenceKind) li.append(node('span', { class: 'search-host' }, `资料类型：${r.evidenceKind}`));
       if (String(r.snippet || '').trim()) li.append(node('span', { class: 'search-snippet' }, r.snippet));
+      // 透明展示模型实际收到的正文/答案摘录，而非只展示更短的搜索摘要。
+      if (String(r.evidence || '').trim() && r.evidence !== r.snippet) {
+        li.append(
+          node(
+            'details',
+            { class: 'search-evidence-box' },
+            node('summary', { class: 'muted small' }, `${r.evidenceKind || '模型使用的资料摘录'}（点开查看）`),
+            node('p', { class: 'search-snippet' }, r.evidence),
+          ),
+        );
+      }
       list.append(li);
     }
     body.append(list);
-    // 多来源时总是列出来（默认折叠）：既证明不是只搜了一个网站，
-    // 也能看清哪个来源无结果 / 失败，避免把“某站没有收录”误当成“事情没发生”。
     if (attempts.length >= 2) {
       const statusList = node('ul', { class: 'search-attempts' });
       for (const a of attempts) {
         const label =
           a.status === 'ok'
-            ? `返回 ${a.count} 条结果`
+            ? `返回 ${a.count} 条资料`
             : a.status === 'empty'
-              ? '没有结果'
-              : `请求失败${a.message ? `：${a.message}` : ''}`;
+              ? '没有相关结果'
+              : a.status === 'timeout'
+                ? `超时${a.message ? `：${a.message}` : ''}`
+                : `请求失败${a.message ? `：${a.message}` : ''}`;
         statusList.append(node('li', { class: `search-attempt-${a.status}` }, `${a.label}：${label}`));
       }
       body.append(
@@ -519,40 +542,48 @@ function paintSearchCard(bubble, msg) {
         ),
       );
     }
+    const citationNote = citations.references.length
+      ? `回答标注了资料 [${citations.references.join(']、[')}]。编号仅说明模型声称引用该资料，仍请打开来源核对。`
+      : '回答没有标注有效的 [编号] 引用；下列是检索候选，不能自动视为已被回答证实。';
+    body.append(node('p', { class: 'search-note' }, citationNote));
+    if (citations.invalid.length) {
+      body.append(node('p', { class: 'search-note' }, `回答出现不存在的资料编号：[${citations.invalid.join(']、[')}]。请勿把它当作有效引用。`));
+    }
     body.append(
       node(
         'p',
         { class: 'search-note' },
         info.mode === 'smart'
-          ? '智能搜索：已尝试抓取前几条结果的正文摘要。资料可能不完整，请自行核对；回答中的 [1]、[2] 对应上面的编号。'
-          : '快速搜索：只使用搜索结果摘要，未抓取网页正文。回答中的 [1]、[2] 对应上面的编号。',
+          ? `深入检索：优先补取维基导言、Stack Overflow 回答或 HN 讨论；其他来源只有在配置正文读取服务时才会补正文。${info.partial ? ' 本次到达总超时，已保留已拿到的资料。' : ''}`
+          : `快速检索：只使用资料源返回的摘要；它不是完整网页抓取，也不保证覆盖整个互联网。${info.partial ? ' 本次到达总超时，来源可能不完整。' : ''}`,
       ),
     );
     return;
   }
   summary.textContent =
     info.status === 'stopped'
-      ? '🌐 已取消联网搜索，本条回答未使用搜索结果'
+      ? '🌐 已取消联网资料检索，本条回答未使用外部资料'
       : info.status === 'error'
-        ? `🌐 联网搜索失败${info.reason ? `（${info.reason}）` : ''}，本条回答未使用搜索结果`
-        : '🌐 没有找到相关结果，本条回答未使用搜索结果';
+        ? `🌐 联网资料检索未使用${info.reason ? `（${info.reason}）` : ''}`
+        : '🌐 没有找到相关资料，本条回答未使用外部资料';
   const failed = attempts.filter((a) => a.status !== 'ok');
   if (info.status === 'error' && failed.length) {
     const ul = node('ul', { class: 'search-failures' });
     for (const a of failed) {
-      ul.append(node('li', {}, `${a.label}：${a.status === 'empty' ? '没有结果' : a.message || '请求失败'}`));
+      const status = a.status === 'empty' ? '没有相关结果' : a.status === 'timeout' ? '超时' : a.message || '请求失败';
+      ul.append(node('li', {}, `${a.label}：${status}`));
     }
     body.append(ul);
-    body.append(
-      node(
-        'p',
-        { class: 'muted small' },
-        '默认搜索源都是境外的公开接口；如果上面的错误都是网络类错误，说明当前网络访问不到它们。可以关闭联网搜索直接提问；需要搜索中文网页时，只能由管理员在“进阶（可选）：自建搜索源”里填一个自己能访问的地址（仍然不需要服务器之外的其它东西）。',
-      ),
-    );
-  } else {
-    body.append(node('p', { class: 'muted small' }, '可以换个说法再问，或在工具面板里改用“智能搜索”。'));
   }
+  body.append(
+    node(
+      'p',
+      { class: 'muted small' },
+      info.reason?.includes('凭据')
+        ? '消息仍会照常交给模型回答，但为保护隐私没有把任何查询发送到外部资料源。'
+        : '默认来源包含浏览器直连公开 API 与 GitHub 定时生成的中国资料快照；前者可能受网络、跨域或速率限制影响，后者可能暂未更新。需要更广泛网页覆盖时，请由部署者配置受信任的 SearXNG 或搜索代理。',
+    ),
+  );
 }
 
 /** 校验提示：列出命中的错误说法与对应的正确说法（用 textContent 写入，避免注入）。 */
@@ -1108,10 +1139,10 @@ async function send(rawText) {
     });
   };
 
-  // 本次提问的联网搜索资料块（只在本次请求中使用；历史里只保存来源清单）
+  // 本次提问的联网资料检索资料块（只在本次请求中使用；历史里只保存来源清单）
   let searchBlock = '';
   try {
-    // ---------- 联网搜索 ----------
+    // ---------- 联网资料检索 ----------
     // 先搜索再加载模型：搜索只需要网络，失败也不影响正常回答（会明确标注“未使用搜索结果”）
     if (shouldSearch()) {
       const previousUserText = session.messages
@@ -1121,34 +1152,52 @@ async function send(rawText) {
       const searchInput = searchInputForTurn(text, previousUserText);
       const query = buildSearchQuery(searchInput);
       assistantMsg.search = { status: 'searching', query, mode: state.search.prefs.mode };
-      paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在联网搜索…' });
-      showStatus(`正在联网搜索${query ? `：${query}` : '…'}`);
+      paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在联网资料检索…' });
+      showStatus(`正在联网资料检索${query ? `：${query}` : '…'}`);
       try {
         const res = await runWebSearch(text, {
           queryText: searchInput,
           config: state.search.config,
           prefs: state.search.prefs,
           settings: state.search.settings,
+          cache: state.search.cache,
           signal: controller.signal,
         });
         if (res.ok) {
-          assistantMsg.search = {
-            status: 'done',
+          // 资料块和历史卡必须使用同一组、同一长度的摘录；不能把被上下文预算裁掉的候选
+          // 伪装成模型已经看过的 [编号] 来源。
+          const evidence = prepareSearchEvidence(res.results, {
             query: res.query,
             mode: res.mode,
-            provider: res.provider,
-            providers: res.providers,
-            attempts: compactAttempts(res.attempts),
-            results: compactSources(res.results, { limit: state.search.config.maxResults }),
-            at: Date.now(),
-          };
-          searchBlock = buildSearchBlock(res.results, {
-            query: res.query,
-            mode: res.mode,
-            provider: PROVIDER_LABELS[res.provider] || res.provider,
+            now: res.now || new Date(),
             maxChars: state.search.config.maxContextChars[res.mode] || 1600,
           });
-          showStatus(`已完成联网搜索（${res.results.length} 个来源），正在生成回答…`);
+          if (!evidence.results.length) {
+            assistantMsg.search = {
+              status: 'error',
+              query: res.query,
+              mode: res.mode,
+              reason: '检索到的资料无法放入当前资料长度预算，本条回答未使用外部资料',
+              attempts: compactAttempts(res.attempts),
+            };
+          } else {
+            const evidenceProviders = [...new Set(evidence.results.map((item) => item.provider).filter(Boolean))];
+            assistantMsg.search = {
+              status: 'done',
+              query: res.query,
+              mode: res.mode,
+              provider: evidenceProviders[0] || res.provider,
+              providers: evidenceProviders,
+              attempts: compactAttempts(res.attempts),
+              results: compactSources(evidence.results, { limit: state.search.config.maxResults }),
+              at: Date.now(),
+              retrievedAt: res.now || new Date().toISOString(),
+              cached: !!res.cached,
+              partial: !!res.partial,
+            };
+            searchBlock = evidence.block;
+            showStatus(`已完成联网资料检索（${evidence.results.length} 条资料${res.cached ? '，使用页面缓存' : ''}），正在生成回答…`);
+          }
         } else {
           assistantMsg.search = {
             status: 'error',
@@ -1499,7 +1548,7 @@ function makeOption(value, label) {
   return opt;
 }
 
-// ---------- 工具面板（思考模式 / 滑动窗口 / 联网搜索） ----------
+// ---------- 工具面板（思考模式 / 滑动窗口 / 联网资料检索） ----------
 /*
  * 功能变多后，把这些开关统一收进输入框右侧的“工具”按钮：
  * 点开后是一列带开关的工具行，点某一行会在下方展开对应的说明卡片（参考 Qwen 网页端的工具选择）。
@@ -1553,12 +1602,12 @@ function toolDefs() {
     {
       id: 'search',
       icon: '🌐',
-      name: '联网搜索',
+      name: '联网资料检索',
       desc: searchOk
-        ? `${SEARCH_MODE_LABELS[state.search.prefs.mode] || '联网搜索'}：把网页结果作为参考`
+        ? `${SEARCH_MODE_LABELS[state.search.prefs.mode] || '联网资料检索'}：把公开资料作为参考`
         : cfg.enabled
-          ? '未配置可用的搜索源'
-          : '本站已关闭联网搜索',
+          ? '未配置可用的资料源'
+          : '本站已关闭联网资料检索',
       available: searchOk,
       enabled: () => !!state.search.prefs.enabled && searchOk,
       toggle: (on) => setSearchTool(on),
@@ -1623,7 +1672,7 @@ function refreshTools() {
   els.toolsBtn.classList.toggle('has-active', activeDefs.length > 0);
   els.toolsBtn.title = activeDefs.length
     ? `工具（已开启：${activeDefs.map((d) => d.name).join('、')}）`
-    : '工具：思考模式、滑动窗口、联网搜索';
+    : '工具：思考模式、滑动窗口、联网资料检索';
   const current = defs.find((d) => d.id === state.toolCardId);
   if (!current) closeToolCard();
   else renderToolCard(current);
@@ -1776,10 +1825,10 @@ function renderSearchCard() {
       node(
         'p',
         { class: 'muted small' },
-        '部署者已在 config.json 中关闭联网搜索（webSearch.enabled = false）。本机管理员也无法开启。',
+        '部署者已在 config.json 中关闭联网资料检索（webSearch.enabled = false）。本机管理员也无法开启。',
       ),
     );
-    return toolCardShell({ title: '联网搜索', state: '已关闭', body });
+    return toolCardShell({ title: '联网资料检索', state: '已关闭', body });
   }
 
   body.append(node('p', {}, '搜索方式：'));
@@ -1800,8 +1849,8 @@ function renderSearchCard() {
           'span',
           { class: 'search-mode-desc' },
           mode === 'quick'
-            ? '只用搜索结果摘要：快，一次请求'
-            : `再抓取前 ${cfg.smart.maxPages} 条结果的正文摘要：更准，稍慢`,
+            ? '只用公开资料源摘要：更快，但不是完整网页抓取'
+            : `补取前 ${cfg.smart.maxPages} 条的维基导言、Stack 回答或 HN 讨论：更完整，受总超时约束`,
         ),
       ),
     );
@@ -1817,16 +1866,16 @@ function renderSearchCard() {
       { class: 'muted small' },
       usable
         ? advanced.length
-          ? `搜索源：${names(advanced)}（优先，已在工具面板配置）→ 失败时用免费来源：${names(keyless) || '无'}。最多 ${cfg.maxResults} 条结果，超时 ${Math.round(cfg.timeoutMs / 1000)} 秒。`
-          : `搜索源（免费公开接口，无需 API Key、无需服务器，同时请求并合并）：${names(keyless) || '无'}。最多 ${cfg.maxResults} 条结果，超时 ${Math.round(cfg.timeoutMs / 1000)} 秒。`
-        : '没有可用的搜索源：请在 config.json 的 webSearch.providers 中启用维基百科等免费来源，或由管理员在下方填写 SearXNG / 自定义接口。',
+          ? `资料源：${names(advanced)} 与 ${names(keyless) || '无默认资料源'} 会并行交叉取样；单一自定义源不会独占答案。最多 ${cfg.maxResults} 条资料，单请求 ${Math.round(cfg.timeoutMs / 1000)} 秒、整次 ${Math.round(cfg.totalTimeoutMs / 1000)} 秒。`
+          : `资料源：${names(keyless) || '无'}。维基/Stack/HN 是浏览器直连公开 API；中国资料索引是 GitHub Actions 更新的同站静态快照。它们都不是完整互联网索引。最多 ${cfg.maxResults} 条资料，单请求 ${Math.round(cfg.timeoutMs / 1000)} 秒、整次 ${Math.round(cfg.totalTimeoutMs / 1000)} 秒。`
+        : '没有可用的资料源：请在 config.json 的 webSearch.providers 中启用维基百科等公开资料源，或由管理员在下方填写受信任的 SearXNG / 自定义接口。',
     ),
   );
   body.append(
     node(
       'p',
       { class: 'tool-note' },
-      '不需要 API Key，也不需要服务器：搜索请求从你的浏览器直接发给上面的公开接口，只带由本条问题提取的查询词，不发送对话历史、模型设置或任何密钥。搜索结果只用于当次回答，不会写进之后的上下文；来源会列在回答下方，可以点开查看。免费接口都在境外，访问不到时会在回答下方写明原因，不影响正常回答。',
+      '浏览器直连资料源会看到查询词与网络地址；不会发送对话历史或模型设置。中国资料索引则只从本站 GitHub Pages 读取定时快照，不会在提问时向原始中文站点发送查询，但可能有更新延迟。若消息含疑似密钥、授权头、私钥或环境变量，系统会完全跳过联网检索。默认资料源覆盖维基百科、Stack Overflow、Hacker News 与受限的中国 RSS 索引；它们不是完整网页搜索。页面缓存最多保留数分钟且不单独写入 localStorage；为便于回看，本轮查询、资料链接、摘录与来源状态会随本机聊天历史保存，删除会话或清空本机数据即可移除。',
     ),
   );
   if (prefs.enabled && usable) {
@@ -1842,7 +1891,7 @@ function renderSearchCard() {
     body.append(details);
   }
   return toolCardShell({
-    title: '联网搜索',
+    title: '联网资料检索',
     state: usable ? (prefs.enabled ? `已开启 · ${SEARCH_MODE_LABELS[prefs.mode]}` : '已关闭') : '不可用',
     body,
   });
@@ -1851,13 +1900,13 @@ function renderSearchCard() {
 /** 管理员：搜索源设置（仅本机 localStorage，不上传；与 config.json 的默认值叠加）。 */
 function renderSearchSettings() {
   const settings = state.search.settings;
-  const field = (labelText, key, placeholder) =>
+  const field = (labelText, key, placeholder, type = 'url') =>
     node(
       'label',
       { class: 'search-setting' },
       node('span', { class: 'small muted' }, labelText),
       node('input', {
-        type: 'url',
+        type,
         class: 'search-setting-input',
         'data-search-setting': key,
         placeholder,
@@ -1873,18 +1922,18 @@ function renderSearchSettings() {
     node(
       'p',
       { class: 'muted small' },
-      '默认的三个免费来源不需要任何配置。下面几项只在你想搜索“整个网页”时才需要填，保存在本机，不上传。',
+      '默认来源只是公开资料 API，不是完整网页搜索。想检索更广网页可填写受信任服务；设置仅保存在本机。HTTPS 必填，本机 localhost/127.0.0.1 可用 HTTP。',
     ),
     field('SearXNG 地址（需开启 format=json 与跨域）', 'searxngBase', 'https://searx.example.com'),
     field('自定义接口（返回 {results:[{title,url,snippet}]}）', 'customEndpoint', 'https://example.com/search'),
-    field('正文抓取模板（可选，智能搜索用，拼在原文地址前）', 'readerTemplate', 'https://r.jina.ai/'),
+    field('正文读取模板（可选，深入检索用；保留末尾 /，或使用 {url} 占位）', 'readerTemplate', 'https://r.jina.ai/', 'text'),
     node(
       'div',
       { class: 'search-setting-actions' },
       node('button', { type: 'button', class: 'btn ghost small', 'data-search-action': 'save' }, '保存'),
       node('button', { type: 'button', class: 'btn ghost small', 'data-search-action': 'test' }, '测试搜索'),
     ),
-    node('p', { class: 'tool-note' }, '维基百科不需要配置，除 SearXNG 与自定义接口外始终作为后备搜索源。'),
+    node('p', { class: 'tool-note' }, '进阶来源会和默认资料源并行交叉取样；正文读取服务会收到待读取页面的 URL，请只填写你信任的 HTTPS 服务。'),
     result,
   );
   return box;
@@ -1900,14 +1949,21 @@ function readSearchSettingInputs() {
 }
 
 async function saveSearchSettingsFromCard({ test = false } = {}) {
-  state.search.settings = readSearchSettingInputs();
-  saveProviderSettings(state.search.settings);
+  const raw = readSearchSettingInputs();
+  const invalidReader = !!raw.readerTemplate && !cleanReaderTemplate(raw.readerTemplate);
+  saveProviderSettings(raw);
+  // 读取规范化后的值：正文模板必须保留 / 或 {url} 拼接边界。
+  state.search.settings = loadProviderSettings();
+  state.search.cache.clear();
   // 卡片会按新设置重建（搜索源顺序可能变化），因此先刷新再取结果节点
   refreshTools();
   const target = els.toolCard.querySelector('.search-test-result');
   if (!test) {
-    if (target) target.textContent = '已保存（仅本机，不上传）。';
-    flashStatus('已保存搜索源设置（仅本机，不上传）。');
+    const message = invalidReader
+      ? '已保存可用设置；正文读取模板无效（仅允许 HTTPS 或本机 HTTP，且需以 /、?、&、=、: 结尾或包含 {url}），已忽略。'
+      : '已保存（仅本机，不上传；已清除本页检索缓存）。';
+    if (target) target.textContent = message;
+    flashStatus(message);
     return;
   }
   if (target) target.textContent = '正在测试…';
@@ -1959,15 +2015,15 @@ async function setSlidingTool(on) {
   );
 }
 
-/** 本次发送是否要走联网搜索（开关已开，且至少有一个可用搜索源）。 */
+/** 本次发送是否要走联网资料检索（开关已开，且至少有一个可用搜索源）。 */
 function shouldSearch() {
   return !!state.search.prefs.enabled && searchAvailable(state.search.config, state.search.settings);
 }
 
-/** 联网搜索开关：只改本机偏好，不影响引擎窗口，因此不需要重新加载模型。 */
+/** 联网资料检索开关：只改本机偏好，不影响引擎窗口，因此不需要重新加载模型。 */
 function setSearchTool(on) {
   if (on && !searchAvailable(state.search.config, state.search.settings)) {
-    showStatus('无法开启联网搜索：没有可用的搜索源。管理员可在工具面板中填写 SearXNG 或自定义接口。', { error: true });
+    showStatus('无法开启联网资料检索：没有可用的资料源。管理员可在工具面板中填写 SearXNG 或自定义接口。', { error: true });
     refreshTools();
     return;
   }
@@ -1976,8 +2032,8 @@ function setSearchTool(on) {
   refreshTools();
   flashStatus(
     on
-      ? `已开启${SEARCH_MODE_LABELS[state.search.prefs.mode]}：发送问题时会先搜索网页，再把结果作为参考，来源列在回答下方。`
-      : '已关闭联网搜索：之后的回答不再访问网络。',
+      ? `已开启${SEARCH_MODE_LABELS[state.search.prefs.mode]}：发送时会先检索公开资料，再把可审计摘录作为参考；疑似凭据会自动跳过联网。`
+      : '已关闭联网资料检索：之后的回答不再访问网络。',
   );
 }
 
@@ -3088,7 +3144,7 @@ els.historyBtn.addEventListener('click', () => {
   toggleHistory();
 });
 
-// ---------- 工具面板（思考模式 / 滑动窗口 / 联网搜索）的事件 ----------
+// ---------- 工具面板（思考模式 / 滑动窗口 / 联网资料检索）的事件 ----------
 els.toolsBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   toggleToolsPanel();
@@ -3121,7 +3177,7 @@ els.toolCard.addEventListener('click', (e) => {
     refreshTools();
     flashStatus(
       `已切换为${SEARCH_MODE_LABELS[state.search.prefs.mode]}（仅本机保存）：${
-        state.search.prefs.mode === 'smart' ? '会额外抓取正文摘要，资料更完整，稍慢一些。' : '只用搜索结果摘要，更快。'
+        state.search.prefs.mode === 'smart' ? '会补取维基导言、Stack 回答或 HN 讨论；已配置正文读取服务时才会读取其他网页，资料更完整但更慢。' : '只用资料源返回的摘要，更快。'
       }`,
     );
     return;
@@ -4275,7 +4331,7 @@ async function init() {
   els.loginTitle.textContent = appName;
   document.title = appName;
 
-  // 联网搜索：站点配置 + 本机偏好 + 管理员搜索源设置
+  // 联网资料检索：站点配置 + 本机偏好 + 管理员搜索源设置
   state.search.config = normalizeWebSearch(state.appConfig.webSearch);
   state.search.settings = loadProviderSettings();
   state.search.prefs = resolveSearchPrefs(state.search.config, loadSearchPrefs());

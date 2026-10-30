@@ -3,7 +3,7 @@
  *
  * - 只导出可见的消息：用户消息、AI 回答（标注回答的 AI 名称）、固定提示（以引用形式输出）。
  * - 不导出推理过程（thinking）与出错的消息，避免把临时内容当作对话记录。
- * - 联网搜索的来源（标题与链接）附在对应回答之后；搜索摘要不导出。
+ * - 联网资料检索的来源（标题与链接）附在对应回答之后；搜索摘要不导出。
  */
 
 function pad(n) {
@@ -57,7 +57,7 @@ export function buildConversationMarkdown(session, { now = new Date() } = {}) {
     } else {
       const head = m.modelLabel ? `## 回答（${m.modelLabel}）` : '## 回答';
       lines.push(head, '', content, '');
-      // 联网搜索的来源：只在当轮使用，导出时作为参考链接附在回答之后
+      // 联网资料检索的来源：只在当轮使用，导出时作为参考链接附在回答之后
       const sources = Array.isArray(m.search?.results) ? m.search.results.filter((r) => r?.url) : [];
       if (sources.length) {
         lines.push('参考来源：', '');

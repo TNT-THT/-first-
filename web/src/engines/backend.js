@@ -12,6 +12,7 @@ import {
 import { loadLocalModels, localRecords } from '../local-models.js';
 import { composeSystemPrompt, getModelParams } from '../adaptation.js';
 import { presetOverrides } from '../presets.js';
+import { SEARCH_EVIDENCE_SYSTEM_GUARD } from '../search/context.js';
 import { getThinkingPref, isReasoningModel, setThinkingPref } from '../reasoning.js';
 import { getSlidingPref, setSlidingPref } from '../sliding.js';
 import {
@@ -169,7 +170,10 @@ function createWebLLMBackend(cfg) {
     },
     async *stream({ messages, signal, onLoop }) {
       // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
-      const system = { role: 'system', content: composeSystemPrompt(cfg.systemPrompt, modelId) };
+      const system = {
+        role: 'system',
+        content: `${composeSystemPrompt(cfg.systemPrompt, modelId)}\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}`,
+      };
       const params = layeredOverrides(modelId);
       const repetitionPenalty = params.repetitionPenalty ?? cfg.repetitionPenalty ?? null;
       const thinkingOn = getThinkingPref();

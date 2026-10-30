@@ -1,28 +1,48 @@
 /**
- * 搜索源的实现（纯解析逻辑 + 可注入 fetch，便于测试）。
+ * 公开资料源的适配器（纯解析逻辑 + 可注入 fetch）。
  *
- * 这个功能的设计前提是：**没有 API Key，也没有独立服务器**。所有搜索都在浏览器里直接完成，
- * 因此只使用“公开、允许跨域、不需要密钥”的接口：
- *
- * | id | 接口 | 密钥 | 适用 |
- * |---|---|---|---|
- * | wikipedia | 维基百科 Action API（`origin=*`） | 不需要 | 概念、算法、数据结构 |
- * | stackexchange | Stack Exchange API 2.3（Stack Overflow） | 不需要 | 具体的编程问题、报错 |
- * | hackernews | HN Algolia Search API | 不需要 | 技术讨论、工具与经验 |
- * | duckduckgo | DuckDuckGo Instant Answer API | 不需要 | 常识性摘要（跨域支持不稳定，默认关闭） |
- * | searxng / custom | 自建服务 | 可选 | 想搜“整个网页”时，由管理员自己填地址（本机保存） |
- *
- * 前四个是默认的免费来源，会并行请求、合并去重；任何一个失败或跨域被拦都不影响其它来源。
- * 每个来源每次提问只发一个请求（维基百科在中文站没有结果时会再用英文站发一个，这是原有的语言回退）。
- *
- * 智能搜索（smart）在快速搜索的基础上再补一段正文：维基百科用 Action API 的 extracts，
- * Stack Exchange 直接用答案正文，Hacker News 用讨论文本；
- * 其他来源可以在设置里填一个“正文抓取模板”（例如 `https://r.jina.ai/`），抓不到就算了，不影响回答。
+ * 默认来源包括维基百科、Stack Overflow、Hacker News 的公开 API，以及随
+ * GitHub Pages 发布的中国 RSS/Atom 静态快照；它们都不是通用网页索引。
+ * 深入检索会补取：维基百科导言、Stack Overflow 回答、HN 讨论摘录；静态
+ * 快照只提供其受限摘要。其他网页正文只能通过部署者明确配置的受信任 reader 服务读取。
  */
 
+import { cleanBaseUrl, readerUrlFor } from './config.js';
 import { filterRelevantResults, queryForLang } from './query.js';
 
-/** 搜索请求统一加超时；失败抛出可读的错误信息。 */
+/**
+ * 原生 fetch 会响应 AbortSignal，但可注入 fetch / 少数 polyfill 不一定会。
+ * 以 race 强制结束等待，确保单请求和全局超时不被一个不合作的 promise 拖住。
+ */
+function abortError(signal) {
+  const reason = signal?.reason;
+  return Object.assign(new Error(reason?.message || '请求已取消'), { name: 'AbortError' });
+}
+
+function awaitWithSignal(value, signal) {
+  if (!signal) return Promise.resolve(value);
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(abortError(signal));
+    };
+    const cleanup = () => signal.removeEventListener?.('abort', onAbort);
+    signal.addEventListener?.('abort', onAbort, { once: true });
+    Promise.resolve(value).then(
+      (result) => {
+        cleanup();
+        resolve(result);
+      },
+      (err) => {
+        cleanup();
+        reject(err);
+      },
+    );
+  });
+}
+
+/** 搜索请求统一加超时；失败抛出可读错误。 */
 async function fetchJson(url, { fetchImpl = globalThis.fetch, signal, timeoutMs = 8000, headers } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('当前环境不支持网络请求');
   const controller = new AbortController();
@@ -33,24 +53,62 @@ async function fetchJson(url, { fetchImpl = globalThis.fetch, signal, timeoutMs 
     else signal.addEventListener?.('abort', forward, { once: true });
   }
   try {
-    const res = await fetchImpl(url, {
-      signal: controller.signal,
-      mode: 'cors',
-      credentials: 'omit',
-      referrerPolicy: 'no-referrer',
-      headers,
-    });
-    if (!res.ok) throw new Error(`搜索服务返回 HTTP ${res.status}`);
-    return await res.json();
+    const res = await awaitWithSignal(
+      fetchImpl(url, {
+        signal: controller.signal,
+        mode: 'cors',
+        credentials: 'omit',
+        referrerPolicy: 'no-referrer',
+        headers,
+      }),
+      controller.signal,
+    );
+    if (!res?.ok) throw new Error(`搜索服务返回 HTTP ${res?.status || '错误'}`);
+    return await awaitWithSignal(res.json(), controller.signal);
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener?.('abort', forward);
   }
 }
 
-/** 去掉搜索摘要里的 HTML 标签（维基百科的高亮是 <span class="searchmatch">）。 */
+async function fetchText(url, { fetchImpl = globalThis.fetch, signal, timeoutMs = 8000 } = {}) {
+  if (typeof fetchImpl !== 'function') throw new Error('当前环境不支持网络请求');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('正文读取超时')), Math.max(1000, timeoutMs));
+  const forward = () => controller.abort(signal?.reason);
+  if (signal) {
+    if (signal.aborted) forward();
+    else signal.addEventListener?.('abort', forward, { once: true });
+  }
+  try {
+    const res = await awaitWithSignal(
+      fetchImpl(url, {
+        signal: controller.signal,
+        mode: 'cors',
+        credentials: 'omit',
+        referrerPolicy: 'no-referrer',
+      }),
+      controller.signal,
+    );
+    if (!res?.ok) throw new Error(`正文读取返回 HTTP ${res?.status || '错误'}`);
+    return await awaitWithSignal(res.text(), controller.signal);
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.('abort', forward);
+  }
+}
+
+// 只有调用方的全局 signal 真的取消时，才停止整个深入检索；单个 fetch 的
+// 本地超时也会表现为 AbortError，但应该只回退该条摘要，不能中断其他资料。
+function globallyAborted(signal) {
+  return !!signal?.aborted;
+}
+
+/** 去掉来源摘要里的 HTML 标签；仅用于文本展示，非提示注入防护。 */
 export function stripHtml(text) {
   return String(text || '')
+    // 网页 reader 可能返回整页 HTML；脚本/样式内容不是可引用的正文，也不该进入提示词。
+    .replace(/<(?:script|style|noscript)\b[^>]*>[\s\S]*?<\/(?:script|style|noscript)>/gi, ' ')
     .replace(/<[^>]*>/g, '')
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
@@ -70,6 +128,26 @@ function pick(obj, keys) {
   return '';
 }
 
+function asInt(value) {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+/** GitHub 静态索引只允许 HTTPS 条目，避免把不可信快照中的伪协议变成可点击链接。 */
+function safeHttpsResultUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    if (url.protocol !== 'https:' || url.username || url.password || url.href.length > 2048) return '';
+    return url.href;
+  } catch {
+    return '';
+  }
+}
+
+function sourceDate(obj) {
+  return pick(obj, ['publishedAt', 'published_at', 'publishedDate', 'date', 'timestamp', 'created_at', 'updated_at']) || obj?.creation_date || obj?.last_activity_date || '';
+}
+
 /** 维基百科：query.search[] → 统一结果。 */
 export function parseWikipedia(payload, { lang = 'zh' } = {}) {
   const list = payload?.query?.search;
@@ -83,6 +161,7 @@ export function parseWikipedia(payload, { lang = 'zh' } = {}) {
         title,
         url: `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(page)}`,
         snippet: stripHtml(item?.snippet),
+        publishedAt: sourceDate(item),
         provider: 'wikipedia',
       };
     })
@@ -101,13 +180,14 @@ export function parseSearxng(payload) {
         title: stripHtml(title),
         url,
         snippet: stripHtml(pick(item, ['content', 'snippet', 'summary'])),
+        publishedAt: sourceDate(item),
         provider: 'searxng',
       };
     })
     .filter(Boolean);
 }
 
-/** 自定义接口：接受 {results:[]}、{items:[]} 或直接数组，字段名容错。 */
+/** 自定义接口：接受 {results:[]}、{items:[]}、{data:[]} 或直接数组。 */
 export function parseCustom(payload) {
   const list = Array.isArray(payload)
     ? payload
@@ -127,13 +207,53 @@ export function parseCustom(payload) {
         title: stripHtml(title),
         url,
         snippet: stripHtml(pick(item, ['snippet', 'content', 'summary', 'description', 'text'])),
+        publishedAt: sourceDate(item),
         provider: 'custom',
       };
     })
     .filter(Boolean);
 }
 
-/** Stack Exchange：items[] → 统一结果（正文是 HTML，按纯文本截断）。 */
+/**
+ * 由 GitHub Actions 写入同站点静态文件的中国资料索引。
+ * 运行时只请求当前 GitHub Pages 站点，不把用户查询发送给索引中的中国资料站点。
+ */
+export const CHINA_STATIC_INDEX_URL = './data/china-sources.json';
+
+export function parseChinaStatic(payload) {
+  const sources = new Map(
+    (Array.isArray(payload?.sources) ? payload.sources : [])
+      .filter((source) => source && typeof source === 'object' && typeof source.id === 'string')
+      .map((source) => [source.id, source]),
+  );
+  const list = Array.isArray(payload?.items) ? payload.items : [];
+  return list
+    .map((item) => {
+      const url = safeHttpsResultUrl(pick(item, ['url', 'link']));
+      const title = stripHtml(pick(item, ['title']));
+      if (!url || !title) return null;
+      const sourceId = pick(item, ['source', 'sourceId']);
+      const source = sources.get(sourceId);
+      const sourceName = stripHtml(pick(item, ['sourceName', 'publisher']) || source?.label || '中国资料源');
+      const category = stripHtml(pick(item, ['category']) || String(source?.category || ''));
+      const kind = category ? `中文${category}资料摘要` : '中文资料摘要';
+      const evidenceKind = source?.status === 'stale' ? `${kind}（上次成功快照，可能过期）` : kind;
+      const indexUpdatedAt = source?.fetchedAt || payload?.generatedAt || '';
+      return {
+        title,
+        url,
+        snippet: stripHtml(pick(item, ['snippet', 'summary', 'description', 'content'])),
+        publishedAt: sourceDate(item),
+        provider: 'china-static',
+        sourceName,
+        evidenceKind,
+        ...(indexUpdatedAt ? { indexUpdatedAt } : {}),
+      };
+    })
+    .filter(Boolean);
+}
+
+/** Stack Exchange 搜索结果是“问题”，快速模式明确只使用问题摘要。 */
 export function parseStackExchange(payload, { site = 'stackoverflow', maxSnippetChars = 240 } = {}) {
   const list = Array.isArray(payload?.items) ? payload.items : [];
   return list
@@ -142,18 +262,23 @@ export function parseStackExchange(payload, { site = 'stackoverflow', maxSnippet
       const title = stripHtml(pick(item, ['title']));
       if (!url || !title) return null;
       const body = stripHtml(pick(item, ['body', 'body_markdown', 'excerpt']));
+      const questionId = asInt(item?.question_id);
+      const acceptedAnswerId = asInt(item?.accepted_answer_id);
       return {
         title,
         url,
         snippet: body.slice(0, Math.max(0, maxSnippetChars)),
+        publishedAt: sourceDate(item),
         provider: 'stackexchange',
         site,
+        ...(questionId !== null ? { questionId } : {}),
+        ...(acceptedAnswerId !== null ? { acceptedAnswerId } : {}),
       };
     })
     .filter(Boolean);
 }
 
-/** Hacker News（Algolia）：hits[] → 统一结果；没有外链的 Ask HN 用讨论页地址。 */
+/** HN story 搜索。快速模式仅用帖文文本；深入模式再读取讨论 API。 */
 export function parseHackerNews(payload, { maxSnippetChars = 240 } = {}) {
   const list = Array.isArray(payload?.hits) ? payload.hits : [];
   return list
@@ -169,13 +294,15 @@ export function parseHackerNews(payload, { maxSnippetChars = 240 } = {}) {
         title,
         url,
         snippet: text.slice(0, Math.max(0, maxSnippetChars)),
+        publishedAt: sourceDate(hit),
         provider: 'hackernews',
+        ...(objectID ? { storyId: objectID } : {}),
       };
     })
     .filter(Boolean);
 }
 
-/** DuckDuckGo 即时答案：摘要 + 相关主题（不是完整网页搜索，只适合常识性内容）。 */
+/** DuckDuckGo Instant Answer：摘要 + 相关主题，不伪装成完整网页搜索。 */
 export function parseDuckDuckGo(payload, { maxSnippetChars = 240 } = {}) {
   const out = [];
   const abstractUrl = pick(payload, ['AbstractURL']);
@@ -199,7 +326,7 @@ export function parseDuckDuckGo(payload, { maxSnippetChars = 240 } = {}) {
   return out;
 }
 
-/** Stack Exchange 搜索（默认 Stack Overflow；也可填 superuser / askubuntu 等站点）。 */
+/** Stack Exchange 搜索（默认 Stack Overflow）。 */
 export async function searchStackExchange({
   query,
   site = 'stackoverflow',
@@ -222,95 +349,106 @@ export async function searchStackExchange({
     signal,
     timeoutMs,
   });
-  // 配额用完时接口返回 error_message（HTTP 200），这里当作“没有结果”，由上层换下一个来源
   if (payload?.error_message) throw new Error(String(payload.error_message).slice(0, 120));
   return parseStackExchange(payload, { site, maxSnippetChars }).slice(0, Math.max(1, limit));
 }
 
-/** Hacker News 搜索（Algolia，免费、允许跨域）。 */
+/** Hacker News story 搜索（Algolia）。 */
 export async function searchHackerNews({ query, limit = 5, maxSnippetChars = 240, fetchImpl, signal, timeoutMs } = {}) {
-  const params = new URLSearchParams({
-    query,
-    tags: 'story',
-    hitsPerPage: String(Math.min(10, Math.max(1, limit))),
-  });
-  const payload = await fetchJson(`https://hn.algolia.com/api/v1/search?${params}`, {
-    fetchImpl,
-    signal,
-    timeoutMs,
-  });
+  const params = new URLSearchParams({ query, tags: 'story', hitsPerPage: String(Math.min(10, Math.max(1, limit))) });
+  const payload = await fetchJson(`https://hn.algolia.com/api/v1/search?${params}`, { fetchImpl, signal, timeoutMs });
   return parseHackerNews(payload, { maxSnippetChars }).slice(0, Math.max(1, limit));
 }
 
-/** DuckDuckGo 即时答案（默认不启用：跨域支持不稳定）。 */
+/** DuckDuckGo Instant Answer（默认关闭，跨域可用性不稳定）。 */
 export async function searchDuckDuckGo({ query, limit = 5, maxSnippetChars = 240, fetchImpl, signal, timeoutMs } = {}) {
-  const params = new URLSearchParams({
-    q: query,
-    format: 'json',
-    no_html: '1',
-    no_redirect: '1',
-    skip_disambig: '1',
-  });
-  const payload = await fetchJson(`https://api.duckduckgo.com/?${params}`, {
-    fetchImpl,
-    signal,
-    timeoutMs,
-  });
+  const params = new URLSearchParams({ q: query, format: 'json', no_html: '1', no_redirect: '1', skip_disambig: '1' });
+  const payload = await fetchJson(`https://api.duckduckgo.com/?${params}`, { fetchImpl, signal, timeoutMs });
   return parseDuckDuckGo(payload, { maxSnippetChars }).slice(0, Math.max(1, limit));
 }
 
-/** 维基百科搜索（可传多个语言，前一个没有结果时自动试下一个）。 */
-export async function searchWikipedia({
-  query,
-  langs = ['zh'],
-  limit = 5,
-  fetchImpl,
-  signal,
-  timeoutMs,
-} = {}) {
-  const out = [];
+/**
+ * 读取随 GitHub Pages 发布的中国资料静态索引。它是本地相对路径，不包含查询参数，
+ * 因而不会把用户问题或网络地址外发给原始中文资料站点。
+ */
+export async function searchChinaStatic({ query, limit = 5, fetchImpl, signal, timeoutMs } = {}) {
+  const payload = await fetchJson(CHINA_STATIC_INDEX_URL, { fetchImpl, signal, timeoutMs });
+  if (payload?.schemaVersion !== 1 || !Array.isArray(payload?.sources) || !Array.isArray(payload?.items)) {
+    throw new Error('中国资料索引格式无效或尚未发布');
+  }
+  const results = parseChinaStatic(payload);
+  // 空索引不应被伪装成“没有相关结果”：首次部署或所有更新失败时要明确告知用户。
+  if (!results.length) {
+    const states = payload.sources.map((source) => String(source?.status || '')).filter(Boolean);
+    if (states.includes('pending')) throw new Error('中国资料索引尚未生成首个快照');
+    if (states.length && states.every((state) => state === 'error')) {
+      throw new Error('中国资料索引更新失败，暂无可用快照');
+    }
+  }
+  // 静态文件不是搜索 API：先在完整快照内做本地相关性筛选，再限制条数，
+  // 否则较早但真正相关的条目会被最新的无关新闻挤掉。
+  return (query ? filterRelevantResults(query, results) : results).slice(0, Math.max(1, limit));
+}
+
+/** 维基百科搜索（可传多个语言，前一个没有结果时再试另一个）。 */
+export async function searchWikipedia({ query, langs = ['zh'], limit = 5, fetchImpl, signal, timeoutMs } = {}) {
   for (const lang of langs) {
     const params = new URLSearchParams({
       action: 'query',
       list: 'search',
-      // 同一个请求，只是换成该语言更可能命中的词（中文问题在英文站用翻译后的词）
       srsearch: queryForLang(query, lang),
       srlimit: String(limit),
-      srprop: 'snippet',
+      srprop: 'snippet|timestamp',
       format: 'json',
       origin: '*',
     });
-    const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, {
-      fetchImpl,
-      signal,
-      timeoutMs,
-    });
+    const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, { fetchImpl, signal, timeoutMs });
     const localizedQuery = queryForLang(query, lang);
     const results = filterRelevantResults(localizedQuery, parseWikipedia(payload, { lang }));
     if (results.length) return results;
-    out.push(...results);
   }
-  return out;
+  return [];
 }
 
 export async function searchSearxng({ query, baseUrl, limit = 5, fetchImpl, signal, timeoutMs } = {}) {
-  if (!baseUrl) throw new Error('未配置 SearXNG 地址');
+  const safeBaseUrl = cleanBaseUrl(baseUrl);
+  if (!safeBaseUrl) throw new Error('未配置或无效的 SearXNG 地址');
+  let endpoint;
+  try {
+    // baseUrl 是实例根/部署路径，不允许它已有的 query/hash 污染真正的 /search 请求。
+    const base = new URL(safeBaseUrl);
+    base.search = '';
+    base.hash = '';
+    base.pathname = `${base.pathname.replace(/\/+$/, '')}/search`;
+    endpoint = base.href;
+  } catch {
+    throw new Error('SearXNG 地址无效');
+  }
   const params = new URLSearchParams({ q: query, format: 'json', language: 'all', safesearch: '1' });
-  const url = `${String(baseUrl).replace(/\/+$/, '')}/search?${params}`;
+  const url = `${endpoint}?${params}`;
   const payload = await fetchJson(url, { fetchImpl, signal, timeoutMs });
   return parseSearxng(payload).slice(0, Math.max(1, limit));
 }
 
 export async function searchCustom({ query, endpoint, limit = 5, fetchImpl, signal, timeoutMs } = {}) {
-  if (!endpoint) throw new Error('未配置自定义搜索接口');
-  const base = String(endpoint);
-  const sep = base.includes('?') ? '&' : '?';
-  const url = `${base}${sep}q=${encodeURIComponent(query)}&limit=${encodeURIComponent(limit)}`;
+  const safeEndpoint = cleanBaseUrl(endpoint);
+  if (!safeEndpoint) throw new Error('未配置或无效的自定义搜索接口');
+  let url;
+  try {
+    const base = new URL(safeEndpoint);
+    // searchParams 正确保留接口所需的静态 query，同时避免把 q/limit 拼到 #fragment 后。
+    base.hash = '';
+    base.searchParams.set('q', query);
+    base.searchParams.set('limit', String(limit));
+    url = base.href;
+  } catch {
+    throw new Error('自定义接口地址无效');
+  }
   const payload = await fetchJson(url, { fetchImpl, signal, timeoutMs });
   return parseCustom(payload).slice(0, Math.max(1, limit));
 }
 
-/** 按 id 调用对应的搜索源；未知来源直接报错，避免静默失败。 */
+/** 按 id 调用对应来源；未知来源直接报错。 */
 export function runProvider(id, options = {}) {
   if (id === 'wikipedia') {
     return searchWikipedia({
@@ -326,33 +464,32 @@ export function runProvider(id, options = {}) {
   if (id === 'stackexchange') return searchStackExchange(options);
   if (id === 'hackernews') return searchHackerNews(options);
   if (id === 'duckduckgo') return searchDuckDuckGo(options);
+  if (id === 'china-static') return searchChinaStatic(options);
   if (id === 'searxng') return searchSearxng(options);
   if (id === 'custom') return searchCustom(options);
   throw new Error(`未知的搜索源：${id}`);
 }
 
-/**
- * 智能搜索：给前几个结果补一段正文摘要。
- * - 维基百科：一次请求拿到多条的 extracts（纯文本引言），跨域允许；
- * - 其他来源：只有在设置了正文抓取模板时才尝试（模板 + 经过编码的原文地址）；
- * 抓取失败一律忽略，保留原来的摘要。
- */
-export async function enrichWithExtracts(
-  results,
-  { maxPages = 3, readerTemplate = '', fetchImpl, signal, timeoutMs } = {},
-) {
-  const list = Array.isArray(results) ? results.slice(0, Math.max(0, maxPages)) : [];
-  if (!list.length) return Array.isArray(results) ? results : [];
-  const out = results.map((r) => ({ ...r }));
-  const wikiIndexes = [];
-  for (let i = 0; i < list.length; i += 1) {
-    const m = /^https:\/\/([a-z-]+)\.wikipedia\.org\/wiki\//i.exec(list[i].url || '');
-    if (m) wikiIndexes.push({ index: i, lang: m[1] });
+function wikiEntry(url) {
+  try {
+    const u = new URL(String(url || ''));
+    const match = /^([a-z-]+)\.wikipedia\.org$/i.exec(u.hostname);
+    if (!match || !u.pathname.startsWith('/wiki/')) return null;
+    return { lang: match[1], title: decodeURIComponent(u.pathname.slice('/wiki/'.length)).replace(/_/g, ' ') };
+  } catch {
+    return null;
   }
-  if (wikiIndexes.length) {
-    for (const lang of [...new Set(wikiIndexes.map((x) => x.lang))]) {
-      const group = wikiIndexes.filter((x) => x.lang === lang);
-      const titles = group.map((x) => decodeURIComponent(String(list[x.index].url).split('/wiki/')[1] || '').replace(/_/g, ' '));
+}
+
+async function enrichWikipediaExtracts(out, list, { fetchImpl, signal, timeoutMs }) {
+  const indexed = list
+    .map((item, index) => ({ index, wiki: wikiEntry(item?.url) }))
+    .filter((item) => item.wiki);
+  const langs = [...new Set(indexed.map((item) => item.wiki.lang))];
+  await Promise.all(
+    langs.map(async (lang) => {
+      const group = indexed.filter((item) => item.wiki.lang === lang);
+      const titles = group.map((item) => item.wiki.title);
       const params = new URLSearchParams({
         action: 'query',
         prop: 'extracts',
@@ -365,74 +502,164 @@ export async function enrichWithExtracts(
         titles: titles.join('|'),
       });
       try {
-        const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, {
-          fetchImpl,
-          signal,
-          timeoutMs,
-        });
+        const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, { fetchImpl, signal, timeoutMs });
         const pages = payload?.query?.pages;
-        if (pages && typeof pages === 'object') {
-          const byTitle = new Map();
-          for (const page of Object.values(pages)) {
-            if (!page || typeof page !== 'object') continue;
-            const extract = stripHtml(page.extract || '');
-            if (!extract) continue;
-            byTitle.set(String(page.title || ''), extract);
-            // 规范化 / 重定向后的标题也登记一份，便于匹配
-            if (page.normalizedtitle) byTitle.set(String(page.normalizedtitle), extract);
-          }
-          for (const { index } of group) {
-            const title = decodeURIComponent(String(list[index].url).split('/wiki/')[1] || '').replace(/_/g, ' ');
-            const extract = byTitle.get(title);
-            if (extract) out[index].extract = extract;
+        if (!pages || typeof pages !== 'object') return;
+        const byTitle = new Map();
+        for (const page of Object.values(pages)) {
+          if (!page || typeof page !== 'object') continue;
+          const extract = stripHtml(page.extract || '');
+          if (extract) byTitle.set(String(page.title || ''), extract);
+        }
+        const aliases = new Map();
+        for (const item of [...(payload?.query?.normalized || []), ...(payload?.query?.redirects || [])]) {
+          if (item?.from && item?.to) aliases.set(String(item.from), String(item.to));
+        }
+        for (const { index, wiki } of group) {
+          const resolved = aliases.get(wiki.title) || wiki.title;
+          const extract = byTitle.get(resolved) || byTitle.get(wiki.title);
+          if (extract) {
+            out[index].extract = extract;
+            out[index].evidenceKind = '维基百科导言';
           }
         }
       } catch (err) {
-        if (signal?.aborted) throw err;
-        // 抓正文失败不影响结果：保留原来的摘要
+        if (globallyAborted(signal)) throw err;
+      }
+    }),
+  );
+}
+
+/** 深入模式一次批量读取 Stack Overflow 的高分/采纳答案，而不是谎称问题 body 是答案。 */
+async function enrichStackExchangeAnswers(out, list, { site = 'stackoverflow', fetchImpl, signal, timeoutMs }) {
+  const targets = list
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item?.provider === 'stackexchange' && Number.isInteger(item.questionId));
+  if (!targets.length) return;
+  const ids = [...new Set(targets.map(({ item }) => item.questionId))].slice(0, 10);
+  const params = new URLSearchParams({
+    site,
+    pagesize: String(ids.length * 3),
+    order: 'desc',
+    sort: 'votes',
+    filter: 'withbody',
+  });
+  try {
+    const payload = await fetchJson(`https://api.stackexchange.com/2.3/questions/${ids.join(';')}/answers?${params}`, {
+      fetchImpl,
+      signal,
+      timeoutMs,
+    });
+    if (payload?.error_message) throw new Error(String(payload.error_message).slice(0, 120));
+    const answers = Array.isArray(payload?.items) ? payload.items : [];
+    for (const { item, index } of targets) {
+      const candidates = answers.filter((answer) => Number(answer?.question_id) === item.questionId);
+      candidates.sort((a, b) => {
+        const aAccepted = Number(a?.answer_id) === item.acceptedAnswerId || a?.is_accepted ? 1 : 0;
+        const bAccepted = Number(b?.answer_id) === item.acceptedAnswerId || b?.is_accepted ? 1 : 0;
+        return bAccepted - aAccepted || Number(b?.score || 0) - Number(a?.score || 0);
+      });
+      const answer = candidates[0];
+      const body = stripHtml(answer?.body || answer?.body_markdown || '');
+      if (body) {
+        const accepted = !!answer?.is_accepted || Number(answer?.answer_id) === item.acceptedAnswerId;
+        out[index].extract = body;
+        out[index].evidenceKind = accepted ? 'Stack Overflow 采纳答案' : 'Stack Overflow 高分答案';
       }
     }
+  } catch (err) {
+    if (globallyAborted(signal)) throw err;
   }
-  if (readerTemplate) {
-    for (let i = 0; i < list.length; i += 1) {
-      const item = out[i];
-      if (item.extract || !item.url) continue;
-      try {
-        const res = await fetchJsonText(`${readerTemplate}${encodeURIComponent(item.url)}`, {
-          fetchImpl,
-          signal,
-          timeoutMs,
-        });
-        const text = stripHtml(res).slice(0, 800);
-        if (text) out[i].extract = text;
-      } catch (err) {
-        if (signal?.aborted) throw err;
-      }
-    }
+}
+
+function collectHnCommentText(children, limit = 3, out = []) {
+  for (const child of Array.isArray(children) ? children : []) {
+    if (out.length >= limit) break;
+    const text = stripHtml(child?.text || '');
+    if (text) out.push(text);
+    collectHnCommentText(child?.children, limit, out);
   }
   return out;
 }
 
-/** 抓取纯文本（正文提取模板返回的不是 JSON）。 */
-async function fetchJsonText(url, { fetchImpl = globalThis.fetch, signal, timeoutMs = 8000 } = {}) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('正文抓取超时')), Math.max(1000, timeoutMs));
-  const forward = () => controller.abort(signal?.reason);
-  if (signal) {
-    if (signal.aborted) forward();
-    else signal.addEventListener?.('abort', forward, { once: true });
-  }
+/** 深入模式读取 HN item API 的帖文/评论摘录；不假装抓到了外链文章全文。 */
+async function enrichHackerNewsDiscussions(out, list, { fetchImpl, signal, timeoutMs }) {
+  const targets = list
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item?.provider === 'hackernews' && /^\d+$/.test(String(item.storyId || '')));
+  await Promise.all(
+    targets.map(async ({ item, index }) => {
+      try {
+        const payload = await fetchJson(`https://hn.algolia.com/api/v1/items/${encodeURIComponent(item.storyId)}`, {
+          fetchImpl,
+          signal,
+          timeoutMs,
+        });
+        const pieces = [stripHtml(payload?.text || ''), ...collectHnCommentText(payload?.children, 3)].filter(Boolean);
+        if (pieces.length) {
+          out[index].extract = pieces.join('\n\n');
+          out[index].evidenceKind = 'Hacker News 帖文与评论摘录';
+        }
+        if (!out[index].publishedAt && payload?.created_at) out[index].publishedAt = payload.created_at;
+      } catch (err) {
+        if (globallyAborted(signal)) throw err;
+      }
+    }),
+  );
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  let next = 0;
+  const runners = Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
+    while (next < items.length) {
+      const index = next;
+      next += 1;
+      await worker(items[index]);
+    }
+  });
+  await Promise.all(runners);
+}
+
+/**
+ * 深入检索：并发补充可信 API 的正文/答案/讨论；可选 reader 只处理仍没有摘录的结果。
+ * 抓取失败保留原摘要，用户停止或总超时则向上抛出取消。
+ */
+export async function enrichWithExtracts(
+  results,
+  { maxPages = 3, readerTemplate = '', stackexchangeSite = 'stackoverflow', fetchImpl, signal, timeoutMs } = {},
+) {
+  const list = Array.isArray(results) ? results.slice(0, Math.max(0, maxPages)) : [];
+  if (!list.length) return Array.isArray(results) ? results : [];
+  const out = results.map((r) => ({ ...r }));
   try {
-    const res = await fetchImpl(url, {
-      signal: controller.signal,
-      mode: 'cors',
-      credentials: 'omit',
-      referrerPolicy: 'no-referrer',
-    });
-    if (!res.ok) throw new Error(`正文抓取返回 HTTP ${res.status}`);
-    return await res.text();
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.('abort', forward);
+    await Promise.all([
+      enrichWikipediaExtracts(out, list, { fetchImpl, signal, timeoutMs }),
+      enrichStackExchangeAnswers(out, list, { site: stackexchangeSite, fetchImpl, signal, timeoutMs }),
+      enrichHackerNewsDiscussions(out, list, { fetchImpl, signal, timeoutMs }),
+    ]);
+  } catch (err) {
+    if (globallyAborted(signal)) throw err;
   }
+
+  const readerTargets = list
+    .map((_item, index) => index)
+    .filter((index) => !out[index]?.extract && out[index]?.url && readerUrlFor(readerTemplate, out[index].url));
+  try {
+    await mapWithConcurrency(readerTargets, 2, async (index) => {
+      const item = out[index];
+      const url = readerUrlFor(readerTemplate, item.url);
+      try {
+        const text = stripHtml(await fetchText(url, { fetchImpl, signal, timeoutMs })).slice(0, 800);
+        if (text) {
+          item.extract = text;
+          item.evidenceKind = '正文读取服务摘录';
+        }
+      } catch (err) {
+        if (globallyAborted(signal)) throw err;
+      }
+    });
+  } catch (err) {
+    if (globallyAborted(signal)) throw err;
+  }
+  return out;
 }
