@@ -99,6 +99,13 @@ export function wikipediaLangs(query, { lang = 'zh', fallbackLang = 'en' } = {})
  * 只收录确定、无歧义的写法；没有命中时不会生成英文查询。
  */
 export const TERM_GLOSSARY = {
+  二分查找: 'binary search',
+  时间复杂度: 'time complexity',
+  空间复杂度: 'space complexity',
+  排序算法: 'sorting algorithm',
+  最短路径: 'shortest path',
+  深度优先搜索: 'depth first search',
+  广度优先搜索: 'breadth first search',
   诺贝尔物理学奖: 'Nobel Prize in Physics',
   诺贝尔化学奖: 'Nobel Prize in Chemistry',
   诺贝尔生理学或医学奖: 'Nobel Prize in Physiology or Medicine',
@@ -209,8 +216,8 @@ export function queryForLang(query, lang, { defaultLang = 'zh' } = {}) {
  * 数字/英文按词匹配，中文按相邻二字词匹配；若查询含明确年份，结果也必须提到该年份。
  */
 export function filterRelevantResults(query, results) {
-  const original = String(query || '').toLowerCase();
-  const translated = translateQuery(query).toLowerCase();
+  const original = searchKeywords(query).toLowerCase();
+  const translated = translateQuery(original).toLowerCase();
   const tokenize = (value) => {
     const s = String(value || '').toLowerCase();
     const tokens = new Set(s.match(/[a-z]{3,}|\d{2,}/g) || []);
@@ -230,12 +237,11 @@ export function filterRelevantResults(query, results) {
     const candidates = tokenize(content);
     return queryVariants.some(({ year, terms }) => {
       if (!terms.size || (year && !candidates.has(year))) return false;
-      // 未命中词典翻译的中文查询可能拿到英文站结果；此时无法跨语种逐词比对，
-      // 只做年份约束（如有），避免误删确实相关的英文页面。
-      if (hasCjk(original) && !hasCjk(r?.title) && /[a-z]{3,}/i.test(r?.title || '') && !translated) return true;
+      // 不为跨语种的“没有命中”开后门：宁可不给结果，也不把看似搜索到了的异语种无关条目交给模型。
       let matches = 0;
       for (const term of terms) if (candidates.has(term)) matches += 1;
-      return matches >= (terms.size >= 5 ? 2 : 1) && matches / terms.size >= 0.18;
+      const minimumMatches = terms.size <= 2 ? 1 : Math.max(2, Math.ceil(terms.size * 0.3));
+      return matches >= minimumMatches && matches / terms.size >= 0.3;
     });
   });
 }

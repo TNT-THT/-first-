@@ -61,12 +61,12 @@ const SO = {
     },
   ],
 };
-const HN = { hits: [{ title: 'Binary search, explained', url: 'https://example.com/bs', objectID: '1', story_text: '讨论' }] };
+const BILIBILI = { code: 0, data: { result: [{ title: '二分查找视频讲解', bvid: 'BV1xx411c7mD', description: '二分查找算法介绍' }] } };
 globalThis.fetch = async (url) => {
   const u = String(url);
   if (u.includes('wikipedia.org') && u.includes('list=search')) return { ok: true, json: async () => WIKI };
   if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => SO };
-  if (u.includes('hn.algolia.com')) return { ok: true, json: async () => HN };
+  if (u.includes('api.bilibili.com')) return { ok: true, json: async () => BILIBILI };
   if (u.includes('config.json')) return { ok: true, json: async () => config };
   throw new Error(`unexpected fetch: ${u}`);
 };
@@ -114,7 +114,7 @@ test('工具面板：三行工具、可展开卡片、开关写入本机偏好',
   assert.match($('#toolCard').textContent, /搜索方式/);
   // 开箱即用：三个免费来源，无需 API Key、无需服务器；进阶设置默认折叠
   assert.match($('#toolCard').textContent, /无需 API Key、无需服务器/);
-  assert.match($('#toolCard').textContent, /维基百科、Stack Overflow、Hacker News/);
+  assert.match($('#toolCard').textContent, /维基百科、Stack Overflow、哔哩哔哩/);
   // 非管理员不显示自建搜索源设置（用不上，也不该被误以为必须配置）
   assert.equal($('#toolCard .search-advanced'), null);
   assert.equal($$('#toolCard [data-search-mode]').length, 2);
@@ -179,13 +179,13 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
   const card = assistant.querySelector('.search-card');
   assert.ok(card, '回答下方应出现搜索来源卡片');
   // 三个免费来源并行请求并合并，摘要里列出全部贡献了结果的来源
-  assert.match(card.querySelector('summary').textContent, /智能搜索：3 条结果（维基百科 \+ Stack Overflow \+ Hacker News）/);
+  assert.match(card.querySelector('summary').textContent, /智能搜索：3 条结果（维基百科 \+ Stack Overflow \+ 哔哩哔哩）/);
   const links = [...card.querySelectorAll('.search-sources a')];
   assert.equal(links.length, 3);
   assert.equal(links[0].textContent, '二分查找');
   assert.equal(links[0].getAttribute('href'), 'https://zh.wikipedia.org/wiki/%E4%BA%8C%E5%88%86%E6%9F%A5%E6%89%BE');
   assert.equal(links[1].getAttribute('href'), 'https://stackoverflow.com/questions/1');
-  assert.equal(links[2].getAttribute('href'), 'https://example.com/bs');
+  assert.equal(links[2].getAttribute('href'), 'https://www.bilibili.com/video/BV1xx411c7mD');
 
   // “各来源情况”：多来源时默认折叠列出，让人看到确实搜了三个网站
   const statusBox = card.querySelector('.search-attempts-box');
@@ -200,7 +200,7 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
   assert.ok(saved, '来源应随会话保存');
   assert.equal(saved.search.status, 'done');
   assert.equal(saved.search.provider, 'wikipedia');
-  assert.deepEqual(saved.search.providers, ['wikipedia', 'stackexchange', 'hackernews']);
+  assert.deepEqual(saved.search.providers, ['wikipedia', 'stackexchange', 'bilibili']);
   assert.equal(saved.search.results[0].title, '二分查找');
   // 各来源状态也随会话保存（不额外发请求）
   assert.deepEqual(
@@ -208,7 +208,7 @@ test('发送时先联网搜索：来源卡片显示在回答下方，并随会�
     [
       ['wikipedia', 'ok'],
       ['stackexchange', 'ok'],
-      ['hackernews', 'ok'],
+      ['bilibili', 'ok'],
     ],
   );
 
@@ -220,7 +220,7 @@ test('联网搜索全部失败时：卡片写明每个来源的错误与网络�
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const u = String(url);
-    if (u.includes('wikipedia.org') || u.includes('api.stackexchange.com') || u.includes('hn.algolia.com')) {
+    if (u.includes('wikipedia.org') || u.includes('api.stackexchange.com') || u.includes('api.bilibili.com')) {
       throw new TypeError('Failed to fetch');
     }
     if (u.includes('config.json')) return { ok: true, json: async () => config };
@@ -264,7 +264,7 @@ test('部分来源无结果 / 失败时：卡片列出各来源情况，回答�
       return { ok: true, json: async () => WIKI };
     }
     if (u.includes('api.stackexchange.com')) return { ok: true, json: async () => ({ items: [] }) };
-    if (u.includes('hn.algolia.com')) throw new TypeError('Failed to fetch');
+    if (u.includes('api.bilibili.com')) throw new TypeError('Failed to fetch');
     if (u.includes('config.json')) return { ok: true, json: async () => config };
     throw new Error(`unexpected fetch: ${u}`);
   };
@@ -284,7 +284,7 @@ test('部分来源无结果 / 失败时：卡片列出各来源情况，回答�
     assert.equal(statuses.length, 3);
     assert.equal(statuses[0], '维基百科：返回 1 条结果');
     assert.equal(statuses[1], 'Stack Overflow：没有结果');
-    assert.match(statuses[2], /^Hacker News：请求失败/);
+    assert.match(statuses[2], /^哔哩哔哩：请求失败/);
 
     // 状态随会话保存，刷新后仍能看到“为什么只有一个来源”
     const store = JSON.parse(localStorage.getItem('oj-ai.sessions.v1'));

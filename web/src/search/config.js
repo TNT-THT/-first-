@@ -9,7 +9,7 @@
  * 3. 管理员搜索源设置（可选，进阶）：自建 SearXNG 地址、自定义接口地址（`oj-ai.search.settings.v1`），仅本机。
  *
  * 默认只使用“免费、免密钥、允许跨域”的公开接口，开箱即用：
- *   维基百科（概念与算法）、Stack Exchange / Stack Overflow（具体编程问题）、Hacker News（技术讨论）。
+ *   维基百科（概念与算法）、Stack Exchange / Stack Overflow（具体编程问题）、哔哩哔哩（中文内容）。
  * 它们会并行请求并合并结果。管理员另填了 SearXNG / 自定义接口时，优先用它们（能搜整个网页）。
  */
 
@@ -21,7 +21,7 @@ export const SEARCH_MODES = ['quick', 'smart'];
 export const SEARCH_MODE_LABELS = { quick: '快速搜索', smart: '智能搜索' };
 
 /** 免费、免密钥、允许跨域的公开接口。名字里的“免费”指不需要注册或付费。 */
-export const KEYLESS_PROVIDERS = ['wikipedia', 'stackexchange', 'hackernews', 'duckduckgo'];
+export const KEYLESS_PROVIDERS = ['wikipedia', 'stackexchange', 'hackernews', 'bilibili', 'duckduckgo'];
 /** 需要管理员自己填地址的进阶来源。 */
 export const ADVANCED_PROVIDERS = ['searxng', 'custom'];
 export const ALL_PROVIDERS = [...KEYLESS_PROVIDERS, ...ADVANCED_PROVIDERS];
@@ -33,7 +33,7 @@ export const DEFAULT_WEB_SEARCH = {
   maxResults: 5,
   maxSnippetChars: 240,
   timeoutMs: 8000,
-  providers: ['wikipedia', 'stackexchange', 'hackernews'],
+  providers: ['wikipedia', 'stackexchange', 'bilibili'],
   wikipedia: { lang: 'zh', fallbackLang: 'en' },
   stackexchange: { site: 'stackoverflow' },
   searxng: { baseUrl: '' },
@@ -216,6 +216,7 @@ export const PROVIDER_LABELS = {
   wikipedia: '维基百科',
   stackexchange: 'Stack Overflow',
   hackernews: 'Hacker News',
+  bilibili: '哔哩哔哩',
   duckduckgo: 'DuckDuckGo',
   searxng: 'SearXNG',
   custom: '自定义接口',

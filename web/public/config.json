@@ -255,7 +255,7 @@
     "providers": [
       "wikipedia",
       "stackexchange",
-      "hackernews"
+      "bilibili"
     ],
     "wikipedia": {
       "lang": "zh",
