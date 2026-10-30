@@ -14,6 +14,8 @@ import {
 } from '../web/src/search/config.js';
 import {
   buildSearchQuery,
+  filterRelevantResults,
+  searchInputForTurn,
   queryForLang,
   searchKeywords,
   translateQuery,
@@ -444,7 +446,7 @@ test('免费来源并行请求并合并：结果按来源轮流取，某个来�
     'hn.algolia.com': {
       hits: [
         { title: 'Binary search explained', url: 'https://example.com/bs', objectID: '1', story_text: '讨论文本' },
-        { title: 'Ask HN: 面试题', objectID: '2', story_text: '没有外链时用讨论页地址' },
+        { title: 'Binary search interview question', objectID: '2', story_text: '没有外链时用讨论页地址' },
       ],
     },
   });
@@ -458,13 +460,9 @@ test('免费来源并行请求并合并：结果按来源轮流取，某个来�
   // 轮流取：维基 1 条、HN 1 条、维基 1 条…
   assert.equal(res.results[0].title, '二分查找');
   assert.equal(res.results[1].title, 'Binary search explained');
-  assert.equal(res.results[2].title, '时间复杂度');
-  assert.equal(res.results.length, 4);
-  assert.deepEqual(
-    res.results.map((r) => r.title),
-    ['二分查找', 'Binary search explained', '时间复杂度', 'Ask HN: 面试题'],
-  );
-  assert.equal(res.results.find((r) => r.title === 'Ask HN: 面试题').url, 'https://news.ycombinator.com/item?id=2');
+  assert.equal(res.results.length, 3);
+  assert.deepEqual(res.results.map((r) => r.title), ['二分查找', 'Binary search explained', 'Binary search interview question']);
+  assert.equal(res.results.find((r) => r.title === 'Binary search interview question').url, 'https://news.ycombinator.com/item?id=2');
   assert.ok(res.errors.some((e) => e.id === 'stackexchange'));
   assert.equal(res.provider, 'wikipedia');
 });
@@ -475,7 +473,7 @@ test('管理员配置了 SearXNG / 自定义接口时优先使用，不再请求
   const fetchImpl = async (url) => {
     calls.push(String(url));
     if (String(url).includes('searx.example.com')) {
-      return { ok: true, json: async () => ({ results: [{ title: 'S', url: 'https://s.example.com/1', content: '摘要' }] }) };
+      return { ok: true, json: async () => ({ results: [{ title: '二分查找', url: 'https://s.example.com/1', content: '相关说明' }] }) };
     }
     throw new Error(`不该请求：${url}`);
   };
@@ -615,7 +613,7 @@ test('请求次数不变：每个免费来源每次提问只发一个请求', as
     if (u.includes('hn.algolia.com')) return { ok: true, json: async () => ({ hits: [{ title: 'HN', url: 'https://hn/1', objectID: '1' }] }) };
     throw new Error(u);
   };
-  const res = await runWebSearch('2026年诺贝尔物理学奖的获得者是谁？', {
+  const res = await runWebSearch('二分查找是什么？', {
     config: normalizeWebSearch({ providers: ['wikipedia', 'stackexchange', 'hackernews'] }),
     prefs: { enabled: true, mode: 'quick' },
     fetchImpl,
@@ -623,7 +621,7 @@ test('请求次数不变：每个免费来源每次提问只发一个请求', as
   assert.equal(res.ok, true);
   assert.equal(urls.length, 3, '三个来源各一个请求');
   // 查询已改写成关键词
-  assert.ok(urls.some((u) => u.includes(encodeURIComponent('2026年诺贝尔物理学奖'))));
+  assert.ok(urls.some((u) => u.includes(encodeURIComponent('二分查找'))));
   assert.ok(urls.some((u) => u.includes(encodeURIComponent('Nobel Prize in Physics'))) === false, '英文站没有回退时不翻');
 });
 
@@ -632,7 +630,7 @@ test('维基百科中文站没有结果时用英文站回退：中文查询翻�
   const fetchImpl = async (url) => {
     const u = String(url);
     urls.push(u);
-    if (u.includes('zh.wikipedia.org')) return { ok: true, json: async () => ({ query: { search: [] } }) };
+    if (u.includes('zh.wikipedia.org')) return { ok: true, json: async () => ({ query: { search: [{ title: '李远哲', snippet: '1986年诺贝尔化学奖得主' }] } }) };
     if (u.includes('en.wikipedia.org')) {
       return { ok: true, json: async () => ({ query: { search: [{ title: 'Nobel Prize in Physics', snippet: '2026: Francis Halzen' }] } }) };
     }
@@ -655,6 +653,19 @@ test('维基百科中文站没有结果时用英文站回退：中文查询翻�
   assert.match(res.results[0].title, /Nobel Prize in Physics/);
 });
 
+test('通用相关性过滤：不论主题都拒绝错年份、无关页面，并保留匹配来源', () => {
+  const results = filterRelevantResults('2026年诺贝尔物理学奖的获得者是谁？', [
+    { title: '李远哲', snippet: '1986 年诺贝尔化学奖得主', url: 'https://example.org/old' },
+    { title: '2026 Nobel Prize in Physics', snippet: 'Francis Halzen, 2026 Nobel Prize in Physics', url: 'https://example.org/current' },
+    { title: '谢谢你，在世界角落中找到我', snippet: '电影介绍', url: 'https://example.org/movie' },
+  ]);
+  assert.deepEqual(results.map((r) => r.title), ['2026 Nobel Prize in Physics']);
+  assert.deepEqual(filterRelevantResults('巴黎天气', [
+    { title: '二分查找算法', snippet: '程序设计', url: 'https://example.org/irrelevant' },
+  ]), []);
+  assert.equal(searchInputForTurn('你在找找?', '2026年诺贝尔物理学奖的获得者是谁？'), '2026年诺贝尔物理学奖的获得者是谁？');
+});
+
 // ---------- 来源状态（只影响显示，不增加请求） ----------
 test('记录每个来源的状态：成功 / 无结果 / 失败', async () => {
   const res = await runWebSearch('二分查找', {
@@ -669,7 +680,7 @@ test('记录每个来源的状态：成功 / 无结果 / 失败', async () => {
   assert.equal(res.ok, true);
   const byId = Object.fromEntries(res.attempts.map((a) => [a.id, a]));
   assert.equal(byId.wikipedia.status, 'ok');
-  assert.equal(byId.wikipedia.count, 2);
+  assert.equal(byId.wikipedia.count, 1);
   assert.equal(byId.stackexchange.status, 'error');
   assert.match(byId.stackexchange.message, /Failed to fetch/);
   assert.equal(byId.hackernews.status, 'empty');

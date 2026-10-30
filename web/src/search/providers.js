@@ -20,7 +20,7 @@
  * 其他来源可以在设置里填一个“正文抓取模板”（例如 `https://r.jina.ai/`），抓不到就算了，不影响回答。
  */
 
-import { queryForLang } from './query.js';
+import { filterRelevantResults, queryForLang } from './query.js';
 
 /** 搜索请求统一加超时；失败抛出可读的错误信息。 */
 async function fetchJson(url, { fetchImpl = globalThis.fetch, signal, timeoutMs = 8000, headers } = {}) {
@@ -285,7 +285,8 @@ export async function searchWikipedia({
       signal,
       timeoutMs,
     });
-    const results = parseWikipedia(payload, { lang });
+    const localizedQuery = queryForLang(query, lang);
+    const results = filterRelevantResults(localizedQuery, parseWikipedia(payload, { lang }));
     if (results.length) return results;
     out.push(...results);
   }

@@ -112,7 +112,7 @@ import {
   SEARCH_MODES,
   searchAvailable,
 } from './search/config.js';
-import { buildSearchQuery } from './search/query.js';
+import { buildSearchQuery, searchInputForTurn } from './search/query.js';
 import {
   buildSearchBlock,
   compactAttempts,
@@ -1114,12 +1114,18 @@ async function send(rawText) {
     // ---------- 联网搜索 ----------
     // 先搜索再加载模型：搜索只需要网络，失败也不影响正常回答（会明确标注“未使用搜索结果”）
     if (shouldSearch()) {
-      const query = buildSearchQuery(text);
+      const previousUserText = session.messages
+        .slice(0, -2)
+        .filter((message) => message?.role === 'user')
+        .at(-1)?.content || '';
+      const searchInput = searchInputForTurn(text, previousUserText);
+      const query = buildSearchQuery(searchInput);
       assistantMsg.search = { status: 'searching', query, mode: state.search.prefs.mode };
       paintAssistant(bubble, assistantMsg, { streaming: true, label: '正在联网搜索…' });
       showStatus(`正在联网搜索${query ? `：${query}` : '…'}`);
       try {
         const res = await runWebSearch(text, {
+          queryText: searchInput,
           config: state.search.config,
           prefs: state.search.prefs,
           settings: state.search.settings,
