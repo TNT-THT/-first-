@@ -18,6 +18,16 @@ const SECRET_PATTERNS = [
     // 值再短也不应外发；宁可把“password=x”之类的代码示例当作敏感内容而跳过检索。
     re: /\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|secret|password|passwd|private[_-]?key|client[_-]?secret|session[_-]?token|cookie)\b\s*[:=]\s*["']?[A-Za-z0-9_.~+\/=:-]{1,}/i,
   },
+  {
+    kind: '凭据字面量',
+    // JSON/对象/调用实参形态："password": "..."、"token", "ghp_..."（setItem 等第二参数）。
+    re: /["'](?:password|passwd|pwd|pass|secret|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|token|session[_-]?token|client[_-]?secret|private[_-]?key|cookie)["']\s*[,:]\s*["'][^"']{1,}["']/i,
+  },
+  {
+    kind: '凭据存储调用',
+    // localStorage/sessionStorage 对凭据类键名的读写，例如 setItem("password", "abc123")。
+    re: /\b(?:local|session)Storage\s*\.\s*(?:set|get|remove)Item\s*\(\s*["'`][^"'`]*(?:passw|pwd|secret|token|api[_-]?key|apikey|auth|cookie|private[_-]?key)[^"'`]*["'`]/i,
+  },
   { kind: '授权头', re: /\b(?:authorization|proxy-authorization)\s*:\s*(?:bearer|basic|token)\s+\S+/i },
   { kind: 'Bearer 凭据', re: /\bbearer\s+[A-Za-z0-9._~+/=-]{8,}/i },
 ];
@@ -91,10 +101,14 @@ export function pickSentence(text, maxChars = 120) {
 
 const QUERY_BOILERPLATE = /^(?:下面(?:是|附上)?(?:代码|题目|日志|报错)|(?:我的|有个)?(?:代码|题目|日志|报错)(?:如下|在下面)?|请看(?:下面|代码|题目))[：:。]?$/;
 const QUESTION_HINT = /[？?]|(?:为什么|为何|怎么|如何|怎么办|是什么|是谁|哪里|多少|能否|有没有|是否|what|who|when|where|why|how|error|exception|fail|issue)/i;
+/** 纯客套/程序性行：作为查询词没有信息量，“能帮我看看吗”不该抢走真正的问题。 */
+const POLITE_BOILERPLATE =
+  /^(?:你|您)?(?:能|可不可以|可以|麻烦|帮忙|帮|请|帮忙看一下)?(?:帮我|帮我看看|看看|看一下|瞧瞧|检查|排查|分析|解答|回答|处理)?(?:看看|一下|下|这个问题|这个)?(?:吗|么|嘛)?[。！？!?～~]*$/;
 
 /**
- * 从清洗后的多行文字中选最像真实问题的一行，避免“代码如下：”抢走查询位。
- * 不生成查询变体，也不把整段题面/对话发给搜索服务。
+ * 从清洗后的多行文字中选最像真实问题的一行，避免“代码如下：”或“能帮我看看吗”抢走查询位。
+ * 评分规则：疑问句加分；去掉停用词后仍有较多内容加分；纯客套/样板行重罚；
+ * 同分时偏向靠后的行（多行消息通常最后一句才是问题）。不生成查询变体，也不把整段题面发给搜索服务。
  */
 function pickQueryLine(cleaned) {
   const lines = String(cleaned || '')
@@ -102,7 +116,23 @@ function pickQueryLine(cleaned) {
     .map((line) => line.trim())
     .filter((line) => line.length >= 2 && !QUERY_BOILERPLATE.test(line));
   if (!lines.length) return '';
-  return lines.find((line) => QUESTION_HINT.test(line)) || lines[0];
+  if (lines.length === 1) return lines[0];
+  let best = lines[0];
+  let bestScore = -Infinity;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    let score = QUESTION_HINT.test(line) ? 2 : 0;
+    if (POLITE_BOILERPLATE.test(line)) score -= 4;
+    // 内容丰富度：去掉停用词后剩下的实际文本越长，越可能是真正的问题主题。
+    const keywords = hasCjk(line) ? zhKeywords(line) : enKeywords(line);
+    score += Math.min(6, keywords.length / 4);
+    score += i * 0.01;
+    if (score > bestScore + 1e-9) {
+      bestScore = score;
+      best = line;
+    }
+  }
+  return best;
 }
 
 /**
@@ -229,6 +259,8 @@ export function translateQuery(text) {
   }
   if (!hit) return '';
   s = s.replace(/[年月份]/g, ' ');
+  // 术语替换后残留的结构虚词（“的”）对英文检索是噪音。
+  s = s.replace(/的/g, ' ');
   s = tidy(stripStopwords(tidy(s), ZH_STOPWORDS));
   s = tidy(stripStopwords(s, EN_STOPWORDS));
   if (!/[a-z]{2,}/i.test(s)) return '';
@@ -266,14 +298,21 @@ function tokenize(value) {
 /**
  * 保守的相关性门槛：无可靠的跨语言翻译时，不把“英文标题”当作相关性的替代品。
  * 查询有年份时，候选资料必须出现同一年；这只是最低门槛，不把它伪装成时效验证。
+ * translations 是外部提供的可靠英文翻译（词典或维基 langlinks）：每个翻译独立
+ * 形成一个接受变体，避免“概念在英文世界有完全不同的叫法”时被整体误杀。
  */
-export function filterRelevantResults(query, results) {
+export function filterRelevantResults(query, results, { translations = [] } = {}) {
   const safeQuery = buildSearchQuery(query) || String(query || '');
   const keywordQuery = hasCjk(safeQuery) ? zhKeywords(safeQuery) : enKeywords(safeQuery);
   const translated = translateQuery(keywordQuery).toLowerCase();
   const variants = [keywordQuery.toLowerCase(), translated]
     .filter(Boolean)
     .map((q) => ({ year: q.match(/(?:19|20)\d{2}/)?.[0], terms: tokenize(q) }));
+  for (const translation of Array.isArray(translations) ? translations : []) {
+    const text = String(translation || '').toLowerCase().trim();
+    if (!text) continue;
+    variants.push({ year: text.match(/(?:19|20)\d{2}/)?.[0], terms: tokenize(text) });
+  }
   return (Array.isArray(results) ? results : []).filter((r) => {
     const content = `${r?.title || ''} ${r?.snippet || ''} ${r?.extract || ''}`;
     const candidates = tokenize(content);

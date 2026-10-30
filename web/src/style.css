@@ -951,3 +951,6 @@ body.embed .role-section { display: none !important; }
 .search-attempt-ok { color: var(--muted); }
 .search-attempt-empty { color: #b45309; }
 .search-attempt-error { color: var(--danger); }
+.search-attempt-skipped { color: var(--muted); }
+/* 摘录保留换行结构：Stack Overflow 等来源的代码答案靠缩进表达语义。 */
+.search-evidence-box .search-snippet { white-space: pre-line; }

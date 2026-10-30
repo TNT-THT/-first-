@@ -8,7 +8,7 @@
  */
 
 import { cleanBaseUrl, readerUrlFor } from './config.js';
-import { filterRelevantResults, queryForLang } from './query.js';
+import { filterRelevantResults, hasCjk, queryForLang } from './query.js';
 
 /**
  * 原生 fetch 会响应 AbortSignal，但可注入 fetch / 少数 polyfill 不一定会。
@@ -106,18 +106,31 @@ function globallyAborted(signal) {
 
 /** 去掉来源摘要里的 HTML 标签；仅用于文本展示，非提示注入防护。 */
 export function stripHtml(text) {
-  return String(text || '')
+  const withoutScripts = String(text || '')
     // 网页 reader 可能返回整页 HTML；脚本/样式内容不是可引用的正文，也不该进入提示词。
     .replace(/<(?:script|style|noscript)\b[^>]*>[\s\S]*?<\/(?:script|style|noscript)>/gi, ' ')
+    // 块级边界转成换行：Stack Overflow 采纳答案里的代码缩进即语义（Python 等），
+    // 压成一行会把可运行的答案变成无法阅读的字符流。
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|pre|li|ul|ol|blockquote|table|tr|h[1-6]|section|article)>/gi, '\n')
     .replace(/<[^>]*>/g, '')
     .replace(/&quot;/g, '"')
     .replace(/&#39;|&apos;/g, "'")
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/\s+/g, ' ')
-    .trim();
+    .replace(/&amp;/g, '&');
+  // 行内空白折叠为单空格；行首 2 个以上空格视为代码缩进原样保留（Python 等语言缩进即语义）。
+  return withoutScripts
+    .split('\n')
+    .map((line) => {
+      const trimmedRight = line.replace(/[ \t]+$/g, '');
+      const lead = /^[ \t]*/.exec(trimmedRight)[0];
+      const indent = lead.length >= 2 ? lead.replace(/\t/g, '  ').slice(0, 8) : '';
+      return indent + trimmedRight.slice(lead.length).replace(/[ \t]+/g, ' ');
+    })
+    .filter((line) => line.trim())
+    .join('\n');
 }
 
 function pick(obj, keys) {
@@ -391,23 +404,76 @@ export async function searchChinaStatic({ query, limit = 5, fetchImpl, signal, t
 }
 
 /** 维基百科搜索（可传多个语言，前一个没有结果时再试另一个）。 */
-export async function searchWikipedia({ query, langs = ['zh'], limit = 5, fetchImpl, signal, timeoutMs } = {}) {
+export async function searchWikipedia({
+  query,
+  langs = ['zh'],
+  limit = 5,
+  fetchImpl,
+  signal,
+  timeoutMs,
+  enQuery = '',
+  defaultLang = 'zh',
+} = {}) {
   for (const lang of langs) {
+    const glossaryResult = queryForLang(query, lang, { defaultLang });
+    let localizedQuery = glossaryResult;
+    if (hasCjk(query) && lang !== defaultLang) {
+      // 英文站回退必须有可靠的英文查询：优先词典命中，其次维基 langlinks 翻译。
+      // 两者都没有时跳过英文站——把中文原句丢给英文站只会换来注定为空的请求。
+      const glossaryHit = glossaryResult !== query;
+      const candidate = glossaryHit ? glossaryResult : String(enQuery || '').trim();
+      if (!candidate) continue;
+      localizedQuery = candidate;
+    }
     const params = new URLSearchParams({
       action: 'query',
       list: 'search',
-      srsearch: queryForLang(query, lang),
+      srsearch: localizedQuery,
       srlimit: String(limit),
       srprop: 'snippet|timestamp',
       format: 'json',
       origin: '*',
     });
     const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, { fetchImpl, signal, timeoutMs });
-    const localizedQuery = queryForLang(query, lang);
-    const results = filterRelevantResults(localizedQuery, parseWikipedia(payload, { lang }));
+    const results = filterRelevantResults(
+      localizedQuery,
+      parseWikipedia(payload, { lang }),
+      { translations: enQuery ? [enQuery] : [] },
+    );
     if (results.length) return results;
   }
   return [];
+}
+
+/**
+ * 用维基百科 langlinks 做免费、免密钥、CORS 开放的跨语言翻译：
+ * 在 zh 站搜索查询词的最佳条目，并一次性取回它的英文标题。
+ * 一次请求（generator=search + prop=langlinks）；失败返回空串，由调用方决定是否跳过英文源。
+ */
+export async function resolveEnQuery({ query, lang = 'zh', fetchImpl, signal, timeoutMs } = {}) {
+  const trimmed = String(query || '').trim();
+  if (!trimmed || !hasCjk(trimmed)) return '';
+  const params = new URLSearchParams({
+    action: 'query',
+    generator: 'search',
+    gsrsearch: trimmed,
+    gsrlimit: '1',
+    prop: 'langlinks',
+    lllang: 'en',
+    redirects: '1',
+    format: 'json',
+    origin: '*',
+  });
+  const payload = await fetchJson(`https://${lang}.wikipedia.org/w/api.php?${params}`, { fetchImpl, signal, timeoutMs });
+  const pages = payload?.query?.pages;
+  if (!pages || typeof pages !== 'object') return '';
+  for (const page of Object.values(pages)) {
+    if (!page || typeof page !== 'object' || !Array.isArray(page.langlinks)) continue;
+    const link = page.langlinks.find((item) => item?.lang === 'en');
+    const title = typeof link?.['*'] === 'string' ? link['*'] : typeof link?.title === 'string' ? link.title : '';
+    if (title.trim()) return stripHtml(title).slice(0, 120);
+  }
+  return '';
 }
 
 export async function searchSearxng({ query, baseUrl, limit = 5, fetchImpl, signal, timeoutMs } = {}) {
@@ -456,6 +522,9 @@ export function runProvider(id, options = {}) {
       langs: options.langs || ['zh'],
       limit: options.limit,
       maxSnippetChars: options.maxSnippetChars,
+      // 跨语言回退需要可靠的英文查询（词典或维基 langlinks 的产出）。
+      enQuery: options.enQuery,
+      defaultLang: options.defaultLang,
       fetchImpl: options.fetchImpl,
       signal: options.signal,
       timeoutMs: options.timeoutMs,

@@ -51,7 +51,8 @@ function clip(text, max) {
 }
 
 const INJECTION_PATTERNS = [
-  /\bignore\s+(?:all\s+|any\s+|the\s+|previous|above|prior)\s*(?:instructions?|rules?|prompts?)/i,
+  // 兼顾 “ignore previous instructions” 与 “ignore all previous instructions” 等变体。
+  /\bignore\s+(?:(?:all|any|the)\s+)?(?:previous\s+|above\s+|prior\s+)?(?:instructions?|rules?|prompts?)/i,
   /\b(?:system|developer)\s+(?:prompt|message|instruction)/i,
   /\b(?:reveal|print|show|leak)\s+(?:the\s+)?(?:system\s+)?prompt/i,
   /\b(?:jailbreak|do\s+not\s+follow\s+the\s+rules?)\b/i,
@@ -71,10 +72,17 @@ export function sanitizeEvidenceText(text, { maxChars = 800 } = {}) {
     .replace(/[【】]/g, (c) => (c === '【' ? '［' : '］'));
   const lines = raw
     .split(/\r?\n/)
-    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .map((line) => {
+      // 保留 2 个以上的行首缩进（代码语义），行内空白折叠为单空格。
+      const collapsed = line.replace(/\s+/g, ' ').trim();
+      if (!collapsed) return '';
+      const lead = /^[ \t]*/.exec(line)[0];
+      return lead.length >= 2 ? `${lead.replace(/\t/g, '  ').slice(0, 8)}${collapsed}` : collapsed;
+    })
     .filter(Boolean)
     .map((line) => (INJECTION_PATTERNS.some((re) => re.test(line)) ? '［疑似指令性内容已过滤］' : line));
-  return clip(lines.join(' '), Math.max(0, maxChars)).trim();
+  // 保留换行：摘录里的代码缩进即语义（Python 等），压成一行会把答案变成字符流。
+  return clip(lines.join('\n'), Math.max(0, maxChars)).trim();
 }
 
 function normalizeDate(value) {
@@ -203,7 +211,7 @@ export function compactAttempts(attempts, { limit = 8 } = {}) {
     .slice(0, Math.max(1, limit))
     .map((a) => ({
       id: String(a?.id || ''),
-      status: ['ok', 'empty', 'error', 'timeout'].includes(a?.status) ? a.status : 'error',
+      status: ['ok', 'empty', 'error', 'timeout', 'skipped'].includes(a?.status) ? a.status : 'error',
       count: Number.isFinite(a?.count) ? a.count : 0,
       message: a?.message ? oneLine(a.message, 120) : '',
     }))
@@ -325,7 +333,7 @@ export function describeAttempts(attempts, { providerLabels = {} } = {}) {
   return (Array.isArray(attempts) ? attempts : []).map((a) => ({
     id: a?.id || '',
     label: providerLabels[a?.id] || a?.id || '来源',
-    status: ['ok', 'empty', 'error', 'timeout'].includes(a?.status) ? a.status : 'error',
+    status: ['ok', 'empty', 'error', 'timeout', 'skipped'].includes(a?.status) ? a.status : 'error',
     count: Number.isFinite(a?.count) ? a.count : 0,
     message: a?.message ? oneLine(a.message, 120) : '',
   }));
@@ -351,7 +359,11 @@ export function searchSummary(search, { providerLabels = {} } = {}) {
     ...(search.partial ? ['总超时，结果可能不完整'] : []),
     ...bad
       .slice(0, 3)
-      .map((a) => `${providerLabels[a.id] || a.id}（${a.status === 'timeout' ? '超时' : a.status === 'error' ? '失败' : '无结果'}）`),
+      .map((a) =>
+        `${providerLabels[a.id] || a.id}（${
+          a.status === 'timeout' ? '超时' : a.status === 'error' ? '失败' : a.status === 'skipped' ? '已跳过' : '无结果'
+        }）`,
+      ),
   ];
   return `${mode}：${n} 条资料（${label}${notes.length ? `；${notes.join('、')}` : ''}）`;
 }
