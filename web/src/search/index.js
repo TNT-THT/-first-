@@ -14,13 +14,14 @@
  */
 
 import { DEFAULT_WEB_SEARCH, planAdvanced, planKeyless, resolveSearchPrefs } from './config.js';
-import { buildSearchQuery, searchKeywords, wikipediaLangs } from './query.js';
+import { buildSearchQuery, filterRelevantResults, searchKeywords, wikipediaLangs } from './query.js';
 import { enrichWithExtracts, runProvider } from './providers.js';
 import { interleaveByProvider, mergeResults } from './context.js';
 
 function isAbort(err, signal) {
   return !!signal?.aborted || err?.name === 'AbortError';
 }
+
 
 function providerOptions(id, { query, url, config, settings, fetchImpl, signal, timeoutMs }) {
   return {
@@ -59,7 +60,7 @@ export async function runWebSearch(text, options = {}) {
   } = options;
   const timeoutMs = options.timeoutMs ?? config.timeoutMs ?? DEFAULT_WEB_SEARCH.timeoutMs;
 
-  const query = buildSearchQuery(text);
+  const query = buildSearchQuery(options.queryText || text);
   const mode = prefs.mode === 'smart' ? 'smart' : 'quick';
   if (!query) return { ok: false, query: '', mode, reason: '没有问题文本可用于搜索', attempts: [] };
   if (!config?.enabled) return { ok: false, query, mode, reason: '站点已关闭联网搜索', attempts: [] };
@@ -109,7 +110,10 @@ export async function runWebSearch(text, options = {}) {
       const raw = await runProvider(target.id, {
         ...providerOptions(target.id, { query, url: target.url, config, settings, fetchImpl, signal, timeoutMs }),
       });
-      const results = mergeResults(raw, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars });
+      const results = filterRelevantResults(
+        query,
+        mergeResults(raw, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars }),
+      );
       if (results.length) {
         attempts.push({ id: target.id, status: 'ok', count: results.length });
         advancedResults.push({ id: target.id, results });
@@ -145,10 +149,13 @@ export async function runWebSearch(text, options = {}) {
   settled.forEach((outcome, i) => {
     const id = keyless[i].id;
     if (outcome.status === 'fulfilled') {
-      const results = mergeResults(outcome.value, {
-        limit: config.maxResults,
-        maxSnippetChars: config.maxSnippetChars,
-      });
+      const results = filterRelevantResults(
+        query,
+        mergeResults(outcome.value, {
+          limit: config.maxResults,
+          maxSnippetChars: config.maxSnippetChars,
+        }),
+      );
       if (results.length) {
         attempts.push({ id, status: 'ok', count: results.length });
         groups.push({ id, results });

@@ -74,6 +74,14 @@ export function buildSearchQuery(text, { maxChars = 120 } = {}) {
   return sentence.replace(/\s+/g, ' ').trim().slice(0, maxChars);
 }
 
+/** 后续追问通常省略主题；遇到明显的“再找找/不对”等短追问，沿用最近一个用户问题作为搜索词。 */
+export function searchInputForTurn(text, previousUserText = '') {
+  const current = String(text || '').trim();
+  const previous = String(previousUserText || '').trim();
+  const shortFollowUp = current.length <= 24 && /^(?:你)?(?:再|继续|重新)?(?:找找|查查|搜索|搜一下|查一下|核实|看看|不对|不是|还有吗|呢|？|\?)|你在找找/.test(current.replace(/[\s，。！？!?]/g, ''));
+  return shortFollowUp && previous ? previous : current;
+}
+
 /**
  * 维基百科的优先语言：有中文时先查中文站，否则先查英文站（算法术语的英文条目通常更全）。
  * 返回去重后的语言列表，供“第一个站点没有结果时再试第二个”使用。
@@ -195,3 +203,40 @@ export function queryForLang(query, lang, { defaultLang = 'zh' } = {}) {
   if (lang && lang !== defaultLang && hasCjk(query)) return translateQuery(query) || query;
   return query;
 }
+
+/**
+ * 通用相关性门槛：避免把搜索引擎的错配结果（不论主题）当作回答证据。
+ * 数字/英文按词匹配，中文按相邻二字词匹配；若查询含明确年份，结果也必须提到该年份。
+ */
+export function filterRelevantResults(query, results) {
+  const original = String(query || '').toLowerCase();
+  const translated = translateQuery(query).toLowerCase();
+  const tokenize = (value) => {
+    const s = String(value || '').toLowerCase();
+    const tokens = new Set(s.match(/[a-z]{3,}|\d{2,}/g) || []);
+    const cjk = s.match(/[\u3400-\u9fff\uf900-\ufaff]+/g) || [];
+    for (const run of cjk) {
+      if (run.length === 1) tokens.add(run);
+      for (let i = 0; i + 1 < run.length; i += 1) tokens.add(run.slice(i, i + 2));
+    }
+    return tokens;
+  };
+  const queryVariants = [original, translated].filter(Boolean).map((q) => ({
+    year: q.match(/(?:19|20)\d{2}/)?.[0],
+    terms: tokenize(q),
+  }));
+  return (Array.isArray(results) ? results : []).filter((r) => {
+    const content = `${r?.title || ''} ${r?.snippet || ''} ${r?.extract || ''}`;
+    const candidates = tokenize(content);
+    return queryVariants.some(({ year, terms }) => {
+      if (!terms.size || (year && !candidates.has(year))) return false;
+      // 未命中词典翻译的中文查询可能拿到英文站结果；此时无法跨语种逐词比对，
+      // 只做年份约束（如有），避免误删确实相关的英文页面。
+      if (hasCjk(original) && !hasCjk(r?.title) && /[a-z]{3,}/i.test(r?.title || '') && !translated) return true;
+      let matches = 0;
+      for (const term of terms) if (candidates.has(term)) matches += 1;
+      return matches >= (terms.size >= 5 ? 2 : 1) && matches / terms.size >= 0.18;
+    });
+  });
+}
+
