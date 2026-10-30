@@ -530,7 +530,9 @@ function paintSearchCard(bubble, msg) {
               ? '没有相关结果'
               : a.status === 'timeout'
                 ? `超时${a.message ? `：${a.message}` : ''}`
-                : `请求失败${a.message ? `：${a.message}` : ''}`;
+                : a.status === 'skipped'
+                  ? `已跳过${a.message ? `：${a.message}` : ''}`
+                  : `请求失败${a.message ? `：${a.message}` : ''}`;
         statusList.append(node('li', { class: `search-attempt-${a.status}` }, `${a.label}：${label}`));
       }
       body.append(
@@ -570,7 +572,7 @@ function paintSearchCard(bubble, msg) {
   if (info.status === 'error' && failed.length) {
     const ul = node('ul', { class: 'search-failures' });
     for (const a of failed) {
-      const status = a.status === 'empty' ? '没有相关结果' : a.status === 'timeout' ? '超时' : a.message || '请求失败';
+      const status = a.status === 'empty' ? '没有相关结果' : a.status === 'timeout' ? '超时' : a.status === 'skipped' ? a.message || '已跳过' : a.message || '请求失败';
       ul.append(node('li', {}, `${a.label}：${status}`));
     }
     body.append(ul);

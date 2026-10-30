@@ -44,7 +44,7 @@ export const DEFAULT_WEB_SEARCH = {
   searxng: { baseUrl: '' },
   custom: { endpoint: '' },
   smart: { maxPages: 3, readerTemplate: '' },
-  maxContextChars: { quick: 1600, smart: 3200 },
+  maxContextChars: { quick: 2400, smart: 4800 },
 };
 
 const MAX_CONFIG_URL_CHARS = 2048;

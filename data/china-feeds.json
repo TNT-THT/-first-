@@ -41,6 +41,46 @@
       "homepage": "https://www.ithome.com/",
       "feed": "https://www.ithome.com/rss/",
       "enabled": true
+    },
+    {
+      "id": "solidot",
+      "label": "Solidot 奇客",
+      "category": "科普/科技资讯",
+      "homepage": "https://www.solidot.org/",
+      "feed": "https://www.solidot.org/index.rss",
+      "enabled": true
+    },
+    {
+      "id": "cnblogs",
+      "label": "博客园",
+      "category": "开发者社区",
+      "homepage": "https://www.cnblogs.com/",
+      "feed": "https://feed.cnblogs.com/blog/sitehome/rss",
+      "enabled": true
+    },
+    {
+      "id": "meituan-tech",
+      "label": "美团技术团队",
+      "category": "工程实践",
+      "homepage": "https://tech.meituan.com/",
+      "feed": "https://tech.meituan.com/atom.xml",
+      "enabled": true
+    },
+    {
+      "id": "sspai",
+      "label": "少数派",
+      "category": "数码/效率",
+      "homepage": "https://sspai.com/",
+      "feed": "https://sspai.com/feed",
+      "enabled": true
+    },
+    {
+      "id": "ifanr",
+      "label": "爱范儿",
+      "category": "科技资讯",
+      "homepage": "https://www.ifanr.com/",
+      "feed": "https://www.ifanr.com/feed",
+      "enabled": true
     }
   ]
 }

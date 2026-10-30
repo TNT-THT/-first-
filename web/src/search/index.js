@@ -8,9 +8,13 @@
  */
 
 import { DEFAULT_WEB_SEARCH, planProviders, resolveSearchPrefs } from './config.js';
-import { analyzeSearchInput, filterRelevantResults, searchKeywords, wikipediaLangs } from './query.js';
-import { enrichWithExtracts, runProvider } from './providers.js';
+import { analyzeSearchInput, filterRelevantResults, hasCjk, searchKeywords, translateQuery, wikipediaLangs } from './query.js';
+import { enrichWithExtracts, resolveEnQuery, runProvider } from './providers.js';
 import { interleaveByProvider, mergeResults } from './context.js';
+
+/** 只接受英文查询的公开源：中文原句发过去必然空手，还暴露访客 IP。 */
+const EN_ONLY_PROVIDERS = new Set(['stackexchange', 'hackernews', 'duckduckgo']);
+const CJK_SKIP_MESSAGE = '中文查询没有可靠的英文翻译，本轮已跳过英文源';
 
 function makeAbortError(signal) {
   return Object.assign(new Error(signal?.reason?.message || '已取消'), { name: 'AbortError' });
@@ -44,10 +48,12 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function providerOptions(id, { query, url, config, settings, fetchImpl, signal, timeoutMs }) {
+function providerOptions(id, { query, enQuery, url, config, settings, fetchImpl, signal, timeoutMs }) {
+  const cjk = hasCjk(query);
   return {
-    query: searchKeywords(query) || query,
+    query: EN_ONLY_PROVIDERS.has(id) && cjk && enQuery ? enQuery : searchKeywords(query) || query,
     langs: id === 'wikipedia' ? wikipediaLangs(query, config.wikipedia) : undefined,
+    ...(id === 'wikipedia' ? { enQuery, defaultLang: config.wikipedia?.lang || 'zh' } : {}),
     site: id === 'stackexchange' ? config.stackexchange?.site : undefined,
     baseUrl: url,
     endpoint: url,
@@ -148,25 +154,67 @@ export async function runWebSearch(text, options = {}) {
   try {
     const errors = [];
     const attempts = [];
+
+    // ---- 跨语言解析（仅中文查询） ----
+    // 英文源只接受可靠的英文查询：优先本地术语表；没有命中时用维基百科
+    // langlinks 做免费、免密钥、CORS 开放的翻译（一次请求，页面级短缓存）。
+    // 两者都拿不到时跳过英文源——绝不把中文原句发给注定看不懂的接口。
+    const cjkQuery = hasCjk(query);
+    const keywordQuery = searchKeywords(query) || query;
+    const needEnQuery = cjkQuery && targets.some((t) => EN_ONLY_PROVIDERS.has(t.id) || t.id === 'wikipedia');
+    let enQuery = needEnQuery ? translateQuery(keywordQuery) : '';
+    if (needEnQuery && !enQuery) {
+      const langKey = JSON.stringify({ langlink: query, lang: config.wikipedia?.lang || 'zh' });
+      const langCached = readCache(cache, langKey, ttlMs, nowMs);
+      if (langCached) {
+        enQuery = langCached.en || '';
+      } else {
+        try {
+          enQuery = await awaitWithSignal(
+            resolveEnQuery({
+              query: keywordQuery,
+              lang: config.wikipedia?.lang || 'zh',
+              fetchImpl,
+              signal,
+              timeoutMs,
+            }),
+            signal,
+          );
+          writeCache(cache, langKey, ttlMs, nowMs, { en: enQuery });
+        } catch (err) {
+          if (outerSignal?.aborted) throw makeAbortError(outerSignal);
+          enQuery = ''; // 翻译失败只影响英文源，不阻塞中文来源
+        }
+      }
+    }
+
     // 所有来源并发，避免“自定义源超时两次才开始默认源”的串行卡顿。
     const settled = await Promise.allSettled(
-      targets.map((target) =>
-        awaitWithSignal(
-          runProvider(target.id, providerOptions(target.id, { query, url: target.url, config, settings, fetchImpl, signal, timeoutMs })),
+      targets.map((target) => {
+        if (EN_ONLY_PROVIDERS.has(target.id) && cjkQuery && !enQuery) {
+          return Promise.resolve({ __skipped: CJK_SKIP_MESSAGE });
+        }
+        return awaitWithSignal(
+          runProvider(target.id, providerOptions(target.id, { query, enQuery, url: target.url, config, settings, fetchImpl, signal, timeoutMs })),
           signal,
-        ),
-      ),
+        );
+      }),
     );
     if (outerSignal?.aborted) throw makeAbortError(outerSignal);
 
     const groups = [];
-    const relevanceQuery = searchKeywords(query) || query;
+    const relevanceQuery = keywordQuery;
     settled.forEach((outcome, i) => {
       const id = targets[i].id;
       if (outcome.status === 'fulfilled') {
+        if (outcome.value?.__skipped) {
+          attempts.push({ id, status: 'skipped', count: 0, message: outcome.value.__skipped });
+          return;
+        }
         const results = filterRelevantResults(
           relevanceQuery,
           mergeResults(outcome.value, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars }),
+          { translations: enQuery ? [enQuery] : [] },
         );
         if (results.length) {
           attempts.push({ id, status: 'ok', count: results.length });
@@ -185,9 +233,13 @@ export async function runWebSearch(text, options = {}) {
 
     const merged = interleaveByProvider(groups, { limit: config.maxResults, maxSnippetChars: config.maxSnippetChars });
     if (!merged.length) {
+      // 报错文案去重：四个源同时“没有相关结果”不该复读四遍；
+      // 真正的诊断（如“索引尚未生成快照”）排在通用文案前面。
+      const messages = [...new Set(errors.map((error) => error.message).filter(Boolean))];
+      const ordered = [...messages.filter((m) => m !== '没有相关结果'), ...messages.filter((m) => m === '没有相关结果')];
       const reason = deadlineHit
         ? '联网资料检索总超时，未拿到可用结果'
-        : errors.map((error) => error.message).filter(Boolean).slice(0, 2).join('；') || '资料检索失败';
+        : ordered.slice(0, 3).join('；') || '资料检索失败';
       return { ok: false, query, mode, reason, attempts, errors };
     }
 

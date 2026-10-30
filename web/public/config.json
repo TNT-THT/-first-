@@ -278,8 +278,8 @@
       "readerTemplate": ""
     },
     "maxContextChars": {
-      "quick": 1600,
-      "smart": 3200
+      "quick": 2400,
+      "smart": 4800
     }
   },
   "imageModels": [

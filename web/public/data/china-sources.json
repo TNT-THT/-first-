@@ -52,6 +52,56 @@
       "status": "pending",
       "fetchedAt": null,
       "itemCount": 0
+    },
+    {
+      "id": "solidot",
+      "label": "Solidot 奇客",
+      "category": "科普/科技资讯",
+      "homepage": "https://www.solidot.org/",
+      "feed": "https://www.solidot.org/index.rss",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "cnblogs",
+      "label": "博客园",
+      "category": "开发者社区",
+      "homepage": "https://www.cnblogs.com/",
+      "feed": "https://feed.cnblogs.com/blog/sitehome/rss",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "meituan-tech",
+      "label": "美团技术团队",
+      "category": "工程实践",
+      "homepage": "https://tech.meituan.com/",
+      "feed": "https://tech.meituan.com/atom.xml",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "sspai",
+      "label": "少数派",
+      "category": "数码/效率",
+      "homepage": "https://sspai.com/",
+      "feed": "https://sspai.com/feed",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
+    },
+    {
+      "id": "ifanr",
+      "label": "爱范儿",
+      "category": "科技资讯",
+      "homepage": "https://www.ifanr.com/",
+      "feed": "https://www.ifanr.com/feed",
+      "status": "pending",
+      "fetchedAt": null,
+      "itemCount": 0
     }
   ],
   "items": []
