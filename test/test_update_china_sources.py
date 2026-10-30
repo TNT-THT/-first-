@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import unittest
 from pathlib import Path
 
@@ -18,6 +19,22 @@ spec.loader.exec_module(indexer)
 class ChinaIndexTests(unittest.TestCase):
     def setUp(self) -> None:
         self.source = {"id": "demo", "label": "示例发布方", "category": "技术社区"}
+
+    def test_checked_in_public_schema_matches_enabled_manifest(self) -> None:
+        manifest = json.loads((ROOT / "data" / "china-feeds.json").read_text(encoding="utf-8"))
+        published = json.loads((ROOT / "web" / "public" / "data" / "china-sources.json").read_text(encoding="utf-8"))
+        expected = [
+            (source["id"], source["label"], source.get("category", ""), source["feed"])
+            for source in manifest["sources"]
+            if source.get("enabled", True)
+        ]
+        actual = [
+            (source["id"], source["label"], source.get("category", ""), source["feed"])
+            for source in published["sources"]
+        ]
+        self.assertEqual(manifest["schemaVersion"], 1)
+        self.assertEqual(published["schemaVersion"], 1)
+        self.assertEqual(actual, expected)
 
     def test_parse_atom_sanitises_summary_and_rejects_non_https_link(self) -> None:
         xml = """<?xml version="1.0"?>
