@@ -30,6 +30,13 @@ export function loadConfig(env = process.env) {
     // 允许嵌入本站的父页面来源，写入 CSP frame-ancestors。'*' 表示任何站点都可以嵌入。
     frameAncestors: env.FRAME_ANCESTORS || '*',
 
+    // 联网搜索在浏览器内直接请求搜索服务，因此这些来源必须写进 CSP 的 connect-src（空格分隔）。
+    // 默认放行三个免费、免密钥来源：维基百科、Stack Exchange、Hacker News（以及可选的 DuckDuckGo）。
+    // 使用自建 SearXNG 或自定义接口时，把地址追加进来（例如 https://searx.example.com）。
+    cspConnectSrc:
+      env.CSP_CONNECT_SRC ||
+      'https://*.wikipedia.org https://wikipedia.org https://api.stackexchange.com https://hn.algolia.com https://api.duckduckgo.com',
+
     // 允许通过 postMessage 向输入框填充内容的父页面来源。支持 https://*.example.com 通配写法。
     // 设为 '*' 则接受任意来源。
     allowedParentOrigins: (env.ALLOWED_PARENT_ORIGINS || 'https://hydro.ac,https://*.hydro.ac')

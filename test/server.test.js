@@ -63,6 +63,26 @@ test('CSP frame-ancestors 可通过环境变量收紧', async () => {
   await new Promise((r2) => s.close(r2));
 });
 
+test('CSP 的 connect-src 默认允许免费的联网搜索来源，可用 CSP_CONNECT_SRC 覆盖', async () => {
+  const r = await req('/healthz');
+  const csp = r.headers.get('content-security-policy');
+  assert.match(csp, /connect-src 'self' https:\/\/\*\.wikipedia\.org/);
+  assert.match(csp, /https:\/\/api\.stackexchange\.com/);
+  assert.match(csp, /https:\/\/hn\.algolia\.com/);
+
+  const custom = createApp(
+    loadConfig({ APP_PASSWORD: PASSWORD, CSP_CONNECT_SRC: 'https://searx.example.com' }),
+  );
+  const s = await new Promise((resolve) => {
+    const srv = custom.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+  const r2 = await fetch(`http://127.0.0.1:${s.address().port}/healthz`);
+  const csp2 = r2.headers.get('content-security-policy');
+  assert.match(csp2, /connect-src 'self' https:\/\/searx\.example\.com/);
+  assert.equal(csp2.includes('wikipedia'), false);
+  await new Promise((r3) => s.close(r3));
+});
+
 test('/api/config 公开且不泄露密钥', async () => {
   const r = await req('/api/config');
   const text = await r.text();

@@ -41,6 +41,8 @@
           <header class="chat-head">
             <button id="historyBtn" type="button" class="btn ghost small history-toggle" aria-expanded="false">历史</button>
             <span id="chatTitle" class="chat-title"></span>
+            <!-- 窄屏 / iframe 嵌入时侧边栏会隐藏，这里提供一个同样的小尺寸模型切换框 -->
+            <select id="modelSelectCompact" class="model-select compact-model-select" aria-label="选择模型" title="选择模型" hidden></select>
             <select id="presetSelect" class="model-select preset-select" aria-label="对话预设" title="对话预设（按浏览器保存）" hidden></select>
             <button id="imageModeBtn" type="button" class="btn ghost small" aria-pressed="false" title="切换到生图模式：会先释放聊天模型的显存" hidden>生图</button>
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
@@ -168,17 +170,31 @@
 
           <form id="composer" class="composer">
             <textarea id="input" rows="1" placeholder="描述题目或粘贴代码。Shift+Enter 发送，Enter 换行"></textarea>
-            <label id="thinkToggleLabel" class="think-toggle" title="仅推理模型：开启后先展示思考过程（可折叠）；关闭后直接给出回答，速度更快" hidden>
-              <input id="thinkToggle" type="checkbox" checked />
-              <span>思考模式</span>
-            </label>
-            <label id="slidingToggleLabel" class="think-toggle" title="开启后上下文固定为滑动窗口大小（默认 4096），超出的最早历史滚出窗口，管理员信息始终保留；关闭则沿用上下文窗口与历史条数、字数限制">
-              <input id="slidingToggle" type="checkbox" />
-              <span>滑动窗口</span>
-            </label>
+            <!-- 工具面板：思考模式、滑动窗口、联网搜索统一收进这里（参考 Qwen 网页端的工具选择） -->
+            <button
+              id="toolsBtn"
+              type="button"
+              class="btn ghost tools-btn"
+              aria-expanded="false"
+              aria-controls="toolsPanel"
+              title="工具：思考模式、滑动窗口、联网搜索"
+            >
+              <span class="tools-btn-icon" aria-hidden="true">✦</span>
+              <span class="tools-btn-text">工具</span>
+              <span id="toolsBadge" class="tools-badge" hidden>0</span>
+            </button>
             <button id="undoBtn" type="button" class="btn ghost small" title="撤回上一轮：删除最后一问一答，问题放回输入框（不会发送）" hidden>撤回</button>
             <button id="sendBtn" type="submit" class="btn primary">发送</button>
             <button id="stopBtn" type="button" class="btn danger" hidden>停止</button>
+
+            <div id="toolsPanel" class="tools-panel" hidden role="dialog" aria-label="工具">
+              <div class="tools-head">
+                <span class="tools-title">工具</span>
+                <button id="toolsClose" type="button" class="btn ghost small tools-close" aria-label="收起工具面板">收起</button>
+              </div>
+              <div id="toolList" class="tool-list"></div>
+              <div id="toolCard" class="tool-card" hidden></div>
+            </div>
           </form>
         </section>
       </div>

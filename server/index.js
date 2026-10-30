@@ -49,7 +49,7 @@ export function createApp(cfg = loadConfig()) {
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' data: blob:",
         "font-src 'self' data:",
-        "connect-src 'self'",
+        `connect-src 'self'${cfg.cspConnectSrc ? ` ${cfg.cspConnectSrc}` : ''}`,
         "object-src 'none'",
         "base-uri 'self'",
         `frame-ancestors ${cfg.frameAncestors}`,
