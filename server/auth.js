@@ -27,6 +27,37 @@ export function checkPassword(expected, input) {
   return safeEqual(sha256(expected), sha256(input));
 }
 
+/**
+ * 从请求中提取 Bearer 令牌：优先 Authorization: Bearer <token>，
+ * 其次 x-api-key 头（方便不方便设置 Authorization 的调用方）。
+ */
+export function extractBearer(req) {
+  const header = req.get?.('authorization') || req.headers?.authorization || '';
+  const bearer = typeof header === 'string' ? header.match(/^Bearer\s+(.+)$/i) : null;
+  if (bearer) return bearer[1].trim();
+  const apiKey = req.get?.('x-api-key') || req.headers?.['x-api-key'] || '';
+  return typeof apiKey === 'string' ? apiKey.trim() : '';
+}
+
+/**
+ * 校验外部 API Key（模式一：自建服务器 API）。
+ * expectedKeys 为服务端配置的 API_KEYS 列表（可多个，逗号分隔配置）。
+ * 列表为空时一律返回 false，调用方应改用网页登录的会话令牌。
+ * 比较先哈希成定长摘要，避免泄露长度信息；逐个比较时不短路泄露命中位置。
+ */
+export function checkApiKey(expectedKeys, input) {
+  if (typeof input !== 'string' || !input) return false;
+  const keys = Array.isArray(expectedKeys) ? expectedKeys : expectedKeys ? [expectedKeys] : [];
+  if (keys.length === 0) return false;
+  const digest = sha256(input);
+  let ok = false;
+  for (const key of keys) {
+    if (typeof key !== 'string' || !key) continue;
+    if (safeEqual(digest, sha256(key))) ok = true;
+  }
+  return ok;
+}
+
 function sign(secret, payload) {
   return createHmac('sha256', secret).update(`v1.${payload}`).digest('hex');
 }

@@ -1,19 +1,20 @@
 # -first-
 The first repository of me,and first of "炸药工厂"
 
-# OJ 刷题助手（可嵌入 iframe 的开源大模型站点）
+# OJ 刷题助手（iframe + 自建 API / 网页链接）
 
-一个专为算法刷题设计的 AI 助手，**默认是纯静态网站，部署在 GitHub Pages 上即可使用，不需要服务器，也不需要任何 API Key**。
-模型（Qwen2.5-Coder，开源）直接在你的浏览器里通过 WebGPU 运行，对话内容不会离开你的电脑。
+一个专为算法刷题设计的 AI 助手。默认纯静态模式下，开源模型直接在浏览器里通过 WebGPU 运行，对话内容不会离开本机；另外提供**自建服务器模式**，由你自己的 Node.js 服务器提供 API 与网页链接接入，完全自托管时可连接本地 Ollama / vLLM，不依赖第三方平台提供远程服务。
 
 ## 功能
 
-- **专属网址**：部署到 GitHub Pages 后得到固定地址，例如 `https://tnt-tht.github.io/-first-/`。
+- **专属网址**：纯静态版可部署到任意静态 Web 服务器；远程 API / 网页链接模式使用你自己的服务器域名。
 - **访问**：打开网站无需口令；导出 / 导入模型需要管理员权限（“更改权限”，只保存加盐哈希，明文不在仓库里）。
 - **可被 iframe 嵌入**：不设置 `X-Frame-Options`，可嵌入 Better Hydro 等 OJ 的 400–450px 侧边栏。
 - **嵌入模式**：`?embed=1` 一键隐藏自带侧边栏与 Logo；标题栏保留一个很小的模型下拉框，窄屏或 iframe 里也能切换模型。
 - **工具面板（思考模式 / 滑动窗口 / 联网资料检索）**：这些开关统一收在输入框右侧的「工具」按钮里。点开是一列带开关的工具行，点某一行会在下方展开对应的说明与设置卡片（参考 Qwen 网页端的工具选择）；按钮上的角标显示已开启几项，鼠标悬停会列出名称。开关偏好保存在本浏览器。
 - **postMessage 填题**：父页面可以把题目文本填入输入框（默认不自动发送）。
+- **自建服务器 API**：服务端模式提供 OpenAI 兼容的纯文本 `/v1/models`、`/v1/chat/completions`（流式 / 非流式）。API 管理员验证后可使用网页调试台、服务端模型参数控制台和 API Key 管理；管理员可按用户/应用创建并分发独立 Key，非管理员用户用自己的 Key 从外部网站或软件调用 API。明文只在创建时显示一次。
+- **网页链接接入**：分享 `/?q=题目` 预填问题，`&send=1` 自动发送，或 `/?embed=1` 通过 iframe 嵌入；服务端模式下网页/API 由自有服务器提供。详见下方“自建服务器：API 与网页链接接入”。
 - **Markdown、代码高亮、一键复制、LaTeX 公式**（KaTeX，本地打包）。
 - **引用回复**：选中任意回复中的文字，点出现的“引用”按钮，内容会以 Markdown 引用格式填入输入框，方便针对某段内容继续提问（超过 4000 字会截取）。
 - **重新生成**：每条回复下方可以“重新生成”，用同一问题再问一次。
@@ -428,18 +429,67 @@ iframe 会回复 `{ type: 'oj-ai:filled' }`，启动后会向父页面发送 `{ 
 - 模型权重存放在浏览器的存储中，并按“顶层站点”隔离。也就是说，在 Better Hydro 的页面里嵌入时，需要在那个站点下再下载一次模型。
 - 跨站嵌入时管理员权限需要在 iframe 内重新验证一次（权限保存在 iframe 所在域名的浏览器存储中）。
 
-## 可选：服务端模式（自有 API 或自建模型）
+## 自建服务器：API 与网页链接接入（不依赖第三方托管平台）
 
-如果你以后有 OpenAI 兼容接口（DeepSeek、通义千问 DashScope、自建 vLLM / Ollama 等），也可以使用服务端模式。
-这种模式需要一台服务器，API Key 只保存在服务端。
+服务端模式会同时提供两种远程接入方式：
+
+1. **自建服务器 API**：OpenAI 兼容的 `GET /v1/models`、`POST /v1/chat/completions`，支持流式 SSE 和非流式；任意后端程序可用 API Key 调用。
+2. **网页链接**：直接分享 `https://你的域名/?q=题目`；可用 `&send=1` 打开后自动发送，也可用 `/?embed=1` 通过 iframe 嵌入其他网站。服务端模式首次使用需输入站点口令。
+
+API 与网页由你自己的 Node.js 服务器提供；**完全自托管时**，可在同一台服务器用 Ollama / vLLM 运行本地开源模型，不需要调用第三方 AI API。HTTPS 域名可由自有服务器上的 Nginx / Caddy 反代。
 
 ```bash
-cp .env.example .env     # 填写 APP_PASSWORD、LLM_BASE_URL、LLM_MODEL、LLM_API_KEY 等
-npm run build:remote     # 构建服务端版前端（使用服务端登录与流式接口）
+cp .env.example .env
+# 至少替换 APP_PASSWORD、SESSION_SECRET、API_ADMIN_PASSWORD、PUBLIC_BASE_URL。
+# API_ADMIN_PASSWORD 用于解锁网页 API 调试台、服务端参数控制台及 API Key 管理；它应与 APP_PASSWORD 不同。
+# API_KEYS 可留空；网站生成的 Key 摘要写入 data/api-keys.json，参数控制台配置写入 data/api-settings.json（Docker Compose 使用持久卷）。
+# 完全自托管示例：本机 Ollama 在 Docker 外运行时设置：
+#   LLM_BASE_URL=http://host.docker.internal:11434/v1  (Docker 部署)
+#   LLM_BASE_URL=http://127.0.0.1:11434/v1            (npm start 原生部署)
+#   LLM_MODEL=qwen2.5:7b
+# 网站端生成的 API Key 会在页面中只显示一次；仅复制到调用方后端的环境变量，切勿放入前端或提交到 Git。
+# 也可用 API_KEYS 配置静态密钥（可多个，逗号分隔）；这类密钥不能从网站读取/撤销。
+npm run build:remote
 npm start                # 监听 0.0.0.0:3000
 ```
 
-也可以用 `docker compose up -d --build` 部署（容器只监听 `127.0.0.1:3000`，再用 `deploy/nginx.conf` 配置 HTTPS 反向代理，注意关闭 `proxy_buffering`）。
+**管理员控制台与 API Key：**
+
+1. 打开 HTTPS 网站地址，用 `APP_PASSWORD` 进入聊天页；它是全站共用访问口令，不是个人账号。
+2. 聊天页标题栏点击 **API 接入**。API 地址、模型、分享链接和 iframe 信息可查看。
+3. 输入独立的 `API_ADMIN_PASSWORD` 验证后，才能使用网页 API 调试台、服务端参数控制台与 API Key 管理。
+4. 在 **API Key 管理**中为每位用户或应用单独输入标签并创建 Key。完整 Key 只显示一次；复制后安全地分发给对应使用者。管理员可单独撤销某个 Key。
+5. 管理员可在 **参数控制台**修改上游地址、模型、上游 Key、系统提示、默认温度、token 上限及兼容供应商的 JSON 生成默认参数；保存后立即生效并写入服务端受限权限文件。
+
+**非管理员外部 API 调用：**普通用户无需 `API_ADMIN_PASSWORD`，也不需把网站登录令牌用于 API；使用管理员分发给自己的 API Key，将 API 根地址 `https://你的域名/v1` 和模型名填入支持 OpenAI 兼容接口的软件即可。服务端 `/v1` 支持 CORS（默认 `CORS_ORIGINS=*`，生产环境建议收紧），但不要将 Key 嵌入公开网页 JavaScript、浏览器扩展或移动端客户端。本站目前没有个人账号、配额或用量统计；每人独立 Key 由管理员手动命名、分发和撤销。
+
+详细权限边界、操作流程、参数控制台和接口字段见 [`docs/web-api-access.md`](docs/web-api-access.md)。
+
+网站创建的密钥摘要保存在 `data/api-keys.json`，控制台设置保存在 `data/api-settings.json`；Docker Compose 使用 `api-keys-data` 持久化卷。备份服务器时也应备份该目录/卷；丢失 Key 文件会使网站生成的 Key 失效，丢失参数文件则会退回 `.env`。访问 `/api/docs` 可看完整示例，`/api/info` 返回机器可读信息。API 调用示例：
+
+```bash
+curl https://你的域名/v1/chat/completions \
+  -H 'Authorization: Bearer <API_KEY>' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"<LLM_MODEL>","messages":[{"role":"user","content":"你好"}]}'
+```
+
+也可以用 Docker 部署：
+
+```bash
+docker compose up -d --build
+```
+
+需要把 Ollama 与网站一起放在 Docker 内时，在 `.env` 设置 `LLM_BASE_URL=http://ollama:11434/v1` 和模型名，并启动可选 profile：
+
+```bash
+docker compose --profile local-llm up -d --build
+# 首次准备模型（示例）
+docker compose --profile local-llm exec ollama ollama pull qwen2.5:7b
+```
+
+容器只监听 `127.0.0.1:3000`，再用 `deploy/nginx.conf` 配置 HTTPS 反向代理，注意关闭 `proxy_buffering`。
+生产环境建议将 `FRAME_ANCESTORS`、`ALLOWED_PARENT_ORIGINS` 和 `CORS_ORIGINS` 收紧到自己的可信域名；不要公开分享带有 `send=1` 的敏感问题链接，也不要将 API Key 放在浏览器代码中。
 
 ## 目录结构
 

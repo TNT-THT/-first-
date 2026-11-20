@@ -154,6 +154,69 @@ const els = {
   loginForm: $('#loginForm'),
   loginError: $('#loginError'),
   loginBtn: $('#loginBtn'),
+  accessDocsLink: $('#accessDocsLink'),
+  apiAccessBtn: $('#apiAccessBtn'),
+  apiAccessDialog: $('#apiAccessDialog'),
+  apiAccessClose: $('#apiAccessClose'),
+  apiAdminLoginSection: $('#apiAdminLoginSection'),
+  apiPlaygroundSection: $('#apiPlaygroundSection'),
+  apiAdminSettingsSection: $('#apiAdminSettingsSection'),
+  apiKeyManagerSection: $('#apiKeyManagerSection'),
+  apiAccessEndpoint: $('#apiAccessEndpoint'),
+  apiAccessModel: $('#apiAccessModel'),
+  apiCurlExample: $('#apiCurlExample'),
+  apiCurlCopy: $('#apiCurlCopy'),
+  apiPlaygroundForm: $('#apiPlaygroundForm'),
+  apiPlaygroundSystem: $('#apiPlaygroundSystem'),
+  apiPlaygroundPrompt: $('#apiPlaygroundPrompt'),
+  apiPlaygroundTemperature: $('#apiPlaygroundTemperature'),
+  apiPlaygroundMaxTokens: $('#apiPlaygroundMaxTokens'),
+  apiPlaygroundStream: $('#apiPlaygroundStream'),
+  apiPlaygroundRequest: $('#apiPlaygroundRequest'),
+  apiPlaygroundRequestCopy: $('#apiPlaygroundRequestCopy'),
+  apiPlaygroundSend: $('#apiPlaygroundSend'),
+  apiPlaygroundStop: $('#apiPlaygroundStop'),
+  apiPlaygroundClear: $('#apiPlaygroundClear'),
+  apiPlaygroundAnswerCopy: $('#apiPlaygroundAnswerCopy'),
+  apiPlaygroundStatus: $('#apiPlaygroundStatus'),
+  apiPlaygroundAnswer: $('#apiPlaygroundAnswer'),
+  apiPlaygroundRaw: $('#apiPlaygroundRaw'),
+  sharePromptInput: $('#sharePromptInput'),
+  shareAutoSend: $('#shareAutoSend'),
+  shareLinkGenerate: $('#shareLinkGenerate'),
+  shareLinkCopy: $('#shareLinkCopy'),
+  shareLinkOutput: $('#shareLinkOutput'),
+  shareIframeOutput: $('#shareIframeOutput'),
+  shareIframeCopy: $('#shareIframeCopy'),
+  apiKeyManagerHint: $('#apiKeyManagerHint'),
+  apiKeyAdminLoginForm: $('#apiKeyAdminLoginForm'),
+  apiAdminSettingsForm: $('#apiAdminSettingsForm'),
+  apiAdminBaseUrl: $('#apiAdminBaseUrl'),
+  apiAdminModel: $('#apiAdminModel'),
+  apiAdminApiKey: $('#apiAdminApiKey'),
+  apiAdminClearApiKey: $('#apiAdminClearApiKey'),
+  apiAdminApiKeyStatus: $('#apiAdminApiKeyStatus'),
+  apiAdminSystemPrompt: $('#apiAdminSystemPrompt'),
+  apiAdminTemperature: $('#apiAdminTemperature'),
+  apiAdminMaxTokens: $('#apiAdminMaxTokens'),
+  apiAdminGenerationParams: $('#apiAdminGenerationParams'),
+  apiAdminSettingsSave: $('#apiAdminSettingsSave'),
+  apiAdminSettingsReset: $('#apiAdminSettingsReset'),
+  apiAdminSettingsStatus: $('#apiAdminSettingsStatus'),
+  apiAdminSettingsError: $('#apiAdminSettingsError'),
+  apiKeyAdminPassword: $('#apiKeyAdminPassword'),
+  apiKeyAdminLoginBtn: $('#apiKeyAdminLoginBtn'),
+  apiKeyAdminError: $('#apiKeyAdminError'),
+  apiKeyManagerPanel: $('#apiKeyManagerPanel'),
+  apiKeyCreateForm: $('#apiKeyCreateForm'),
+  apiKeyLabelInput: $('#apiKeyLabelInput'),
+  apiKeyCreateBtn: $('#apiKeyCreateBtn'),
+  apiKeyNewPanel: $('#apiKeyNewPanel'),
+  apiKeyNewValue: $('#apiKeyNewValue'),
+  apiKeyNewCopy: $('#apiKeyNewCopy'),
+  apiKeyManagerError: $('#apiKeyManagerError'),
+  apiKeyList: $('#apiKeyList'),
+  apiKeyAdminLogout: $('#apiKeyAdminLogout'),
   password: $('#password'),
   main: $('#main'),
   brandName: $('#brandName'),
@@ -282,11 +345,17 @@ const isEmbed = ['embed', 'hideSidebar'].some((k) => {
   return v !== null && v !== '0' && v !== 'false';
 });
 const isEmbedded = window.parent !== window;
+// 链接接入：?q=题目 可预填，显式添加 &send=1 才会自动发送。
+// 值只作为普通文本写入输入框，且仅首次显示主界面时处理。
+const linkPrompt = (params.get('q') || params.get('prompt') || params.get('text') || params.get('question') || '').slice(0, 20000);
+let linkPromptHandled = false;
+const linkModel = params.get('model') || '';
 
 const state = {
   store: loadStore(),
   appConfig: { appName: 'OJ 刷题助手', allowedParentOrigins: [], access: {} },
   backend: null,
+  apiKeyAdminToken: '', // 网站端 API Key 管理短期令牌，只保存在当前页面内存
   streaming: null, // { controller, session, assistant }
   clearArmed: false,
   foldSessionId: null, // 当前折叠状态对应的会话
@@ -2479,7 +2548,25 @@ function showMain() {
   els.main.hidden = false;
   refreshAll();
   refreshIdleStatus();
+  applyLinkPrompt();
   els.input.focus({ preventScroll: true });
+}
+
+function applyLinkPrompt() {
+  if (linkPromptHandled || !linkPrompt) return;
+  linkPromptHandled = true;
+  // 不覆盖用户已经输入的内容，也不对既有输入自动发送。
+  if (els.input.value.trim()) return;
+  els.input.value = linkPrompt;
+  autoGrow();
+  if (params.get('send') === '1') {
+    // 等主界面完成显示后再走与手动发送相同的表单逻辑。
+    setTimeout(() => {
+      if (!els.main.hidden && els.input.value.trim() === linkPrompt.trim()) {
+        els.composer.requestSubmit();
+      }
+    }, 0);
+  }
 }
 
 els.loginForm.addEventListener('submit', async (e) => {
@@ -2493,6 +2580,622 @@ els.loginForm.addEventListener('submit', async (e) => {
     els.loginError.textContent = err.message || '登录失败';
   } finally {
     els.loginBtn.disabled = false;
+  }
+});
+
+// ---------- 网站端远程接入：API Key 管理与网页链接生成 ----------
+let apiKeyEnvironmentCount = 0;
+let apiKeyManagerEpoch = 0;
+let apiKeyNewId = '';
+let apiPlaygroundController = null;
+let apiPlaygroundRunId = 0;
+
+function accessBaseUrl() {
+  return state.appConfig.publicBaseUrl || window.location.origin;
+}
+
+function renderApiAccessInfo() {
+  const base = accessBaseUrl();
+  const apiBase = new URL(state.appConfig.apiBaseUrl || '/v1', `${base}/`).href.replace(/\/$/, '');
+  els.apiAccessEndpoint.textContent = `${apiBase}/chat/completions`;
+  els.apiAccessModel.textContent = state.appConfig.model || '服务端尚未配置模型';
+  updateApiCurlExample();
+  const enabled = !!state.appConfig.apiKeyManagerEnabled;
+  if (!enabled) {
+    els.apiKeyManagerHint.textContent = state.appConfig.apiKeyAuth
+      ? '外部 API Key 已可调用；网站内的调试台、参数控制台和 Key 管理需要站点所有者在 .env 设置 API_ADMIN_PASSWORD（至少 16 位）并重启。'
+      : '管理员控制台未启用。请在服务器 .env 设置 API_ADMIN_PASSWORD（至少 16 位）并重启；普通网站口令不能代替它。';
+  } else {
+    els.apiKeyManagerHint.textContent = '此验证会解锁网页 API 调试台、服务端参数控制台和全站 API Key 管理；普通网站访问口令不能代替 API_ADMIN_PASSWORD。';
+  }
+  const adminVerified = enabled && !!state.apiKeyAdminToken;
+  els.apiAdminLoginSection.hidden = adminVerified;
+  els.apiKeyAdminLoginForm.hidden = !enabled;
+  els.apiPlaygroundSection.hidden = !adminVerified;
+  els.apiAdminSettingsSection.hidden = !adminVerified;
+  els.apiKeyManagerSection.hidden = !adminVerified;
+  els.apiKeyManagerPanel.hidden = !adminVerified;
+}
+
+function apiPlaygroundPayload() {
+  const messages = [];
+  const system = els.apiPlaygroundSystem.value.trim();
+  const prompt = els.apiPlaygroundPrompt.value.trim();
+  if (system) messages.push({ role: 'system', content: system });
+  if (prompt) messages.push({ role: 'user', content: prompt });
+  const payload = {
+    model: state.appConfig.model || '<MODEL>',
+    messages,
+    stream: els.apiPlaygroundStream.checked,
+  };
+  const temperature = els.apiPlaygroundTemperature.value.trim();
+  const maxTokens = els.apiPlaygroundMaxTokens.value.trim();
+  if (temperature) payload.temperature = Number(temperature);
+  if (maxTokens) payload.max_tokens = Number(maxTokens);
+  return payload;
+}
+
+function updateApiPlaygroundRequest() {
+  if (els.apiPlaygroundRequest) els.apiPlaygroundRequest.textContent = JSON.stringify(apiPlaygroundPayload(), null, 2);
+}
+
+function clearApiPlayground() {
+  apiPlaygroundRunId += 1;
+  apiPlaygroundController?.abort();
+  apiPlaygroundController = null;
+  els.apiPlaygroundSystem.value = '';
+  els.apiPlaygroundPrompt.value = '';
+  els.apiPlaygroundTemperature.value = String(state.appConfig.apiDefaultTemperature ?? 0.3);
+  els.apiPlaygroundMaxTokens.value = '';
+  els.apiPlaygroundStream.checked = true;
+  els.apiPlaygroundSend.disabled = false;
+  els.apiPlaygroundStop.hidden = true;
+  els.apiPlaygroundStatus.textContent = '';
+  els.apiPlaygroundAnswer.textContent = '';
+  els.apiPlaygroundAnswerCopy.disabled = true;
+  els.apiPlaygroundRaw.textContent = '';
+  updateApiPlaygroundRequest();
+}
+
+async function readApiPlaygroundStream(response, runId) {
+  if (!response.body) throw new Error('浏览器不支持流式读取');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let reachedDone = false;
+
+  const parseLine = (raw) => {
+    const line = raw.replace(/\r$/, '').trimEnd();
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data) return;
+    if (data === '[DONE]') {
+      reachedDone = true;
+      return;
+    }
+    let chunk;
+    try {
+      chunk = JSON.parse(data);
+    } catch {
+      throw new Error('API 返回了无法解析的 SSE 数据');
+    }
+    if (chunk.error) throw new Error(chunk.error.message || '模型返回错误');
+    if (runId !== apiPlaygroundRunId) return;
+    els.apiPlaygroundRaw.textContent += `data: ${data}\n\n`;
+    els.apiPlaygroundRaw.scrollTop = els.apiPlaygroundRaw.scrollHeight;
+    const delta = chunk.choices?.[0]?.delta?.content;
+    if (typeof delta === 'string' && delta) {
+      els.apiPlaygroundAnswer.textContent += delta;
+      els.apiPlaygroundAnswer.scrollTop = els.apiPlaygroundAnswer.scrollHeight;
+      els.apiPlaygroundAnswerCopy.disabled = false;
+    }
+  };
+
+  try {
+    while (!reachedDone) {
+      const { value, done } = await reader.read();
+      if (runId !== apiPlaygroundRunId) return;
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newline;
+      while ((newline = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        parseLine(line);
+        if (reachedDone || runId !== apiPlaygroundRunId) break;
+      }
+    }
+    buffer += decoder.decode();
+    if (buffer && !reachedDone && runId === apiPlaygroundRunId) parseLine(buffer);
+    if (!reachedDone && runId === apiPlaygroundRunId) throw new Error('流式响应提前结束，未收到结束标记。');
+    if (reachedDone && runId === apiPlaygroundRunId) els.apiPlaygroundRaw.textContent += 'data: [DONE]\n\n';
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      // 已取消的流可能已经释放 reader。
+    }
+  }
+}
+
+async function submitApiPlayground(event) {
+  event.preventDefault();
+  const prompt = els.apiPlaygroundPrompt.value.trim();
+  if (!prompt) {
+    els.apiPlaygroundStatus.textContent = '请输入用户消息。';
+    els.apiPlaygroundPrompt.focus();
+    return;
+  }
+  if (!state.appConfig.model) {
+    els.apiPlaygroundStatus.textContent = '服务器尚未配置模型，请联系站点所有者。';
+    return;
+  }
+  const token = state.apiKeyAdminToken;
+  if (!token) {
+    els.apiPlaygroundStatus.textContent = '需要先验证 API_ADMIN_PASSWORD 才能使用网页调试台。';
+    return;
+  }
+
+  const payload = apiPlaygroundPayload();
+  updateApiPlaygroundRequest();
+  const runId = ++apiPlaygroundRunId;
+  const controller = new AbortController();
+  apiPlaygroundController = controller;
+  els.apiPlaygroundSend.disabled = true;
+  els.apiPlaygroundStop.hidden = false;
+  els.apiPlaygroundAnswer.textContent = '';
+  els.apiPlaygroundAnswerCopy.disabled = true;
+  els.apiPlaygroundRaw.textContent = '';
+  els.apiPlaygroundStatus.textContent = payload.stream ? '正在连接 API，准备接收流式回答…' : '正在等待完整 JSON 响应…';
+
+  try {
+    const response = await fetch('/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${token}`,
+        accept: payload.stream ? 'text/event-stream' : 'application/json',
+      },
+      body: JSON.stringify(payload),
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      if (response.status === 401) {
+        lockApiKeyManager();
+        els.apiKeyAdminError.textContent = '管理员验证已过期，请重新验证 API_ADMIN_PASSWORD。';
+        return;
+      }
+      throw new Error(data.error?.message || data.error || `请求失败（HTTP ${response.status}）`);
+    }
+    if (payload.stream) {
+      await readApiPlaygroundStream(response, runId);
+    } else {
+      const data = await response.json();
+      if (runId !== apiPlaygroundRunId) return;
+      els.apiPlaygroundAnswer.textContent = data.choices?.[0]?.message?.content || '';
+      els.apiPlaygroundAnswerCopy.disabled = !els.apiPlaygroundAnswer.textContent;
+      els.apiPlaygroundRaw.textContent = JSON.stringify(data, null, 2);
+    }
+    if (runId === apiPlaygroundRunId) {
+      els.apiPlaygroundStatus.textContent = '请求完成。管理员令牌仅通过 Authorization 请求头发送，未放入可复制的请求 JSON。';
+    }
+  } catch (error) {
+    if (runId !== apiPlaygroundRunId) return;
+    els.apiPlaygroundStatus.textContent = error.name === 'AbortError'
+      ? '已停止本次请求。'
+      : `请求失败：${error.message || '未知错误'}`;
+  } finally {
+    if (runId === apiPlaygroundRunId) {
+      apiPlaygroundController = null;
+      els.apiPlaygroundSend.disabled = false;
+      els.apiPlaygroundStop.hidden = true;
+    }
+  }
+}
+
+function updateApiCurlExample() {
+  if (!els.apiCurlExample) return;
+  const key = els.apiKeyNewValue.value || '<API_KEY>';
+  const body = {
+    model: state.appConfig.model || '<MODEL>',
+    messages: [{ role: 'user', content: '你好，请用一句话介绍你自己。' }],
+    stream: false,
+  };
+  els.apiCurlExample.textContent =
+    `curl -sS "${els.apiAccessEndpoint.textContent}" \\\n` +
+    `  -H "Authorization: Bearer ${key}" \\\n` +
+    `  -H 'Content-Type: application/json' \\\n` +
+    `  -d @- <<'JSON'\n${JSON.stringify(body, null, 2)}\nJSON`;
+}
+
+function makeShareUrl({ embed = false } = {}) {
+  const url = new URL(`${accessBaseUrl()}/`);
+  if (embed) url.searchParams.set('embed', '1');
+  const prompt = els.sharePromptInput.value.trim();
+  if (prompt) {
+    url.searchParams.set('q', prompt);
+    if (els.shareAutoSend.checked) url.searchParams.set('send', '1');
+  }
+  return url;
+}
+
+function updateIframeSnippet() {
+  const url = makeShareUrl({ embed: true }).href.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+  const title = String(state.appConfig.appName || 'AI 助手')
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+  els.shareIframeOutput.value = `<iframe src="${url}" width="420" height="640" style="border:0" title="${title}"></iframe>`;
+}
+
+function updateShareOutputs() {
+  if (els.shareLinkOutput.value) els.shareLinkOutput.value = makeShareUrl().href;
+  updateIframeSnippet();
+}
+
+function openApiAccess() {
+  if (MODE !== 'remote') return;
+  renderApiAccessInfo();
+  els.apiPlaygroundTemperature.value = String(state.appConfig.apiDefaultTemperature ?? 0.3);
+  els.apiPlaygroundMaxTokens.max = String(state.appConfig.apiMaxTokens ?? 8192);
+  updateApiPlaygroundRequest();
+  els.shareLinkOutput.value = '';
+  updateIframeSnippet();
+  els.apiKeyAdminError.textContent = '';
+  els.apiKeyManagerError.textContent = '';
+  els.apiAccessDialog.showModal();
+  if (state.apiKeyAdminToken) {
+    loadManagedApiKeys();
+    loadAdminSettings();
+  }
+}
+
+function lockApiKeyManager() {
+  // 使关闭面板前发出的异步响应失效，避免令牌或新密钥在关闭后重新写回页面。
+  apiKeyManagerEpoch += 1;
+  clearApiPlayground();
+  apiPlaygroundController = null;
+  state.apiKeyAdminToken = '';
+  els.apiKeyAdminPassword.value = '';
+  els.apiAdminApiKey.value = '';
+  els.apiAdminClearApiKey.checked = false;
+  apiKeyNewId = '';
+  els.apiKeyNewValue.value = '';
+  els.apiKeyNewPanel.hidden = true;
+  updateApiCurlExample();
+  els.apiKeyList.replaceChildren();
+  els.apiKeyManagerError.textContent = '';
+  renderApiAccessInfo();
+}
+
+async function apiKeyManagerRequest(path, { method = 'GET', body } = {}) {
+  const headers = {};
+  if (state.apiKeyAdminToken) headers.authorization = `Bearer ${state.apiKeyAdminToken}`;
+  if (body !== undefined) headers['content-type'] = 'application/json';
+  const res = await fetch(path, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    cache: 'no-store',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    if (res.status === 401 && state.apiKeyAdminToken) {
+      lockApiKeyManager();
+      els.apiKeyAdminError.textContent = '管理员验证已过期，请重新验证 API_ADMIN_PASSWORD。';
+    }
+    throw new Error(data.error || `请求失败（HTTP ${res.status}）`);
+  }
+  return data;
+}
+
+async function loadManagedApiKeys() {
+  const epoch = apiKeyManagerEpoch;
+  try {
+    const data = await apiKeyManagerRequest('/api/admin/api-keys');
+    if (epoch !== apiKeyManagerEpoch || !els.apiAccessDialog.open || !state.apiKeyAdminToken) return;
+    apiKeyEnvironmentCount = data.environmentKeys || 0;
+    els.apiKeyManagerError.textContent = '';
+    renderManagedApiKeys(data.keys || []);
+  } catch (err) {
+    if (epoch === apiKeyManagerEpoch && els.apiAccessDialog.open) {
+      els.apiKeyManagerError.textContent = err.message || '无法读取 API Key 列表';
+    }
+  }
+}
+
+function fillAdminSettings(data) {
+  els.apiAdminBaseUrl.value = data.llmBaseUrl || '';
+  els.apiAdminModel.value = data.llmModel || '';
+  els.apiAdminSystemPrompt.value = data.systemPrompt || '';
+  els.apiAdminTemperature.value = String(data.llmTemperature ?? 0.3);
+  els.apiAdminMaxTokens.value = String(data.apiMaxTokens ?? 8192);
+  els.apiAdminGenerationParams.value = JSON.stringify(data.defaultGenerationParams || {}, null, 2);
+  els.apiAdminApiKey.value = '';
+  els.apiAdminClearApiKey.checked = false;
+  els.apiAdminApiKeyStatus.textContent = data.llmApiKeyConfigured
+    ? '上游 API Key 已配置。为安全起见不会回显；输入新值可轮换，勾选上方选项可清除。'
+    : '当前未配置上游 API Key（本地模型通常无需设置）。';
+  state.appConfig.model = data.llmModel || null;
+  state.appConfig.apiDefaultTemperature = data.llmTemperature;
+  state.appConfig.apiMaxTokens = data.apiMaxTokens;
+  els.apiPlaygroundTemperature.value = String(data.llmTemperature ?? 0.3);
+  els.apiPlaygroundMaxTokens.max = String(data.apiMaxTokens ?? 8192);
+  if (Number(els.apiPlaygroundMaxTokens.value) > data.apiMaxTokens) els.apiPlaygroundMaxTokens.value = '';
+  updateApiPlaygroundRequest();
+  renderApiAccessInfo();
+}
+
+async function loadAdminSettings() {
+  const epoch = apiKeyManagerEpoch;
+  try {
+    const data = await apiKeyManagerRequest('/api/admin/settings');
+    if (epoch !== apiKeyManagerEpoch || !els.apiAccessDialog.open || !state.apiKeyAdminToken) return;
+    fillAdminSettings(data);
+    els.apiAdminSettingsError.textContent = '';
+    els.apiAdminSettingsStatus.textContent = '已加载当前服务端运行参数。';
+  } catch (err) {
+    if (epoch === apiKeyManagerEpoch && els.apiAccessDialog.open) {
+      els.apiAdminSettingsError.textContent = err.message || '无法读取服务端参数';
+    }
+  }
+}
+
+function renderManagedApiKeys(keys) {
+  els.apiKeyList.replaceChildren();
+  const envNote = document.createElement('p');
+  envNote.className = 'muted small';
+  envNote.textContent = `服务器 .env 静态密钥：${apiKeyEnvironmentCount} 个（不在网页中展示或撤销）`;
+  els.apiKeyList.append(envNote);
+  if (!keys.length) {
+    const empty = document.createElement('p');
+    empty.className = 'muted small';
+    empty.textContent = '还没有通过网站创建的 API Key。';
+    els.apiKeyList.append(empty);
+    return;
+  }
+  for (const key of keys) {
+    const row = document.createElement('div');
+    row.className = 'api-key-row';
+    const main = document.createElement('div');
+    main.className = 'api-key-row-main';
+    const label = document.createElement('div');
+    label.className = 'api-key-row-label';
+    label.textContent = key.label;
+    const meta = document.createElement('div');
+    meta.className = 'api-key-row-meta';
+    const date = new Date(key.createdAt);
+    meta.textContent = `ojai_…${key.hint} · ${Number.isNaN(date.getTime()) ? key.createdAt : date.toLocaleString()}`;
+    const revoke = document.createElement('button');
+    revoke.type = 'button';
+    revoke.className = 'btn ghost small';
+    revoke.textContent = '撤销';
+    revoke.title = '立即撤销此 Key；正在使用它的应用将无法继续调用';
+    revoke.dataset.apiKeyRevoke = key.id;
+    main.append(label, meta);
+    row.append(main, revoke);
+    els.apiKeyList.append(row);
+  }
+}
+
+async function copyPlainText(value, button) {
+  const text = String(value || '');
+  if (!text) {
+    showStatus('没有可复制的内容。', { error: true });
+    return false;
+  }
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      ok = document.execCommand('copy');
+    } catch {
+      ok = false;
+    }
+    ta.remove();
+  }
+  const previous = button?.textContent;
+  if (button) {
+    button.textContent = ok ? '已复制' : '复制失败';
+    setTimeout(() => (button.textContent = previous), 1500);
+  }
+  if (!ok) showStatus('复制失败，请手动选中并复制。', { error: true });
+  return ok;
+}
+
+els.apiAccessBtn.addEventListener('click', openApiAccess);
+els.apiAccessClose.addEventListener('click', () => els.apiAccessDialog.close());
+els.apiAccessDialog.addEventListener('close', () => {
+  // 管理令牌与新建密钥只在面板打开期间留在内存，关闭时立即清除。
+  lockApiKeyManager();
+  clearApiPlayground();
+  els.sharePromptInput.value = '';
+  els.shareAutoSend.checked = false;
+  els.shareLinkOutput.value = '';
+  els.shareIframeOutput.value = '';
+});
+els.sharePromptInput.addEventListener('input', updateShareOutputs);
+els.shareAutoSend.addEventListener('change', updateShareOutputs);
+els.shareLinkGenerate.addEventListener('click', () => {
+  els.shareLinkOutput.value = makeShareUrl().href;
+  updateIframeSnippet();
+});
+els.shareLinkCopy.addEventListener('click', () => copyPlainText(els.shareLinkOutput.value, els.shareLinkCopy));
+els.shareIframeCopy.addEventListener('click', () => copyPlainText(els.shareIframeOutput.value, els.shareIframeCopy));
+els.apiPlaygroundForm.addEventListener('submit', submitApiPlayground);
+for (const input of [els.apiPlaygroundSystem, els.apiPlaygroundPrompt, els.apiPlaygroundTemperature, els.apiPlaygroundMaxTokens]) {
+  input.addEventListener('input', updateApiPlaygroundRequest);
+}
+els.apiPlaygroundStream.addEventListener('change', updateApiPlaygroundRequest);
+els.apiPlaygroundRequestCopy.addEventListener('click', () => copyPlainText(els.apiPlaygroundRequest.textContent, els.apiPlaygroundRequestCopy));
+els.apiPlaygroundAnswerCopy.addEventListener('click', () => copyPlainText(els.apiPlaygroundAnswer.textContent, els.apiPlaygroundAnswerCopy));
+els.apiPlaygroundStop.addEventListener('click', () => {
+  if (apiPlaygroundController) {
+    els.apiPlaygroundStatus.textContent = '正在停止请求…';
+    apiPlaygroundController.abort();
+  }
+});
+els.apiPlaygroundClear.addEventListener('click', clearApiPlayground);
+els.apiKeyAdminLoginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const epoch = apiKeyManagerEpoch;
+  els.apiKeyAdminError.textContent = '';
+  els.apiKeyAdminLoginBtn.disabled = true;
+  try {
+    const res = await fetch('/api/admin/api-keys/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: els.apiKeyAdminPassword.value }),
+      cache: 'no-store',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `验证失败（HTTP ${res.status}）`);
+    if (epoch !== apiKeyManagerEpoch || !els.apiAccessDialog.open) return;
+    state.apiKeyAdminToken = data.token;
+    els.apiKeyAdminPassword.value = '';
+    renderApiAccessInfo();
+    await Promise.all([loadManagedApiKeys(), loadAdminSettings()]);
+  } catch (err) {
+    if (epoch === apiKeyManagerEpoch && els.apiAccessDialog.open) {
+      els.apiKeyAdminError.textContent = err.message || '管理员验证失败';
+    }
+  } finally {
+    els.apiKeyAdminLoginBtn.disabled = false;
+  }
+});
+els.apiAdminSettingsForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const epoch = apiKeyManagerEpoch;
+  els.apiAdminSettingsError.textContent = '';
+  els.apiAdminSettingsStatus.textContent = '';
+  els.apiAdminSettingsSave.disabled = true;
+  try {
+    let generationParams;
+    try {
+      generationParams = JSON.parse(els.apiAdminGenerationParams.value || '{}');
+    } catch {
+      throw new Error('额外生成参数不是合法 JSON。');
+    }
+    if (!generationParams || typeof generationParams !== 'object' || Array.isArray(generationParams)) {
+      throw new Error('额外生成参数必须是 JSON 对象。');
+    }
+    const apiKey = els.apiAdminApiKey.value.trim();
+    if (apiKey && els.apiAdminClearApiKey.checked) {
+      throw new Error('请只选择设置新 API Key 或清除旧 Key，不能同时选择。');
+    }
+    const patch = {
+      llmBaseUrl: els.apiAdminBaseUrl.value.trim(),
+      llmModel: els.apiAdminModel.value.trim(),
+      systemPrompt: els.apiAdminSystemPrompt.value,
+      llmTemperature: Number(els.apiAdminTemperature.value),
+      apiMaxTokens: Number(els.apiAdminMaxTokens.value),
+      defaultGenerationParams: generationParams,
+    };
+    if (apiKey) patch.llmApiKey = apiKey;
+    else if (els.apiAdminClearApiKey.checked) patch.llmApiKey = '';
+
+    const data = await apiKeyManagerRequest('/api/admin/settings', { method: 'PUT', body: patch });
+    if (epoch !== apiKeyManagerEpoch || !els.apiAccessDialog.open || !state.apiKeyAdminToken) return;
+    fillAdminSettings(data);
+    els.apiAdminSettingsStatus.textContent = '已保存并立即应用到所有 API 调用。';
+  } catch (err) {
+    if (epoch === apiKeyManagerEpoch && els.apiAccessDialog.open) {
+      els.apiAdminSettingsError.textContent = err.message || '保存服务端参数失败';
+    }
+  } finally {
+    els.apiAdminSettingsSave.disabled = false;
+  }
+});
+els.apiAdminSettingsReset.addEventListener('click', async () => {
+  if (!window.confirm('恢复服务器启动时读取的 .env 参数？这会清除管理员控制台保存的所有覆盖值。')) return;
+  const epoch = apiKeyManagerEpoch;
+  els.apiAdminSettingsError.textContent = '';
+  els.apiAdminSettingsStatus.textContent = '';
+  els.apiAdminSettingsReset.disabled = true;
+  try {
+    const data = await apiKeyManagerRequest('/api/admin/settings', { method: 'DELETE' });
+    if (epoch !== apiKeyManagerEpoch || !els.apiAccessDialog.open || !state.apiKeyAdminToken) return;
+    fillAdminSettings(data);
+    els.apiAdminSettingsStatus.textContent = '已恢复服务器启动时读取的 .env 配置。';
+  } catch (err) {
+    if (epoch === apiKeyManagerEpoch && els.apiAccessDialog.open) {
+      els.apiAdminSettingsError.textContent = err.message || '恢复 .env 参数失败';
+    }
+  } finally {
+    els.apiAdminSettingsReset.disabled = false;
+  }
+});
+els.apiKeyCreateForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const epoch = apiKeyManagerEpoch;
+  const adminToken = state.apiKeyAdminToken;
+  els.apiKeyManagerError.textContent = '';
+  els.apiKeyCreateBtn.disabled = true;
+  try {
+    const data = await apiKeyManagerRequest('/api/admin/api-keys', {
+      method: 'POST',
+      body: { label: els.apiKeyLabelInput.value },
+    });
+    if (epoch !== apiKeyManagerEpoch || !els.apiAccessDialog.open) {
+      // 若面板关闭期间创建请求已成功，尽力立即撤销未能交付给用户的 Key。
+      if (adminToken && data.id) {
+        fetch(`/api/admin/api-keys/${encodeURIComponent(data.id)}`, {
+          method: 'DELETE',
+          headers: { authorization: `Bearer ${adminToken}` },
+          cache: 'no-store',
+        }).catch(() => {});
+      }
+      return;
+    }
+    els.apiKeyLabelInput.value = '';
+    apiKeyNewId = data.id;
+    els.apiKeyNewValue.value = data.key;
+    els.apiKeyNewPanel.hidden = false;
+    updateApiCurlExample();
+    await loadManagedApiKeys();
+  } catch (err) {
+    if (epoch === apiKeyManagerEpoch && els.apiAccessDialog.open) {
+      els.apiKeyManagerError.textContent = err.message || '创建 API Key 失败';
+    }
+  } finally {
+    els.apiKeyCreateBtn.disabled = false;
+  }
+});
+els.apiKeyNewCopy.addEventListener('click', () => copyPlainText(els.apiKeyNewValue.value, els.apiKeyNewCopy));
+els.apiCurlCopy.addEventListener('click', () => copyPlainText(els.apiCurlExample.textContent, els.apiCurlCopy));
+els.apiKeyAdminLogout.addEventListener('click', lockApiKeyManager);
+els.apiKeyList.addEventListener('click', async (e) => {
+  const button = e.target.closest('[data-api-key-revoke]');
+  if (!button) return;
+  const revokeId = button.dataset.apiKeyRevoke;
+  button.disabled = true;
+  els.apiKeyManagerError.textContent = '';
+  try {
+    await apiKeyManagerRequest(`/api/admin/api-keys/${encodeURIComponent(revokeId)}`, { method: 'DELETE' });
+    if (revokeId === apiKeyNewId) {
+      apiKeyNewId = '';
+      els.apiKeyNewValue.value = '';
+      els.apiKeyNewPanel.hidden = true;
+      updateApiCurlExample();
+    }
+    await loadManagedApiKeys();
+    showStatus('API Key 已撤销。');
+  } catch (err) {
+    els.apiKeyManagerError.textContent = err.message || '撤销 API Key 失败';
+  } finally {
+    button.disabled = false;
   }
 });
 
@@ -4385,7 +5088,19 @@ function initImageMode() {
 async function loadAppConfig() {
   if (MODE === 'remote') {
     const c = await fetchConfig();
-    return { appName: c.appName, allowedParentOrigins: c.allowedParentOrigins, access: {}, webllm: null, model: c.model };
+    return {
+      appName: c.appName,
+      allowedParentOrigins: c.allowedParentOrigins,
+      access: {},
+      webllm: null,
+      model: c.model,
+      apiBaseUrl: c.apiBaseUrl || '/v1',
+      apiKeyAuth: !!c.apiKeyAuth,
+      apiKeyManagerEnabled: !!c.apiKeyManagerEnabled,
+      apiDefaultTemperature: Number.isFinite(Number(c.apiDefaultTemperature)) ? Number(c.apiDefaultTemperature) : 0.3,
+      apiMaxTokens: Number.isInteger(Number(c.apiMaxTokens)) && Number(c.apiMaxTokens) > 0 ? Number(c.apiMaxTokens) : 8192,
+      publicBaseUrl: c.publicBaseUrl || null,
+    };
   }
   const res = await fetch('config.json', { cache: 'no-store' });
   if (!res.ok) throw new Error(`无法读取 config.json（HTTP ${res.status}）`);
@@ -4393,6 +5108,8 @@ async function loadAppConfig() {
 }
 
 async function init() {
+  if (MODE === 'remote' && els.accessDocsLink) els.accessDocsLink.hidden = false;
+  if (MODE === 'remote' && els.apiAccessBtn) els.apiAccessBtn.hidden = false;
   if (isEmbed) els.body.classList.add('embed');
   if (isEmbedded) els.body.classList.add('in-frame');
 
@@ -4418,11 +5135,12 @@ async function init() {
   if (MODE === 'webllm') {
     // 启动时使用用户上次保存的默认模型（若仍在下拉框中），否则使用配置中的 defaultModel
     const availableIds = [...new Set([...state.backend.models.map((m) => m.id), ...loadLocalModels().map((e) => e.id)])];
+    const requestedModel = availableIds.includes(linkModel) ? linkModel : getSavedDefaultModel();
     state.backend.setModel(
       resolveStartupModel({
         availableIds,
         defaultModel: state.appConfig.webllm.defaultModel,
-        saved: getSavedDefaultModel(),
+        saved: requestedModel,
       }),
     );
     renderModelOptions(state.backend.modelId);
