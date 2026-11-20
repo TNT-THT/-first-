@@ -125,6 +125,34 @@ test('管理员面板入口：静态版名称明确，点击打开本机管理�
   assert.equal($('#rolePanel').hidden, true);
 });
 
+test('网站包下载：点击后立即给出反馈，并走浏览器原生下载（先 HEAD 确认存在）', async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const u = String(url);
+    if (/site-[a-z0-9-]+\.zip$/i.test(u)) {
+      assert.equal(options.method, 'HEAD', '下载前应先用 HEAD 确认网站包存在，而不是先把整个包读进内存');
+      return { ok: true, status: 200 };
+    }
+    return realFetch(url, options);
+  };
+  window.fetch = globalThis.fetch;
+  localStorage.setItem('oj-ai.admin', JSON.stringify({ exp: Date.now() + 60_000 }));
+  try {
+    $('#roleBtn').click(); // 打开管理员面板，刷新网站包按钮的可用状态
+    const btn = document.querySelector('[data-site-package="site-win-x64.zip"]');
+    assert.equal(btn.disabled, false);
+    btn.click();
+    const status = await waitFor(() => /已开始下载网站包 site-win-x64\.zip/.test($('#statusText').textContent) && $('#statusText').textContent);
+    assert.ok(status, '点击后应立即提示已开始下载，并指引用户看浏览器下载进度');
+    assert.match(btn.textContent, /下载/, '按钮文字应即时变化，给出点击反馈');
+  } finally {
+    localStorage.removeItem('oj-ai.admin');
+    if (!$('#rolePanel').hidden) $('#roleBtn').click();
+    globalThis.fetch = realFetch;
+    window.fetch = realFetch;
+  }
+});
+
 test('工具面板：三行工具、可展开卡片、开关写入本机偏好', async () => {
   assert.equal($('#toolList').children.length, 3, '应有思考模式、滑动窗口、联网资料检索三项');
   assert.equal($('#toolsPanel').hidden, true);
