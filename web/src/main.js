@@ -2308,17 +2308,39 @@ function requireAdmin(action) {
  */
 async function downloadSitePackage(file, btn) {
   if (!requireAdmin('下载网站包')) return;
+  const label = btn.textContent;
   btn.disabled = true;
+  btn.textContent = '正在开始下载…';
+  showStatus(`正在开始下载网站包 ${file}，请留意浏览器右上角（下载按钮处）的进度。`);
   try {
-    const res = await fetch(file, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`找不到网站包 ${file}（HTTP ${res.status}）。请先运行 npm run build 生成。`);
-    const blob = await res.blob();
-    downloadBlob(blob, file);
-    showStatus(`已下载网站包 ${file}（${formatBytes(blob.size)}）。解压后双击启动文件即可；网站包不包含任何 AI 模型。`);
+    // 先用 HEAD 轻量确认文件存在（只取响应头，不下载包体）；HEAD 本身失败时不阻断，交给浏览器下载去处理。
+    let missingStatus = 0;
+    try {
+      const head = await fetch(file, { method: 'HEAD', cache: 'no-store' });
+      if (!head.ok) missingStatus = head.status;
+    } catch {
+      /* 静态服务器不支持 HEAD 等情况：继续走浏览器原生下载 */
+    }
+    if (missingStatus) {
+      throw new Error(`找不到网站包 ${file}（HTTP ${missingStatus}）。请先运行 npm run build 生成。`);
+    }
+    // 用浏览器原生下载（<a download>）：浏览器下载栏会立刻显示真实进度。
+    // 不要再先用 fetch 把整个包读进内存再落盘——那段时间页面毫无反应，最后却“突然”下载完成。
+    const a = document.createElement('a');
+    a.href = file;
+    a.download = file;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    btn.textContent = '已开始下载 ✓';
+    showStatus(`已开始下载网站包 ${file}：请看浏览器右上角的下载进度；下载完成后解压，双击里面的启动文件即可。网站包不包含任何 AI 模型。`);
   } catch (err) {
     showStatus(`下载网站包失败：${err.message}`, { error: true });
   } finally {
     btn.disabled = !isAdmin();
+    setTimeout(() => {
+      btn.textContent = label;
+    }, 4000);
   }
 }
 
