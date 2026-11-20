@@ -49,7 +49,7 @@
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
             <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
             <button id="apiAccessBtn" type="button" class="btn ghost small" title="查看 API 地址、申请 Key 和生成分享链接" hidden>API 接入</button>
-            <button id="adminPanelBtn" type="button" class="btn ghost small" title="打开管理员控制面板（需要 API 管理员口令）" hidden>管理员面板</button>
+            <button id="adminPanelBtn" type="button" class="btn ghost small" title="API 管理员控制台：参数、API Key 与调试台（需要管理口令）" hidden>API 管理</button>
             <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
             <button id="roleBtn" type="button" class="btn ghost small" title="打开本机管理员面板" aria-expanded="false">管理员面板</button>
             <div id="historyPanel" class="history-panel" hidden>
@@ -57,7 +57,15 @@
             </div>
             <div id="rolePanel" class="history-panel role-panel" hidden>
               <p class="role-panel-title">本机管理员面板</p>
-              <p class="muted small">这里只管理当前浏览器里的模型和数据。API 参数与全站 Key 请在本机包启动的 127.0.0.1 网页中，点顶部“管理员面板”管理。</p>
+              <p class="muted small">这里管理当前浏览器里的模型（导入“新建AI”）、参数与数据；API 的参数与 Key 请点顶部“API 管理”。</p>
+              <div id="localApiInfo" class="role-section" hidden>
+                <p class="muted small">本机 API 地址（同一台电脑上的软件用这个地址 + API Key 调用）：</p>
+                <div class="api-access-actions">
+                  <code id="localApiEndpoint"></code>
+                  <button id="localApiCopy" type="button" class="btn ghost small">复制地址</button>
+                </div>
+                <p class="muted small">查看全部可用模型（含导入的 AI）：<code>GET /v1/models</code>；请求时填对应的模型 ID 即可用它生成。</p>
+              </div>
               <p id="roleStatus" class="role-status"></p>
               <form id="roleForm" class="role-form">
                 <input id="adminKey" type="password" autocomplete="off" placeholder="管理员密钥" aria-label="管理员密钥" />

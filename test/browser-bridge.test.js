@@ -259,6 +259,11 @@ test('桥接模式：网页聊天与 API 可各自选择不同模型，互不影
     body: JSON.stringify({ label: 'pick-model' }),
   });
   const { key } = await applyRes.json();
+  // API 的模型列表包含全部可用模型（含导入 AI 在桥接侧上报的条目），逐个都可调用
+  const modelsRes = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${key}` } });
+  assert.equal(modelsRes.status, 200);
+  const modelsData = await modelsRes.json();
+  assert.deepEqual(modelsData.data.map((m) => m.id), ['test-model', 'second-model']);
   const apiRes = await fetch(`${base}/v1/chat/completions`, {
     method: 'POST',
     headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },

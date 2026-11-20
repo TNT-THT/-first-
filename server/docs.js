@@ -131,14 +131,14 @@ ${pre(curl)}
 `)}
 
 ${section('网页 API 调试台与管理员参数控制台', `
-<p>只有输入独立的 <code>API_ADMIN_PASSWORD</code> 并完成服务端验证后，才能在聊天页顶部的「管理员面板」中使用网页调试台、服务端参数控制台和 API Key 管理。调试台使用短期管理员令牌；普通网站 <code>APP_PASSWORD</code> 会话不能调用 <code>/v1/*</code>。</p>
+<p>只有输入独立的 <code>API_ADMIN_PASSWORD</code> 并完成服务端验证后，才能在聊天页顶部的「API 管理」中使用网页调试台、服务端参数控制台和 API Key 管理。调试台使用短期管理员令牌；普通网站 <code>APP_PASSWORD</code> 会话不能调用 <code>/v1/*</code>。</p>
 <p>参数控制台可以即时修改上游 OpenAI 兼容地址、模型、服务端 API Key、系统提示、默认 temperature、token 上限与供应商支持的 JSON 生成参数。设置写入权限受限的 <code>API_SETTINGS_FILE</code>（默认 <code>data/api-settings.json</code>）；Key 不会从管理 API 回传。普通网站登录口令、管理员口令与 CORS 等安全参数仍由服务器环境变量管理。</p>
 <p>管理员可以按用户或应用创建、命名和撤销独立 API Key，再安全地分发给非管理员使用者。本站没有个人账号、账号级配额或用量账单；普通用户拿到自己的 Key 后可在其他网站后端或软件中调用本接口，不必使用网站登录令牌。</p>
 `)}
 
 ${section('网站内管理 API Key', `
 <div id="api-key-manager"></div>
-<p>配置 <code>API_ADMIN_PASSWORD</code> 并重启服务器后，登录网站，在聊天页顶部点击「管理员面板」并完成管理员验证，即可为每位用户或应用创建单独命名的 Key，或随时撤销。
+<p>配置 <code>API_ADMIN_PASSWORD</code> 并重启服务器后，登录网站，在聊天页顶部点击「API 管理」并完成管理员验证，即可为每位用户或应用创建单独命名的 Key，或随时撤销。
 创建时完整 Key 只显示一次，请立即安全分发并保存在调用方受控后端；网站只保存 SHA-256 摘要，之后不能再次查看明文。误关页面或遗失时请撤销旧 Key 并创建新 Key。
 此管理口令不要与普通网站访问口令相同，也不要把 API Key 放在公开网页、浏览器 JS 或手机 App 中。</p>
 `)}
