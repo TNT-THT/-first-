@@ -13,9 +13,9 @@ const PASSWORD = 'correct-horse-battery';
 
 let lastFakeBridge = null;
 
-function fakeBridge({ connected = true } = {}) {
+function fakeBridge({ connected = true, models = [{ id: 'test-model', label: 'Test Model' }] } = {}) {
   const bridge = {
-    models: [{ id: 'test-model', label: 'Test Model' }],
+    models,
     connected,
     lastPayload: null,
     status() {
@@ -32,7 +32,7 @@ function fakeBridge({ connected = true } = {}) {
   return bridge;
 }
 
-async function setup(t, { withBridge = true, bridgeConnected = true } = {}) {
+async function setup(t, { withBridge = true, bridgeConnected = true, bridgeModels } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'oj-ai-bridge-'));
   const cfg = loadConfig({
     APP_PASSWORD: PASSWORD,
@@ -41,7 +41,7 @@ async function setup(t, { withBridge = true, bridgeConnected = true } = {}) {
     API_KEYS_FILE: path.join(dir, 'keys.json'),
     API_SETTINGS_FILE: path.join(dir, 'settings.json'),
   });
-  const app = createApp(cfg, { browserBridge: withBridge ? fakeBridge({ connected: bridgeConnected }) : null });
+  const app = createApp(cfg, { browserBridge: withBridge ? fakeBridge({ connected: bridgeConnected, models: bridgeModels }) : null });
   const server = await new Promise((resolve) => {
     const srv = app.listen(0, '127.0.0.1', () => resolve(srv));
   });
@@ -225,6 +225,87 @@ test('桥接模式：网页自身聊天 /api/chat 也经桥接返回流式回答
   assert.match(text, /你好/);
   assert.match(text, /\[DONE\]/);
   assert.equal(lastFakeBridge.lastPayload.model, 'test-model');
+});
+
+test('桥接模式：网页聊天与 API 可各自选择不同模型，互不影响', async (t) => {
+  const base = await setup(t, {
+    bridgeModels: [
+      { id: 'test-model', label: 'Test Model' },
+      { id: 'second-model', label: 'Second Model' },
+    ],
+  });
+  const loginRes = await fetch(`${base}/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ password: PASSWORD }),
+  });
+  const { token } = await loginRes.json();
+  const webChat = (body) => fetch(`${base}/api/chat`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  // 网页聊天指定第二个模型
+  const picked = await webChat({ messages: [{ role: 'user', content: '你好' }], model: 'second-model' });
+  assert.equal(picked.status, 200);
+  await picked.text();
+  assert.equal(lastFakeBridge.lastPayload.model, 'second-model');
+
+  // API 用 Key 指定第一个模型
+  const applyRes = await fetch(`${base}/api/api-keys/apply`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label: 'pick-model' }),
+  });
+  const { key } = await applyRes.json();
+  const apiRes = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'second-model', messages: [{ role: 'user', content: '你好' }] }),
+  });
+  assert.equal(apiRes.status, 200);
+  await apiRes.json();
+  assert.equal(lastFakeBridge.lastPayload.model, 'second-model');
+
+  // 网页聊天不带 model 时仍回到默认第一个，不被 API 上次的选择带偏
+  const fallback = await webChat({ messages: [{ role: 'user', content: '你好' }] });
+  assert.equal(fallback.status, 200);
+  await fallback.text();
+  assert.equal(lastFakeBridge.lastPayload.model, 'test-model');
+
+  // 指定不存在的模型：明确 404，而不是默默换一个模型生成
+  const bogus = await webChat({ messages: [{ role: 'user', content: '你好' }], model: 'no-such-model' });
+  assert.equal(bogus.status, 404);
+});
+
+test('网页聊天 streamChat：带 model 时逐条请求指定模型，不带时不发送 model 字段', async () => {
+  const { streamChat } = await import('../web/src/api.js');
+  const sse = 'data: {"choices":[{"delta":{"content":"A"}}]}\n\ndata: {"choices":[{"delta":{"content":"B"}}]}\n\ndata: [DONE]\n\n';
+  const realFetch = globalThis.fetch;
+  let captured = null;
+  globalThis.fetch = async (_url, init) => {
+    captured = JSON.parse(init.body);
+    return {
+      ok: true,
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(sse));
+          controller.close();
+        },
+      }),
+    };
+  };
+  try {
+    const parts = [];
+    for await (const delta of streamChat({ messages: [{ role: 'user', content: 'hi' }], model: 'second-model' })) parts.push(delta);
+    assert.equal(parts.join(''), 'AB');
+    assert.equal(captured.model, 'second-model');
+    for await (const delta of streamChat({ messages: [{ role: 'user', content: 'hi' }] })) parts.push(delta);
+    assert.ok(!('model' in captured), '未指定模型时不应发送 model 字段');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test('非桥接模式：自助申请与桥接状态接口返回 404', async (t) => {

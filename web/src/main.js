@@ -177,6 +177,7 @@ const els = {
   apiCurlExample: $('#apiCurlExample'),
   apiCurlCopy: $('#apiCurlCopy'),
   apiPlaygroundForm: $('#apiPlaygroundForm'),
+  apiPlaygroundModel: $('#apiPlaygroundModel'),
   apiPlaygroundSystem: $('#apiPlaygroundSystem'),
   apiPlaygroundPrompt: $('#apiPlaygroundPrompt'),
   apiPlaygroundTemperature: $('#apiPlaygroundTemperature'),
@@ -1410,6 +1411,8 @@ async function send(rawText) {
     for await (const delta of state.backend.stream({
       messages: searchBlock ? withSearchContext(context, searchBlock) : context,
       signal: controller.signal,
+      // 本机版网页：带上聊天模型选择栏选中的模型（仅本条请求生效，API 的模型选择互不影响）
+      model: MODE === 'remote' && state.appConfig.localBrowserBridge ? localChatModelId || undefined : undefined,
       onLoop: () => {
         loopDetected = true;
       },
@@ -2656,8 +2659,35 @@ let apiPlaygroundRunId = 0;
 let apiBridgeModels = [];
 
 function apiDisplayModel() {
-  if (state.appConfig.localBrowserBridge) return apiBridgeModels[0]?.id || '';
+  if (state.appConfig.localBrowserBridge) {
+    // 调试台/示例使用下拉框中选中的模型（每次请求可不同）；未选或已失效时用第一个
+    const selected = els.apiPlaygroundModel?.value || '';
+    return apiBridgeModels.some((m) => m.id === selected) ? selected : apiBridgeModels[0]?.id || '';
+  }
   return state.appConfig.model || '';
+}
+
+/** 填充调试台的模型下拉框：桥接模式列出网页可用的全部模型；服务端模式只有服务器配置的那一个。 */
+function renderPlaygroundModelOptions() {
+  const select = els.apiPlaygroundModel;
+  if (!select) return;
+  const prev = select.value;
+  const options = state.appConfig.localBrowserBridge
+    ? apiBridgeModels
+    : state.appConfig.model
+      ? [{ id: state.appConfig.model, label: state.appConfig.model }]
+      : [];
+  select.replaceChildren(
+    ...options.map((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.label || m.id;
+      return opt;
+    }),
+  );
+  if (options.some((m) => m.id === prev)) select.value = prev;
+  select.disabled = options.length <= 1;
+  select.title = options.length > 1 ? '每次请求都可以选不同的模型' : '当前只有一个可用模型';
 }
 
 function accessBaseUrl() {
@@ -2675,6 +2705,7 @@ function renderApiAccessInfo() {
   } else {
     els.apiAccessModel.textContent = state.appConfig.model || '服务端尚未配置模型';
   }
+  renderPlaygroundModelOptions();
   updateApiCurlExample();
   const enabled = !!state.appConfig.apiKeyManagerEnabled;
   if (!enabled) {
@@ -2724,10 +2755,79 @@ async function refreshBridgeStatus() {
       }
     }
     renderApiAccessInfo();
+    renderBridgeModelOptions();
     updateApiPlaygroundRequest();
   } catch {
     els.apiBridgeStatus.textContent = '本机模型状态读取失败。';
   }
+}
+
+/**
+ * 本机版网页聊天自己选用的模型（与 API 调用方各自选的模型互不影响：
+ * API 请求带什么模型就用什么模型，不会改掉这里的选择；这里切换也只影响网页接下来的发送）。
+ * 选择记在本浏览器中，下次打开仍沿用。
+ */
+const LOCAL_CHAT_MODEL_KEY = 'oj-ai.localChatModel.v1';
+let localChatModelId = '';
+
+function loadLocalChatModel() {
+  try {
+    return localStorage.getItem(LOCAL_CHAT_MODEL_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveLocalChatModel(id) {
+  try {
+    if (id) localStorage.setItem(LOCAL_CHAT_MODEL_KEY, id);
+  } catch {
+    /* 存储不可用时只在本次页面内生效 */
+  }
+}
+
+/** 把桥接可用模型填入聊天页的模型选择栏（侧边栏 + 窄屏各一个，始终同步）。 */
+function renderBridgeModelOptions() {
+  if (MODE !== 'remote' || !state.appConfig.localBrowserBridge) return;
+  const ids = apiBridgeModels.map((m) => m.id);
+  if (!ids.length) {
+    els.modelSelect.hidden = true;
+    els.modelSelectCompact.hidden = true;
+    els.modelLabel.hidden = false;
+    els.modelLabel.textContent = '模型：等待本机网页连接…';
+    return;
+  }
+  if (!ids.includes(localChatModelId)) {
+    localChatModelId = ids.includes(loadLocalChatModel()) ? loadLocalChatModel() : ids[0];
+  }
+  for (const select of [els.modelSelect, els.modelSelectCompact]) {
+    if (!select) continue;
+    const compact = select === els.modelSelectCompact;
+    select.replaceChildren(
+      ...apiBridgeModels.map((m) => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.dataset.label = m.label || m.id;
+        opt.textContent = compact ? shortModelLabel(m.label || m.id) : m.label || m.id;
+        return opt;
+      }),
+    );
+    select.value = localChatModelId;
+    select.hidden = false;
+    select.title = '选择网页聊天使用的模型（与 API 调用各自选的模型互不影响）';
+  }
+  els.modelLabel.hidden = true;
+}
+
+/** 网页聊天切换模型：只记下选择，下一次发送时按这个模型请求；不影响 API 的模型选择。 */
+function onBridgeModelChange(id) {
+  if (!apiBridgeModels.some((m) => m.id === id)) return;
+  localChatModelId = id;
+  saveLocalChatModel(id);
+  if (els.modelSelect) els.modelSelect.value = id;
+  if (els.modelSelectCompact) els.modelSelectCompact.value = id;
+  const label = apiBridgeModels.find((m) => m.id === id)?.label || id;
+  showStatus(`网页聊天已切换到 ${label}。下次发送时使用这个模型；API 调用选用的模型不受影响。`);
 }
 
 function apiPlaygroundPayload() {
@@ -3191,6 +3291,10 @@ for (const input of [els.apiPlaygroundSystem, els.apiPlaygroundPrompt, els.apiPl
   input.addEventListener('input', updateApiPlaygroundRequest);
 }
 els.apiPlaygroundStream.addEventListener('change', updateApiPlaygroundRequest);
+els.apiPlaygroundModel?.addEventListener('change', () => {
+  renderApiAccessInfo();
+  updateApiPlaygroundRequest();
+});
 els.apiPlaygroundRequestCopy.addEventListener('click', () => copyPlainText(els.apiPlaygroundRequest.textContent, els.apiPlaygroundRequestCopy));
 els.apiPlaygroundAnswerCopy.addEventListener('click', () => copyPlainText(els.apiPlaygroundAnswer.textContent, els.apiPlaygroundAnswerCopy));
 els.apiPlaygroundStop.addEventListener('click', () => {
@@ -4215,6 +4319,11 @@ els.presetSelect?.addEventListener('change', () => applyPreset(els.presetSelect.
 /** 切换模型：两个下拉框保持同步，并刷新工具面板（思考开关是否可用取决于模型）。 */
 function onModelChange(id) {
   if (!id || state.streaming) return;
+  if (MODE === 'remote') {
+    // 本机版：只是记下网页聊天自己的选择（发送时逐条带上），不影响 API 各自选用的模型
+    onBridgeModelChange(id);
+    return;
+  }
   state.backend.setModel(id);
   // 切换模型即更改默认模型：保存在本浏览器，下次打开时使用
   saveDefaultModel(id);
@@ -5370,6 +5479,12 @@ async function init() {
     } catch (err) {
       console.warn('本机模型桥接启动失败：', err);
     }
+    // 模型选择栏：拉取桥接可用模型并定期刷新（新导入模型后自动出现，不用刷新页面）
+    localChatModelId = loadLocalChatModel();
+    refreshBridgeStatus();
+    setInterval(() => {
+      if (!document.hidden) refreshBridgeStatus();
+    }, 10000);
   }
   // 生图按钮与事件需要在配置加载之后绑定
   initImageMode();
