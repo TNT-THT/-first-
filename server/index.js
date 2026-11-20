@@ -93,20 +93,28 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
   });
 
   // ---- CORS（供模式一外部 API 的浏览器跨域调用；同源网页不受影响）----
-  const corsOrigins = cfg.corsOrigins?.length ? cfg.corsOrigins : ['*'];
+  // 白名单每次请求实时读取 cfg：管理员在「API 管理」中保存后立即生效，无需重启。
+  // 空数组表示不允许任何跨域浏览器调用（同源请求不受 CORS 限制，不受影响）。
   app.use((req, res, next) => {
     if (!req.path.startsWith('/api/') && !req.path.startsWith('/v1/') && req.path !== '/healthz') {
       return next();
     }
+    const corsOrigins = Array.isArray(cfg.corsOrigins) ? cfg.corsOrigins : ['*'];
     const origin = req.get('origin') || '';
     const allowAll = corsOrigins.includes('*');
     const allowed = allowAll || (origin && corsOrigins.some((pattern) => originMatches(origin, pattern)));
     if (allowed) {
       res.setHeader('Access-Control-Allow-Origin', allowAll ? '*' : origin);
-      res.setHeader('Vary', 'Origin');
+      res.setHeader('Vary', 'Origin, Access-Control-Request-Private-Network');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, x-api-key');
       res.setHeader('Access-Control-Max-Age', '86400');
+      // 公网 HTTPS 网页调用本机回环/局域网 API 时，Chromium 的 Private Network Access
+      // 预检会带 Access-Control-Request-Private-Network；只有白名单内的来源才返回许可。
+      // 新版 Chrome 改用本地网络访问权限弹窗，此响应头对旧版预检保持兼容、无副作用。
+      if (req.method === 'OPTIONS' && req.get('access-control-request-private-network') === 'true') {
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      }
     }
     if (req.method === 'OPTIONS') return res.status(204).end();
     return next();

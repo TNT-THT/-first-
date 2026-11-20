@@ -386,6 +386,9 @@
             <label class="api-access-label" for="apiAdminGenerationParams">额外生成参数默认值（JSON 对象）</label>
             <textarea id="apiAdminGenerationParams" rows="5" spellcheck="false" placeholder='例如：{"top_p":0.9,"frequency_penalty":0.2,"stop":["\n###"]}'></textarea>
             <p class="muted small">支持 OpenAI 兼容标准参数和上游自定义 JSON 参数。模型、消息、temperature、输出 token 上限和流式模式由单独字段控制；API_MAX_TOKENS 始终是硬上限。API 调用方可按请求覆盖额外默认值。</p>
+            <label class="api-access-label" for="apiAdminCorsOrigins">允许调用 API 的网站白名单（跨域 CORS）</label>
+            <textarea id="apiAdminCorsOrigins" rows="4" spellcheck="false" placeholder="https://pd.geneluo.fun"></textarea>
+            <p class="muted small">每行填写一个网站来源（如 <code>https://pd.geneluo.fun</code>，不要带后面的路径），保存后立即生效。名单里的网页可以在浏览器中跨域调用本 API（仍必须填写有效 API Key；浏览器可能还会询问本地网络访问权限，请点允许）。本机版默认已包含本站与纸上谈兵游戏站。只添加你信任的网站：在名单网站中输入的 Key 会被该网站的网页代码接触到。填 <code>*</code> 表示允许任意网站调用（不建议）；清空则只有本站网页能用。支持 <code>https://*.example.com</code> 形式的子域通配。</p>
             <div class="api-access-actions">
               <button id="apiAdminSettingsSave" type="submit" class="btn primary small">保存并立即应用</button>
               <button id="apiAdminSettingsReset" type="button" class="btn ghost small">恢复服务器 .env 配置</button>

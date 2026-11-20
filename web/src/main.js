@@ -212,6 +212,7 @@ const els = {
   apiAdminTemperature: $('#apiAdminTemperature'),
   apiAdminMaxTokens: $('#apiAdminMaxTokens'),
   apiAdminGenerationParams: $('#apiAdminGenerationParams'),
+  apiAdminCorsOrigins: $('#apiAdminCorsOrigins'),
   apiAdminSettingsSave: $('#apiAdminSettingsSave'),
   apiAdminSettingsReset: $('#apiAdminSettingsReset'),
   apiAdminSettingsStatus: $('#apiAdminSettingsStatus'),
@@ -3186,6 +3187,7 @@ function fillAdminSettings(data) {
   els.apiAdminTemperature.value = String(data.llmTemperature ?? 0.3);
   els.apiAdminMaxTokens.value = String(data.apiMaxTokens ?? 8192);
   els.apiAdminGenerationParams.value = JSON.stringify(data.defaultGenerationParams || {}, null, 2);
+  if (els.apiAdminCorsOrigins) els.apiAdminCorsOrigins.value = (data.corsOrigins || []).join('\n');
   els.apiAdminApiKey.value = '';
   els.apiAdminClearApiKey.checked = false;
   els.apiAdminApiKeyStatus.textContent = data.llmApiKeyConfigured
@@ -3403,6 +3405,10 @@ els.apiAdminSettingsForm.addEventListener('submit', async (e) => {
       llmTemperature: Number(els.apiAdminTemperature.value),
       apiMaxTokens: Number(els.apiAdminMaxTokens.value),
       defaultGenerationParams: generationParams,
+      corsOrigins: (els.apiAdminCorsOrigins?.value || '')
+        .split(/[\n,]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
     };
     if (apiKey) patch.llmApiKey = apiKey;
     else if (els.apiAdminClearApiKey.checked) patch.llmApiKey = '';
