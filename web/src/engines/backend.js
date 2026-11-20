@@ -63,8 +63,8 @@ function createRemoteBackend() {
     async releaseIfStale() {
       return false;
     },
-    async *stream({ messages, signal }) {
-      yield* streamChat({ messages, signal });
+    async *stream({ messages, signal, model }) {
+      yield* streamChat({ messages, signal, model });
     },
   };
 }

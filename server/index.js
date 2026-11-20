@@ -344,12 +344,19 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         if (!res.writableFinished) ac.abort();
       });
       if (browserBridge) {
-        // 本机桥接模式下没有服务端上游：网页自身的聊天也交给本机网页的 WebGPU 模型，
-        // 使用桥接上报的第一个模型（即网页当前可用模型）。这样打开本机网页即可直接聊天，
-        // 不会出现“能申请 API Key、网页却不能对话”的割裂体验。
+        // 本机桥接模式下没有服务端上游：网页自身的聊天也交给本机网页的 WebGPU 模型。
+        // 网页可在请求中指定 model（模型选择栏的选择，仅影响这一条请求）；
+        // 不指定时沿用桥接上报的第一个模型。API 请求选什么模型不会改掉网页自己的选择。
         const bridgeStatus = browserBridge.status();
-        const model = bridgeStatus.models?.[0]?.id;
-        if (!bridgeStatus.connected || !model) {
+        if (!bridgeStatus.connected) {
+          return res.status(503).json({ error: '本机模型尚未连接：请保持本网页打开，待模型连接后再发送。' });
+        }
+        const requestedModel = typeof req.body?.model === 'string' && req.body.model ? req.body.model : '';
+        if (requestedModel && !bridgeStatus.models?.some((m) => m.id === requestedModel)) {
+          return res.status(404).json({ error: `模型不存在或本机网页未提供该模型：${requestedModel}` });
+        }
+        const model = requestedModel || bridgeStatus.models?.[0]?.id;
+        if (!model) {
           return res.status(503).json({ error: '本机模型尚未连接：请保持本网页打开，待模型连接后再发送。' });
         }
         res.status(200);

@@ -74,7 +74,7 @@ export async function checkSession() {
  * 以流式方式请求聊天接口，逐段产出模型生成的文本。
  * 服务端透传 OpenAI 兼容的 SSE 格式：每行 "data: {...}"，结束标记 "data: [DONE]"。
  */
-export async function* streamChat({ messages, signal }) {
+export async function* streamChat({ messages, signal, model }) {
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: {
@@ -82,7 +82,8 @@ export async function* streamChat({ messages, signal }) {
       accept: 'text/event-stream',
       authorization: `Bearer ${getToken()}`,
     },
-    body: JSON.stringify({ messages }),
+    // model 可选：本机桥接模式下网页用它指定本条请求使用的模型；不传时服务端用默认（第一个）模型
+    body: JSON.stringify(model ? { messages, model } : { messages }),
     signal,
   });
   if (!res.ok) throw new ApiError(res.status, await readError(res));

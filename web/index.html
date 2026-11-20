@@ -317,6 +317,10 @@
             <textarea id="apiPlaygroundPrompt" rows="3" maxlength="20000" placeholder="输入一个问题，在网页里直接测试 OpenAI 兼容 API" required></textarea>
             <div class="api-playground-controls">
               <label class="api-playground-field">
+                <span class="api-access-label">模型（每次请求可不同）</span>
+                <select id="apiPlaygroundModel" aria-label="模型"></select>
+              </label>
+              <label class="api-playground-field">
                 <span class="api-access-label">temperature（0–2）</span>
                 <input id="apiPlaygroundTemperature" type="number" min="0" max="2" step="any" aria-label="temperature" />
               </label>
