@@ -18,6 +18,31 @@ import { loadLocalModels } from './local-models.js';
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 10000;
 
+/**
+ * 把引擎抛出的各种错误（Error、DOMException、字符串、WebLLM 的普通对象）
+ * 整理成一句能跨 WebSocket 传回服务端的说明。此前这里只取 err.message，
+ * 拿不到时就只剩一句“本机模型生成失败”，真实原因（如 WebGPU 丢失、显存不足、
+ * 模型下载失败）全被吞掉，服务端日志和调用方都无从排查。
+ */
+export function bridgeErrorMessage(err, model) {
+  const name = err?.name ? String(err.name) : '';
+  const message = err?.message ? String(err.message) : '';
+  let detail = [name && name !== 'Error' ? name : '', message].filter(Boolean).join(': ');
+  if (!detail && err?.stack) detail = String(err.stack).split('\n')[0] || '';
+  if (!detail && typeof err === 'string') detail = err;
+  if (!detail) {
+    try {
+      const json = JSON.stringify(err);
+      if (json && json !== '{}' && json !== 'null') detail = json;
+    } catch {
+      // 循环引用等无法序列化的对象：落到 String(err)
+    }
+  }
+  if (!detail || detail === '{}') detail = String(err ?? '未知错误');
+  detail = detail.replace(/\s+/g, ' ').slice(0, 700);
+  return `本机模型生成失败（模型 ${model || '未指定'}）：${detail}`;
+}
+
 export function bridgeModels(webllmCfg) {
   const builtIn = (webllmCfg?.models || []).map((m) => ({ id: m.id, label: m.label || m.id }));
   const local = loadLocalModels().map((e) => ({ id: e.id, label: e.label || e.id }));
@@ -66,9 +91,10 @@ export function startLocalModelBridge({ webllmCfg, onStatus } = {}) {
   async function handleRequest(id, payload) {
     const controller = new AbortController();
     controllers.set(id, controller);
+    let model = '';
     try {
       refreshModels(false);
-      const model = payload?.model || models[0]?.id;
+      model = payload?.model || models[0]?.id;
       if (!model || !knownIds.has(model)) {
         send({ type: 'error', id, message: `模型不存在或本机网页未提供该模型：${model || '(未指定)'}` });
         return;
@@ -91,7 +117,9 @@ export function startLocalModelBridge({ webllmCfg, onStatus } = {}) {
       }
     } catch (err) {
       if (!controller.signal.aborted) {
-        send({ type: 'error', id, message: err?.message || '本机模型生成失败' });
+        // 原样保留到浏览器控制台（F12 可见完整对象/堆栈），同时把可读原因传回服务端与调用方
+        console.error('[local-model-bridge] 本机模型生成失败：', err);
+        send({ type: 'error', id, message: bridgeErrorMessage(err, model) });
       }
     } finally {
       controllers.delete(id);

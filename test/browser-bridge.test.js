@@ -204,6 +204,63 @@ test('真实 WebSocket 桥接：网页客户端上报模型后 API 请求经桥�
   ws.close();
 });
 
+test('真实 WebSocket 桥接：网页端回传的生成失败原因要原样到达 API 调用方', async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-ai-bridge-'));
+  const cfg = loadConfig({
+    APP_PASSWORD: PASSWORD,
+    SESSION_SECRET: 'test-secret-test-secret',
+    API_ADMIN_PASSWORD: 'manager-secret-test-password',
+    API_KEYS_FILE: path.join(dir, 'keys.json'),
+    API_SETTINGS_FILE: path.join(dir, 'settings.json'),
+  });
+  const bridge = new BrowserModelBridge();
+  const server = createServer(createApp(cfg, { browserBridge: bridge }));
+  bridge.attach(server);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    await new Promise((r) => server.close(r));
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/api/local-model-bridge`, {
+    headers: { origin: base },
+  });
+  t.after(() => ws.close());
+  await new Promise((resolve, reject) => {
+    ws.once('open', resolve);
+    ws.once('error', reject);
+  });
+  ws.send(JSON.stringify({ type: 'ready', models: [{ id: 'ws-model', label: 'WS Model' }] }));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'request') {
+      ws.send(JSON.stringify({
+        type: 'error',
+        id: msg.id,
+        message: '本机模型生成失败（模型 ws-model）：GpuResetError: device lost',
+      }));
+    }
+  });
+
+  const applyRes = await fetch(`${base}/api/api-keys/apply`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label: 'ws-error-test' }),
+  });
+  const { key } = await applyRes.json();
+  const chatRes = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'ws-model', messages: [{ role: 'user', content: '你好' }] }),
+  });
+  assert.equal(chatRes.status, 503);
+  const data = await chatRes.json();
+  assert.match(data.error.message, /GpuResetError: device lost/, '调用方应看到网页端的真实失败原因，而不是通用提示');
+  ws.close();
+});
+
 test('桥接模式：网页自身聊天 /api/chat 也经桥接返回流式回答', async (t) => {
   const base = await setup(t);
   const loginRes = await fetch(`${base}/api/login`, {

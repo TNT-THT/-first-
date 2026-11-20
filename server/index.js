@@ -398,7 +398,10 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
       const status = err instanceof HttpError
         ? err.status
         : (Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500);
-      if (!(err instanceof HttpError)) console.error('[chat] unexpected:', err);
+      if (!(err instanceof HttpError)) {
+        if (Number.isInteger(err?.status)) console.warn(`[chat] 请求失败（${status}）：${err.message || '未知错误'}`);
+        else console.error('[chat] unexpected:', err);
+      }
       if (res.headersSent) {
         res.end();
       } else {
@@ -531,7 +534,12 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
       const status = err instanceof HttpError
         ? err.status
         : (Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500);
-      if (!(err instanceof HttpError)) console.error('[v1/chat] unexpected:', err);
+      if (!(err instanceof HttpError)) {
+        // 带 status 的是可预期的运行失败（本机网页未连接、模型生成失败、超时等）：
+        // 只记一行真实原因，不打印误导性的包装堆栈；其余才是未预期异常。
+        if (Number.isInteger(err?.status)) console.warn(`[v1/chat] 请求失败（${status}）：${err.message || '未知错误'}`);
+        else console.error('[v1/chat] unexpected:', err);
+      }
       if (res.headersSent) {
         res.end();
       } else {
