@@ -168,19 +168,34 @@ function createWebLLMBackend(cfg) {
         signal,
       });
     },
-    async *stream({ messages, signal, onLoop, temperature: temperatureOverride, maxTokens: maxTokensOverride }) {
+    async *stream({
+      messages,
+      signal,
+      onLoop,
+      temperature: temperatureOverride,
+      maxTokens: maxTokensOverride,
+      // 本机 API 桥接专用：服务端给出的输出硬上限（不覆盖本机参数，只封顶）
+      hardMaxTokens = null,
+      // 本机 API 桥接专用：已校验的生成参数（topP/stop/惩罚项/seed/responseFormat 等）
+      generation = {},
+      // 本机 API 桥接专用：服务端系统提示词，附加到本机系统提示词之后
+      systemPrompt: extraSystemPrompt = '',
+    }) {
       // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
-      const system = {
-        role: 'system',
-        content: `${composeSystemPrompt(cfg.systemPrompt, modelId)}\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}`,
-      };
+      let systemContent = `${composeSystemPrompt(cfg.systemPrompt, modelId)}\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}`;
+      const extraSystem = String(extraSystemPrompt || '').trim();
+      if (extraSystem && !systemContent.includes(extraSystem)) {
+        systemContent = `${systemContent}\n\n${extraSystem}`;
+      }
+      const system = { role: 'system', content: systemContent };
       const params = layeredOverrides(modelId);
-      const repetitionPenalty = params.repetitionPenalty ?? cfg.repetitionPenalty ?? null;
+      const repetitionPenalty = generation.repetitionPenalty ?? params.repetitionPenalty ?? cfg.repetitionPenalty ?? null;
       const thinkingOn = getThinkingPref();
       const w = windowsFor(cfg, modelId, thinkingOn);
       // 调用方显式给出的采样参数优先（本机 API 桥接透传），其次管理员参数，最后配置默认值
       const temperature = temperatureOverride ?? params.temperature ?? cfg.temperature;
-      const answerCap = maxTokensOverride ?? params.maxTokens ?? cfg.maxTokens;
+      const localCap = maxTokensOverride ?? params.maxTokens ?? cfg.maxTokens;
+      const answerCap = hardMaxTokens != null ? Math.min(localCap ?? hardMaxTokens, hardMaxTokens) : localCap;
       const overflowError = () =>
         new Error('Prompt tokens exceed context window size：对话内容已占满上下文窗口，请新建对话或减少历史');
       // 历史超出提示词空间时从最早的消息开始丢弃；若启用了思考预算，为强制输出说明预留空间
@@ -214,6 +229,12 @@ function createWebLLMBackend(cfg) {
         thinkingBudget: plan.thinkingTokens || null,
         repetitionPenalty,
         onLoop,
+        topP: generation.topP ?? null,
+        stop: generation.stop ?? null,
+        frequencyPenalty: generation.frequencyPenalty ?? null,
+        presencePenalty: generation.presencePenalty ?? null,
+        seed: generation.seed ?? null,
+        responseFormat: generation.responseFormat ?? null,
       });
       // 思考预算用完仍未回答：直接发起回答请求（关闭思考，并附上已写出的部分思考）
       if (first?.forced && !signal?.aborted) {
@@ -236,6 +257,12 @@ function createWebLLMBackend(cfg) {
           thinkingEnabled: false,
           repetitionPenalty,
           onLoop,
+          topP: generation.topP ?? null,
+          stop: generation.stop ?? null,
+          frequencyPenalty: generation.frequencyPenalty ?? null,
+          presencePenalty: generation.presencePenalty ?? null,
+          seed: generation.seed ?? null,
+          responseFormat: generation.responseFormat ?? null,
         });
       }
     },

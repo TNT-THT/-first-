@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import { execFile } from 'node:child_process';
 import WebSocket from 'ws';
 import { createApp } from '../server/index.js';
 import { loadConfig } from '../server/config.js';
@@ -91,8 +92,10 @@ test('桥接模式：网页可自助申请 API Key，且申请的 Key 可调用 
   const chat = await chatRes.json();
   assert.equal(chat.object, 'chat.completion');
   assert.equal(chat.choices[0].message.content, '你好，世界');
-  assert.equal(lastFakeBridge.lastPayload.temperature, 0.3);
-  assert.equal(lastFakeBridge.lastPayload.maxTokens, 8192);
+  // 调用方未指定时不再用服务端默认值压住本机参数：temperature/maxTokens 不传，只给硬上限
+  assert.equal(lastFakeBridge.lastPayload.temperature, undefined);
+  assert.equal(lastFakeBridge.lastPayload.maxTokens, undefined);
+  assert.equal(lastFakeBridge.lastPayload.hardMaxTokens, 8192);
 });
 
 test('桥接模式：CSP 放行 WebAssembly 与模型下载域名，网页模型才能加载', async (t) => {
@@ -384,4 +387,236 @@ test('非桥接模式：自助申请与桥接状态接口返回 404', async (t) 
 
   const statusRes = await fetch(`${base}/api/local-model-bridge/status`);
   assert.equal(statusRes.status, 404);
+});
+
+// ---- 安全与健壮性修复回归 ----
+
+function rawRequest(base, { method = 'POST', path: reqPath, headers = {}, body = '' }) {
+  const url = new URL(base);
+  return new Promise((resolve, reject) => {
+    const req = httpRequest(
+      { hostname: url.hostname, port: url.port, path: reqPath, method, headers },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString('utf8') }));
+      },
+    );
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+async function applyKey(base) {
+  const res = await fetch(`${base}/api/api-keys/apply`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ label: 'hardening-test' }),
+  });
+  assert.equal(res.status, 201);
+  return (await res.json()).key;
+}
+
+test('桥接模式：申请 API Key 只允许同源，跨源网站（哪怕在白名单里）不能替用户申请', async (t) => {
+  const base = await setup(t);
+  const cross = await rawRequest(base, {
+    path: '/api/api-keys/apply',
+    headers: { 'content-type': 'application/json', origin: 'https://pd.geneluo.fun' },
+    body: JSON.stringify({ label: 'cross-site' }),
+  });
+  assert.equal(cross.status, 403);
+  assert.match(cross.text, /只允许在本机网页中申请/);
+
+  const sameOrigin = await rawRequest(base, {
+    path: '/api/api-keys/apply',
+    headers: { 'content-type': 'application/json', origin: base },
+    body: JSON.stringify({ label: 'same-site' }),
+  });
+  assert.equal(sameOrigin.status, 201);
+
+  // 跨域许可只发给 /v1：白名单来源对 /api/* 预检拿不到 Access-Control-Allow-Origin
+  const apiPreflight = await rawRequest(base, {
+    method: 'OPTIONS',
+    path: '/api/api-keys/apply',
+    headers: { origin: 'https://pd.geneluo.fun', 'access-control-request-method': 'POST' },
+  });
+  assert.equal(apiPreflight.headers['access-control-allow-origin'], undefined);
+  const v1Preflight = await rawRequest(base, {
+    method: 'OPTIONS',
+    path: '/v1/models',
+    headers: { origin: 'https://pd.geneluo.fun', 'access-control-request-method': 'GET' },
+  });
+  assert.ok(v1Preflight.headers['access-control-allow-origin'], '/v1 预检应获得跨域许可');
+});
+
+test('桥接模式：不支持的生成参数明确拒绝（400），支持的参数与显式采样值透传', async (t) => {
+  const base = await setup(t);
+  const key = await applyKey(base);
+
+  const bad = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'test-model',
+      messages: [{ role: 'user', content: '你好' }],
+      n: 2,
+    }),
+  });
+  assert.equal(bad.status, 400);
+  assert.match((await bad.json()).error.message, /不支持生成参数：n/);
+
+  const ok = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'test-model',
+      messages: [{ role: 'user', content: '你好' }],
+      temperature: 0.7,
+      max_tokens: 128,
+      top_p: 0.9,
+      stop: ['<end>'],
+    }),
+  });
+  assert.equal(ok.status, 200);
+  await ok.json();
+  assert.equal(lastFakeBridge.lastPayload.temperature, 0.7, '调用方显式温度应透传');
+  assert.equal(lastFakeBridge.lastPayload.maxTokens, 128);
+  assert.equal(lastFakeBridge.lastPayload.hardMaxTokens, 128);
+  assert.equal(lastFakeBridge.lastPayload.params.top_p, 0.9);
+  assert.deepEqual(lastFakeBridge.lastPayload.params.stop, ['<end>']);
+  assert.ok(lastFakeBridge.lastPayload.systemPrompt, '服务端系统提示词应随桥接请求下发');
+});
+
+async function setupRealBridge(t) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-ai-bridge-hardening-'));
+  const cfg = loadConfig({
+    APP_PASSWORD: PASSWORD,
+    SESSION_SECRET: 'test-secret-test-secret',
+    API_ADMIN_PASSWORD: 'manager-secret-test-password',
+    API_KEYS_FILE: path.join(dir, 'keys.json'),
+    API_SETTINGS_FILE: path.join(dir, 'settings.json'),
+  });
+  const bridge = new BrowserModelBridge();
+  const server = createServer(createApp(cfg, { browserBridge: bridge }));
+  bridge.attach(server);
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const sockets = new Set();
+  t.after(async () => {
+    // 先终止所有桥接连接再关服务，避免 server.close 等连接拖住测试收尾
+    for (const ws of sockets) {
+      try { ws.terminate(); } catch {}
+    }
+    await new Promise((r) => server.close(r));
+    await rm(dir, { recursive: true, force: true });
+  });
+  const connect = async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/api/local-model-bridge`, {
+      headers: { origin: base },
+    });
+    sockets.add(ws);
+    ws.once('close', () => sockets.delete(ws));
+    await new Promise((resolve, reject) => {
+      ws.once('open', resolve);
+      ws.once('error', reject);
+    });
+    ws.send(JSON.stringify({ type: 'ready', models: [{ id: 'ws-model', label: 'WS Model' }] }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return ws;
+  };
+  return { bridge, base, connect };
+}
+
+test('真实 WebSocket 桥接：畸形消息（null）不能打崩服务，之后请求照常', async (t) => {
+  const { bridge, connect } = await setupRealBridge(t);
+  const ws = await connect();
+  t.after(() => ws.close());
+  ws.send('null');
+  ws.send('{"type":123}');
+  ws.send('not-json');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(bridge.status().connected, true, '畸形消息后连接应保持可用');
+
+  const done = new Promise((resolve, reject) => {
+    ws.on('message', (raw) => {
+      const msg = JSON.parse(String(raw));
+      if (msg.type === 'request') {
+        ws.send(JSON.stringify({ type: 'complete', id: msg.id, finishReason: 'stop' }));
+        resolve();
+      }
+    });
+    bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {}).then(
+      (v) => assert.equal(v.finishReason, 'stop'),
+      reject,
+    );
+  });
+  await done;
+  ws.close();
+});
+
+test('真实 WebSocket 桥接：连接被新网页接管时，在途请求立即失败而不是挂到超时', async (t) => {
+  const { bridge, connect } = await setupRealBridge(t);
+  const ws1 = await connect();
+  t.after(() => { try { ws1.close(); } catch {} });
+
+  const requestSeen = new Promise((resolve) => {
+    ws1.on('message', (raw) => {
+      const msg = JSON.parse(String(raw));
+      if (msg.type === 'request') resolve(msg.id); // 故意不应答，让请求保持在途
+    });
+  });
+  const pending = bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {});
+  // 立刻挂上处理函数：接管发生在 await 期间，晚挂会被判为未处理的拒绝
+  const settled = pending.then(() => 'resolved', (err) => err);
+  await requestSeen;
+
+  const ws2 = await connect(); // 新标签页接管连接
+  t.after(() => { try { ws2.close(); } catch {} });
+
+  const outcome = await Promise.race([
+    settled,
+    new Promise((resolve) => setTimeout(() => resolve('still-pending'), 2000)),
+  ]);
+  assert.notEqual(outcome, 'still-pending', '在途请求不能挂到 10 分钟超时');
+  assert.notEqual(outcome, 'resolved');
+  assert.match(outcome.message, /接管/);
+  assert.equal(outcome.status, 503);
+});
+
+test('真实 WebSocket 桥接：旧版网页只回通用文案时，服务端补上模型与排查指引', async (t) => {
+  const { bridge, connect } = await setupRealBridge(t);
+  const ws = await connect();
+  t.after(() => ws.close());
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'request') {
+      ws.send(JSON.stringify({ type: 'error', id: msg.id, message: '本机模型生成失败' }));
+    }
+  });
+  await assert.rejects(
+    bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {}),
+    /本机模型生成失败（模型 ws-model）：网页未提供具体原因/,
+  );
+  ws.close();
+});
+
+test('桥接模式绑定非回环地址时服务拒绝启动（除非显式 OJ_ALLOW_PUBLIC_BRIDGE=1）', async () => {
+  const env = {
+    ...process.env,
+    LOCAL_BROWSER_BRIDGE: '1',
+    HOST: '0.0.0.0',
+    PORT: '0',
+    APP_PASSWORD: PASSWORD,
+    SESSION_SECRET: 'test-secret-test-secret',
+    API_ADMIN_PASSWORD: 'manager-secret-test-password',
+    API_KEYS_FILE: path.join(tmpdir(), 'oj-bridge-keys.json'),
+    API_SETTINGS_FILE: path.join(tmpdir(), 'oj-bridge-settings.json'),
+  };
+  const result = await new Promise((resolve) => {
+    execFile(process.execPath, ['server/index.js'], { cwd: path.resolve('.'), env, timeout: 15000 }, (err, stdout, stderr) => {
+      resolve({ code: err?.code ?? 0, stdout, stderr });
+    });
+  });
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /只能绑定本机回环地址/);
 });

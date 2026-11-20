@@ -112,7 +112,7 @@ export class ApiSettingsStore {
   }
 }
 
-function validateSettings(input) {
+export function validateSettings(input) {
   if (!isPlainObject(input)) throw new HttpError(400, '设置必须是 JSON 对象');
   const result = {};
   for (const key of Object.keys(input)) {
@@ -217,6 +217,10 @@ function validateCorsOrigins(input) {
       }
       if (base.username || base.password || base.search || base.hash || (base.pathname && base.pathname !== '/')) {
         throw new HttpError(400, `跨域白名单只能填写网站来源，不能带路径或账号信息：${value}`);
+      }
+      // 通配至少要落在二级域名上：https://*.com 会放行整个顶级域下的任意网站，范围过宽
+      if (!base.hostname.includes('.')) {
+        throw new HttpError(400, `通配白名单至少需要写到二级域名，例如 https://*.example.com：${value}`);
       }
       const normalized = `${base.protocol}//*.${base.hostname}${base.port ? `:${base.port}` : ''}`;
       if (!result.includes(normalized)) result.push(normalized);

@@ -1,7 +1,7 @@
 import express from 'express';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { BrowserModelBridge } from './browser-model-bridge.js';
+import { BrowserModelBridge, BRIDGE_SUPPORTED_GENERATION_PARAMS } from './browser-model-bridge.js';
 import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -92,11 +92,13 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     next();
   });
 
-  // ---- CORS（供模式一外部 API 的浏览器跨域调用；同源网页不受影响）----
+  // ---- CORS（仅供模式一外部 API /v1 的浏览器跨域调用；同源网页不受影响）----
   // 白名单每次请求实时读取 cfg：管理员在「API 管理」中保存后立即生效，无需重启。
   // 空数组表示不允许任何跨域浏览器调用（同源请求不受 CORS 限制，不受影响）。
+  // 注意：跨域许可只发给 /v1，绝不发给 /api/*——否则白名单里的第三方网站可以
+  // 绕过用户直接调用自助申请 Key、登录等本机接口（本站网页是同源的，不需要 CORS）。
   app.use((req, res, next) => {
-    if (!req.path.startsWith('/api/') && !req.path.startsWith('/v1/') && req.path !== '/healthz') {
+    if (!req.path.startsWith('/v1/')) {
       return next();
     }
     const corsOrigins = Array.isArray(cfg.corsOrigins) ? cfg.corsOrigins : ['*'];
@@ -212,9 +214,23 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     return res.json(browserBridge.status());
   });
 
-  // 本机 API 申请：仅本机/局域网部署开启；每个 IP 每 10 分钟最多申请 3 把。
+  // 本机 API 申请：仅本机桥接部署开启；每个 IP 每 10 分钟最多申请 3 把。
+  // 只允许本站网页（同源）申请：带 Origin 的浏览器请求若来源与本站不一致，一律拒绝，
+  // 防止被加入跨域白名单的第三方网站绕过用户自行申请 Key。
   app.post('/api/api-keys/apply', async (req, res, next) => {
     if (!browserBridge) return res.status(404).json({ error: '本机 API Key 申请未启用。' });
+    const origin = req.get('origin');
+    if (origin) {
+      let originHost = '';
+      try {
+        originHost = new URL(origin).host;
+      } catch {
+        /* 无法解析的 Origin 按跨源处理 */
+      }
+      if (!originHost || originHost !== req.get('host')) {
+        return res.status(403).json({ error: '只允许在本机网页中申请 API Key。' });
+      }
+    }
     const ip = req.ip;
     if (publicKeyApplyLimiter.blocked(ip)) {
       return res.status(429).json({ error: '申请次数过多，请 10 分钟后再试。' });
@@ -321,10 +337,10 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
   });
 
   // 机器可读接入信息 + 人类可读文档页（模式一 API / 模式二链接）
-  app.get('/api/info', (_req, res) => res.json(buildApiInfo(cfg)));
+  app.get('/api/info', (_req, res) => res.json(buildApiInfo(cfg, browserBridge?.status())));
   app.get('/api/docs', (_req, res) => {
     res.type('html').setHeader('Cache-Control', 'no-cache');
-    res.send(buildDocsHtml(cfg));
+    res.send(buildDocsHtml(cfg, browserBridge?.status()));
   });
 
   app.post('/api/login', (req, res) => {
@@ -378,7 +394,9 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         const emit = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
         emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
         await browserBridge.run(
-          { model, messages, temperature: cfg.llmTemperature, maxTokens: cfg.apiMaxTokens ?? 8192 },
+          // 不传 temperature/maxTokens：让浏览器按该模型的本机参数（管理员面板/预设）决定，
+          // 服务端只给输出硬上限，避免服务端默认值把本机面板的温度与最大输出“压住”。
+          { model, messages, hardMaxTokens: cfg.apiMaxTokens ?? 8192 },
           {
             signal: ac.signal,
             onDelta(delta) {
@@ -454,6 +472,18 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         if (!model || !available.some((entry) => entry.id === model)) {
           return openAiError(res, 404, `模型不存在或本机网页未提供该模型：${model || '(未指定)'}`, 'model_not_found');
         }
+        // 本机引擎只支持一部分生成参数：不支持的提前明确拒绝（400），不静默丢弃假装生效
+        const bridgeParams = { ...(cfg.defaultGenerationParams || {}), ...params };
+        const unsupportedParams = Object.keys(bridgeParams).filter(
+          (key) => !BRIDGE_SUPPORTED_GENERATION_PARAMS.includes(key),
+        );
+        if (unsupportedParams.length) {
+          return openAiError(
+            res,
+            400,
+            `本机模型不支持生成参数：${unsupportedParams.join('、')}。支持的参数：${BRIDGE_SUPPORTED_GENERATION_PARAMS.join('、')}。`,
+          );
+        }
         const id = `chatcmpl-${randomUUID().replaceAll('-', '')}`;
         const created = Math.floor(Date.now() / 1000);
         let content = '';
@@ -468,9 +498,12 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
           await browserBridge.run({
             model,
             messages,
-            temperature: temperature ?? cfg.llmTemperature,
-            maxTokens: outputLimit,
-            params: { ...(cfg.defaultGenerationParams || {}), ...params },
+            // 调用方没指定时不传 temperature/maxTokens，让本机模型参数决定；outputLimit 只作硬上限
+            temperature,
+            maxTokens,
+            hardMaxTokens: outputLimit,
+            params: bridgeParams,
+            systemPrompt: cfg.systemPrompt,
           }, {
             signal: ac.signal,
             onDelta(delta) {
@@ -488,9 +521,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         const result = await browserBridge.run({
           model,
           messages,
-          temperature: temperature ?? cfg.llmTemperature,
-          maxTokens: outputLimit,
-          params: { ...(cfg.defaultGenerationParams || {}), ...params },
+          temperature,
+          maxTokens,
+          hardMaxTokens: outputLimit,
+          params: bridgeParams,
+          systemPrompt: cfg.systemPrompt,
         }, {
           signal: ac.signal,
           onDelta(delta) { content += delta; },
@@ -541,6 +576,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         else console.error('[v1/chat] unexpected:', err);
       }
       if (res.headersSent) {
+        // 流式响应已经发头：把失败原因作为 SSE error 事件发出去再结束，
+        // 否则调用方只会看到流莫名中断（或一句通用文案），拿不到真实原因。
+        try {
+          res.write(`data: ${JSON.stringify({ error: { message: err.message || '服务器内部错误', type: 'invalid_request_error', code: null } })}\n\n`);
+        } catch { /* 连接已断开 */ }
         res.end();
       } else {
         openAiError(res, status, err.message || '服务器内部错误', status === 404 ? 'model_not_found' : 'invalid_request_error');
@@ -612,6 +652,19 @@ if (isMain) {
     console.warn('[warn] 未设置 SESSION_SECRET，本次使用随机密钥，重启后需重新登录。');
   }
   const bridgeEnabled = process.env.LOCAL_BROWSER_BRIDGE === '1';
+  if (bridgeEnabled) {
+    // 桥接模式按“同一台电脑”设计：自助申请 Key 与模型桥接都没有公网级鉴权。
+    // 若误把服务绑到局域网/公网地址，任何能连上的人都能申请 Key 并使用本机显卡，
+    // 因此默认拒绝启动；确需如此部署时须显式设置 OJ_ALLOW_PUBLIC_BRIDGE=1 自行承担风险。
+    const loopbackHosts = new Set(['127.0.0.1', '::1', '[::1]', 'localhost']);
+    if (!loopbackHosts.has(String(cfg.host).toLowerCase()) && process.env.OJ_ALLOW_PUBLIC_BRIDGE !== '1') {
+      console.error(
+        `[start] 本机网页桥接只能绑定本机回环地址（当前 HOST=${cfg.host}）。` +
+          '如确需绑定其他地址，请设置 OJ_ALLOW_PUBLIC_BRIDGE=1 并自行做好网络隔离与访问控制。',
+      );
+      process.exit(1);
+    }
+  }
   if (bridgeEnabled) {
     console.log('[local] 本机网页模型桥接已启用：打开本网页并保持打开，即可聊天并使用 /v1 API（无需配置 LLM_BASE_URL / LLM_MODEL）。');
   } else if (!cfg.llmBaseUrl || !cfg.llmModel) {

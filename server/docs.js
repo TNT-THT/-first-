@@ -13,13 +13,13 @@ export function escapeHtml(s) {
     .replaceAll('"', '&quot;');
 }
 
-export function buildApiInfo(cfg) {
+export function buildApiInfo(cfg, bridgeStatus = null) {
   const base = cfg.publicBaseUrl || '';
   const abs = (p) => (base ? `${base}${p}` : p);
   return {
     appName: cfg.appName,
     version: API_VERSION,
-    model: cfg.llmModel || null,
+    model: bridgeStatus?.models?.[0]?.id || cfg.llmModel || null,
     baseUrl: base || null,
     endpoints: {
       health: abs('/healthz'),
@@ -57,9 +57,9 @@ export function buildApiInfo(cfg) {
   };
 }
 
-export function buildDocsHtml(cfg) {
+export function buildDocsHtml(cfg, bridgeStatus = null) {
   const base = cfg.publicBaseUrl || 'https://ai.example.com';
-  const model = cfg.llmModel || 'your-model';
+  const model = bridgeStatus?.models?.[0]?.id || cfg.llmModel || 'your-model';
   const curl = `curl ${base}/v1/chat/completions \\
   -H "Authorization: Bearer <API_KEY>" \\
   -H "Content-Type: application/json" \\
