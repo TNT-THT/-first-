@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createApp } from '../server/index.js';
 import { loadConfig } from '../server/config.js';
+import { validateSettings } from '../server/settings-store.js';
 import { startMockLLM } from './mock-llm.js';
 
 const PASSWORD = 'correct-horse-battery';
@@ -424,6 +425,32 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
     await new Promise((resolve) => settingsServer.close(resolve));
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('跨域许可只发给 /v1，白名单来源也不能跨域调用 /api 接口', async () => {
+  const restricted = createApp(loadConfig({ APP_PASSWORD: PASSWORD, CORS_ORIGINS: 'https://pd.geneluo.fun' }));
+  const s = await new Promise((resolve) => {
+    const srv = restricted.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+  const origin = 'https://pd.geneluo.fun';
+  for (const p of ['/api/api-keys/apply', '/api/login', '/api/admin/settings', '/healthz']) {
+    const pre = await fetch(`http://127.0.0.1:${s.address().port}${p}`, {
+      method: 'OPTIONS',
+      headers: { origin, 'access-control-request-method': 'POST' },
+    });
+    assert.equal(pre.headers.get('access-control-allow-origin'), null, `${p} 不应获得跨域许可`);
+  }
+  const v1 = await fetch(`http://127.0.0.1:${s.address().port}/v1/models`, {
+    method: 'OPTIONS',
+    headers: { origin, 'access-control-request-method': 'GET' },
+  });
+  assert.equal(v1.headers.get('access-control-allow-origin'), origin, '/v1 应获得跨域许可');
+  await new Promise((resolve) => s.close(resolve));
+});
+
+test('跨域白名单校验：https://*.com 这类一级后缀通配过宽，应被拒绝', () => {
+  assert.throws(() => validateSettings({ corsOrigins: ['https://*.com'] }), /至少需要写到二级域名/);
+  assert.deepEqual(validateSettings({ corsOrigins: ['https://*.example.com'] }).corsOrigins, ['https://*.example.com']);
 });
 
 test('CORS_ORIGINS 支持显式来源与通配子域白名单', async () => {

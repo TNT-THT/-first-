@@ -21,7 +21,9 @@ import {
   ensureNodeRuntimes,
   extractTarGzEntry,
   extractZipEntry,
+  parseShasums,
   selectedNodeRuntimeTargets,
+  sha256Hex,
 } from '../scripts/node-runtime.mjs';
 
 // 读回中央目录中每个条目的 Unix 权限位（外部属性高 16 位）
@@ -156,6 +158,7 @@ test('启动文件：源文件存在，且中文文件名与权限位正确写�
   const modes = unixModes(zip);
   assert.equal(modes['使用说明.txt'], 0o100644);
   assert.equal(modes['start-mac.command'], 0o100755);
+  assert.equal(modes['start-linux.sh'], 0o100755, 'Linux 包应带可双击启动文件');
   assert.equal(modes['serve-site.py'], 0o100755);
   assert.equal(modes['start-windows.bat'], 0o100644);
   assert.equal(modes['serve-api.ps1'], 0o100644);
@@ -221,6 +224,7 @@ test('内置 Node 运行时：从缓存读取已下载的二进制，离线时�
   t.after(() => rm(dir, { recursive: true, force: true }));
   const version = 'v22.22.3';
   await writeFile(join(dir, `${version}-win-x64`), 'FAKE-WIN-NODE');
+  await writeFile(join(dir, `${version}-win-x64.sha256`), `${sha256Hex(Buffer.from('FAKE-WIN-NODE'))}\n`);
   const targets = NODE_RUNTIME_TARGETS.filter((x) => ['win-x64', 'linux-x64'].includes(x.id));
   const { files, missing } = await ensureNodeRuntimes({
     projectRoot: dir,
@@ -234,6 +238,36 @@ test('内置 Node 运行时：从缓存读取已下载的二进制，离线时�
   assert.equal(files[0].name, 'runtime/node-win-x64.exe');
   assert.equal(files[0].data.toString('utf8'), 'FAKE-WIN-NODE');
   assert.deepEqual(missing, ['linux-x64']);
+});
+
+test('内置 Node 运行时：缓存损坏或无校验记录时不打包', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'oj-node-runtime-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const version = 'v22.22.3';
+  // 内容与校验和对不上
+  await writeFile(join(dir, `${version}-win-x64`), 'CORRUPTED');
+  await writeFile(join(dir, `${version}-win-x64.sha256`), `${sha256Hex(Buffer.from('OTHER'))}\n`);
+  // 完全没有校验记录
+  await writeFile(join(dir, `${version}-linux-x64`), 'NO-CHECKSUM');
+  const targets = NODE_RUNTIME_TARGETS.filter((x) => ['win-x64', 'linux-x64'].includes(x.id));
+  const { files, missing } = await ensureNodeRuntimes({
+    projectRoot: dir,
+    cacheDir: dir,
+    version,
+    targets,
+    offline: true,
+    log: { log() {}, warn() {} },
+  });
+  assert.deepEqual(files, []);
+  assert.deepEqual(missing, ['win-x64', 'linux-x64']);
+});
+
+test('内置 Node 运行时：官方校验和清单解析', () => {
+  const text = `${'a'.repeat(64)}  node-v22.22.3-linux-x64.tar.gz\n${'B'.repeat(64)} *node-v22.22.3-win-x64.zip\n`;
+  assert.equal(parseShasums(text, 'node-v22.22.3-linux-x64.tar.gz'), 'a'.repeat(64));
+  assert.equal(parseShasums(text, 'node-v22.22.3-win-x64.zip'), 'b'.repeat(64));
+  assert.equal(parseShasums(text, 'node-v22.22.3-darwin-arm64.tar.gz'), null);
+  assert.equal(sha256Hex(Buffer.from('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
 });
 
 test('运行时解压：能从 ZIP 与 TAR.GZ 中取出 node 二进制', () => {

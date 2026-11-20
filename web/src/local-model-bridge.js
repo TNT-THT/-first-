@@ -4,7 +4,7 @@
  *
  * 协议（JSON 文本帧）：
  *   → { type: 'ready', models: [{ id, label }] }   连接后上报可用模型（内置 + 本机导入）
- *   ← { type: 'request', id, payload }             payload: { model, messages, temperature, maxTokens }
+ *   ← { type: 'request', id, payload }             payload: { model, messages, temperature, maxTokens, hardMaxTokens, params, systemPrompt }
  *   → { type: 'delta', id, content }               流式片段
  *   → { type: 'complete', id, finishReason }
  *   → { type: 'error', id, message }
@@ -43,6 +43,54 @@ export function bridgeErrorMessage(err, model) {
   return `本机模型生成失败（模型 ${model || '未指定'}）：${detail}`;
 }
 
+/**
+ * 把服务端传来的 OpenAI 生成参数（params）映射为本机引擎可用的选项。
+ * 服务端已提前拒绝不支持的参数；这里再做一次数值校验，非法值直接抛错回传原因，
+ * 不静默丢弃——调用方必须能知道参数到底有没有生效。
+ */
+export function mapBridgeParams(params) {
+  if (!params || typeof params !== 'object') return {};
+  const out = {};
+  const bad = (key, want) => new Error(`生成参数 ${key} 不合法：需要${want}`);
+  if (params.top_p !== undefined && params.top_p !== null) {
+    const v = Number(params.top_p);
+    if (!Number.isFinite(v) || v <= 0 || v > 1) throw bad('top_p', ' 0 到 1 之间的数字');
+    out.topP = v;
+  }
+  if (params.stop !== undefined && params.stop !== null) {
+    const list = (Array.isArray(params.stop) ? params.stop : [params.stop])
+      .map((s) => String(s))
+      .filter(Boolean)
+      .slice(0, 4);
+    if (!list.length) throw bad('stop', '非空字符串或字符串数组');
+    out.stop = list;
+  }
+  for (const [key, field] of [['frequency_penalty', 'frequencyPenalty'], ['presence_penalty', 'presencePenalty']]) {
+    if (params[key] !== undefined && params[key] !== null) {
+      const v = Number(params[key]);
+      if (!Number.isFinite(v) || v < -2 || v > 2) throw bad(key, ' -2 到 2 之间的数字');
+      out[field] = v;
+    }
+  }
+  if (params.repetition_penalty !== undefined && params.repetition_penalty !== null) {
+    const v = Number(params.repetition_penalty);
+    if (!Number.isFinite(v) || v <= 0) throw bad('repetition_penalty', '大于 0 的数字');
+    out.repetitionPenalty = v;
+  }
+  if (params.seed !== undefined && params.seed !== null) {
+    const v = Number(params.seed);
+    if (!Number.isInteger(v)) throw bad('seed', '整数');
+    out.seed = v;
+  }
+  if (params.response_format !== undefined && params.response_format !== null) {
+    const type = params.response_format?.type;
+    if (type === 'json_object') out.responseFormat = { type: 'json_object' };
+    else if (type === 'text') out.responseFormat = { type: 'text' };
+    else throw new Error('本机模型仅支持 response_format 的 text 与 json_object 类型');
+  }
+  return out;
+}
+
 export function bridgeModels(webllmCfg) {
   const builtIn = (webllmCfg?.models || []).map((m) => ({ id: m.id, label: m.label || m.id }));
   const local = loadLocalModels().map((e) => ({ id: e.id, label: e.label || e.id }));
@@ -68,6 +116,8 @@ export function startLocalModelBridge({ webllmCfg, onStatus } = {}) {
   // 引擎同一时间只处理一个生成：请求排队执行
   let queue = Promise.resolve();
   const controllers = new Map();
+  // 已被服务端取消、但还在排队没轮到的请求：轮到时直接跳过，不要白占显卡
+  const cancelledIds = new Set();
 
   const send = (obj) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -81,14 +131,19 @@ export function startLocalModelBridge({ webllmCfg, onStatus } = {}) {
 
   const setStatus = (connected) => onStatus?.({ connected, models });
 
+  let lastModelsSignature = '';
   const refreshModels = (announce = true) => {
     models = bridgeModels(webllmCfg);
     knownIds = new Set(models.map((m) => m.id));
-    if (announce) send({ type: 'ready', models });
+    // 模型列表没变时不重复上报，避免每次请求前的刷新都给服务端发一遍 ready
+    const signature = models.map((m) => m.id).join('\n');
+    if (announce && signature !== lastModelsSignature) send({ type: 'ready', models });
+    lastModelsSignature = signature;
     setStatus(!!ws && ws.readyState === WebSocket.OPEN);
   };
 
   async function handleRequest(id, payload) {
+    if (cancelledIds.delete(id)) return; // 排队期间已被取消，直接跳过
     const controller = new AbortController();
     controllers.set(id, controller);
     let model = '';
@@ -103,11 +158,15 @@ export function startLocalModelBridge({ webllmCfg, onStatus } = {}) {
       await backend.ensureReady(() => {}, { signal: controller.signal });
       if (controller.signal.aborted) return;
       const messages = Array.isArray(payload.messages) ? payload.messages : [];
+      const generation = mapBridgeParams(payload.params);
       for await (const delta of backend.stream({
         messages,
         signal: controller.signal,
         temperature: payload.temperature,
         maxTokens: payload.maxTokens,
+        hardMaxTokens: payload.hardMaxTokens,
+        generation,
+        systemPrompt: payload.systemPrompt,
       })) {
         if (controller.signal.aborted) break;
         send({ type: 'delta', id, content: delta });
@@ -145,7 +204,12 @@ export function startLocalModelBridge({ webllmCfg, onStatus } = {}) {
       if (msg.type === 'request' && msg.id) {
         queue = queue.then(() => handleRequest(msg.id, msg.payload)).catch(() => {});
       } else if (msg.type === 'cancel' && msg.id) {
-        controllers.get(msg.id)?.abort();
+        // 正在生成的立即中断；还在排队的记下来，轮到时跳过
+        if (controllers.has(msg.id)) controllers.get(msg.id).abort();
+        else {
+          if (cancelledIds.size > 256) cancelledIds.clear();
+          cancelledIds.add(msg.id);
+        }
       }
     };
     const scheduleReconnect = () => {

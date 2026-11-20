@@ -199,6 +199,13 @@ async function fetchUpstream({ cfg, messages, temperature, maxTokens, params, si
   if (signal?.aborted) controller.abort();
   else signal?.addEventListener('abort', onClientGone, { once: true });
 
+  // 等待上游开始响应的超时：上游卡住时不能让请求无限挂着（流式正文阶段不计时）
+  const timeoutMs = Number(cfg.upstreamTimeoutMs) > 0 ? Number(cfg.upstreamTimeoutMs) : 60_000;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
   let upstream;
   try {
     upstream = await fetch(`${cfg.llmBaseUrl}/chat/completions`, {
@@ -221,8 +228,13 @@ async function fetchUpstream({ cfg, messages, temperature, maxTokens, params, si
     });
   } catch (err) {
     signal?.removeEventListener('abort', onClientGone);
+    if (timedOut) {
+      throw new HttpError(504, `模型服务响应超时（${Math.round(timeoutMs / 1000)} 秒内未开始返回），请稍后重试。`);
+    }
     if (controller.signal.aborted) return { aborted: true };
     throw new HttpError(502, `无法连接模型服务：${err.cause?.code || err.message}`);
+  } finally {
+    clearTimeout(timer);
   }
   return { upstream, controller, onClientGone };
 }
@@ -367,6 +379,10 @@ export async function collectChatCompletion({ cfg, messages, temperature, maxTok
       }
     }
     if (buf) handleLine(buf);
+    // 上游“成功但空内容”多半是模型/网关异常：明确报错，不要把空回复当成功返回
+    if (!content.trim()) {
+      throw new HttpError(502, '模型服务返回了空内容，请检查模型服务状态或更换模型后重试。');
+    }
     return { id, created, model: cfg.llmModel, content, finishReason };
   } finally {
     signal?.removeEventListener('abort', onClientGone);

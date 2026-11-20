@@ -63,9 +63,12 @@ export function loadConfig(env = process.env) {
     // 供应商特定生成参数默认值，可由 API 管理员控制台修改。
     defaultGenerationParams: {},
 
-    // CORS：允许浏览器跨域调用 /v1/* 与 /api/* 的来源。'*' 表示任意来源（默认）。
+    // CORS：允许浏览器跨域调用 /v1/* 的来源（同源网页与 /api/* 不走跨域许可）。'*' 表示任意来源（默认）。
     // 收紧时写逗号分隔的 origin 列表，例如 https://oj.example.com,https://*.example.com
     corsOrigins: parseList(env.CORS_ORIGINS) || ['*'],
+
+    // 等待上游模型服务开始响应的超时（毫秒，正文流式传输阶段不计时）
+    upstreamTimeoutMs: Number(env.UPSTREAM_TIMEOUT_MS ?? 60_000),
 
     // 对外公开地址（不带末尾斜杠），用于生成链接/嵌入/API 示例；留空时文档用相对路径。
     publicBaseUrl: (env.PUBLIC_BASE_URL || '').replace(/\/+$/, ''),

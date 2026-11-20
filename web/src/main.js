@@ -2825,7 +2825,10 @@ function loadLocalChatModel() {
 
 function saveLocalChatModel(id) {
   try {
+    // 空值表示清除保存的选择（例如当前模型已被删除），必须删掉旧值，
+    // 否则已删除的模型 id 会一直留在浏览器里，下次打开又被当成保存的选择。
     if (id) localStorage.setItem(LOCAL_CHAT_MODEL_KEY, id);
+    else localStorage.removeItem(LOCAL_CHAT_MODEL_KEY);
   } catch {
     /* 存储不可用时只在本次页面内生效 */
   }
@@ -2843,7 +2846,10 @@ function renderBridgeModelOptions() {
     return;
   }
   if (!ids.includes(localChatModelId)) {
-    localChatModelId = ids.includes(loadLocalChatModel()) ? loadLocalChatModel() : ids[0];
+    const saved = loadLocalChatModel();
+    localChatModelId = ids.includes(saved) ? saved : ids[0];
+    // 保存的选择已失效（如模型被删除）时把纠正后的选择写回，避免旧值一直残留
+    if (saved !== localChatModelId) saveLocalChatModel(localChatModelId);
   }
   for (const select of [els.modelSelect, els.modelSelectCompact]) {
     if (!select) continue;

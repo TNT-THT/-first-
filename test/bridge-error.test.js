@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bridgeErrorMessage } from '../web/src/local-model-bridge.js';
+import { bridgeErrorMessage, mapBridgeParams } from '../web/src/local-model-bridge.js';
 
 test('桥接错误说明：保留错误类型与真实原因，并带上模型 ID', () => {
   const gpu = new Error('device lost: GPUBuffer mapAsync failed');
@@ -21,4 +21,17 @@ test('桥接错误说明：保留错误类型与真实原因，并带上模型 I
   // 超长原因会被截断，避免把整段堆栈塞进 API 响应
   const long = bridgeErrorMessage(new Error('x'.repeat(5000)), 'm1');
   assert.ok(long.length < 800);
+});
+
+test('桥接生成参数映射：支持的参数转成引擎选项，非法值明确报错而不是静默丢弃', () => {
+  assert.deepEqual(mapBridgeParams(null), {});
+  assert.deepEqual(mapBridgeParams({}), {});
+  assert.deepEqual(
+    mapBridgeParams({ top_p: 0.9, stop: '<end>', frequency_penalty: 0.5, seed: 7, response_format: { type: 'json_object' } }),
+    { topP: 0.9, stop: ['<end>'], frequencyPenalty: 0.5, seed: 7, responseFormat: { type: 'json_object' } },
+  );
+  assert.throws(() => mapBridgeParams({ top_p: 3 }), /top_p 不合法/);
+  assert.throws(() => mapBridgeParams({ frequency_penalty: -9 }), /frequency_penalty 不合法/);
+  assert.throws(() => mapBridgeParams({ seed: 1.5 }), /seed 不合法/);
+  assert.throws(() => mapBridgeParams({ response_format: { type: 'json_schema' } }), /仅支持 response_format/);
 });

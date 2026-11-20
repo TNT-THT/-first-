@@ -42,6 +42,7 @@ export const LAUNCHER_FILES = [
   { from: 'start-windows-static.bat', to: 'start-windows-static.bat', mode: 0o644 },
   { from: 'serve-site.ps1', to: 'serve-site.ps1', mode: 0o644 },
   { from: 'start-mac.command', to: 'start-mac.command', mode: 0o755 },
+  { from: 'start-linux.sh', to: 'start-linux.sh', mode: 0o755 },
   { from: 'serve-site.py', to: 'serve-site.py', mode: 0o755 },
   { from: '使用说明.txt', to: '使用说明.txt', mode: 0o644 },
 ];

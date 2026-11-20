@@ -280,6 +280,13 @@ export async function* streamWebLLM({
   thinkingBudget = null,
   repetitionPenalty = null,
   onLoop = null,
+  // 以下为 OpenAI 兼容调用方（如本机 API 桥接）可传入的生成参数，未传时不发送
+  topP = null,
+  stop = null,
+  frequencyPenalty = null,
+  presencePenalty = null,
+  seed = null,
+  responseFormat = null,
 }) {
   if (!engine || !loadedId) throw new Error('模型尚未加载');
   if (signal?.aborted) return;
@@ -297,6 +304,12 @@ export async function* streamWebLLM({
       max_tokens: maxTokens,
       // 温和的重复惩罚（只在配置或管理员参数中设置时发送）：减少小模型陷入循环
       ...(repetitionPenalty ? { repetition_penalty: repetitionPenalty } : {}),
+      ...(topP != null ? { top_p: topP } : {}),
+      ...(stop != null ? { stop } : {}),
+      ...(frequencyPenalty != null ? { frequency_penalty: frequencyPenalty } : {}),
+      ...(presencePenalty != null ? { presence_penalty: presencePenalty } : {}),
+      ...(seed != null ? { seed } : {}),
+      ...(responseFormat != null ? { response_format: responseFormat } : {}),
       ...thinkingRequestOptions({ supportsThinking, enabled: thinkingEnabled }),
     });
     // 用户停止后仍把剩余的流读完（不再输出）：引擎会在下一个 token 前停止，

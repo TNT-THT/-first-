@@ -123,7 +123,11 @@ async function openBrowserWhenReady(port) {
       ? ['open', [url]]
       : ['xdg-open', [url]];
   try {
-    spawn(command, args, { detached: true, stdio: 'ignore' }).unref();
+    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+    // spawn 找不到命令（如无桌面环境的 xdg-open）是异步 error 事件：
+    // 必须监听，否则未处理的 error 会把整个服务进程带崩
+    child.once('error', () => {});
+    child.unref();
   } catch {
     // 打不开浏览器不影响服务运行，用户可手动访问打印出的网址
   }

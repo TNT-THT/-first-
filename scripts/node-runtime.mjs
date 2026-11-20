@@ -5,9 +5,12 @@
  *
  * - 运行时按平台分开存放，启动器（serve-api.ps1 / start-mac.command）按当前系统选用；
  * - 首次下载后缓存在 .node-runtime-cache/（已 gitignore），之后打包直接复用；
+ *   下载以官方 SHASUMS256.txt 校验，缓存写入校验和旁车文件、每次使用前复核，
+ *   损坏或无校验记录的缓存不会被打包；
  * - 若某平台下载失败（例如无网络），打包仍会继续并在日志中明确警告：
  *   缺失平台的启动器会回退到系统安装的 Node.js。
  */
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -120,6 +123,19 @@ export function extractTarGzEntry(buf, entryName) {
   throw new Error(`TAR 中找不到文件：${entryName}`);
 }
 
+export function sha256Hex(data) {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+/** 从官方 SHASUMS256.txt 中取某个文件的 SHA-256（找不到返回 null）。 */
+export function parseShasums(text, fileName) {
+  for (const line of String(text).split(/\r?\n/)) {
+    const match = line.trim().match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+    if (match && match[2].trim() === fileName) return match[1].toLowerCase();
+  }
+  return null;
+}
+
 function extractInner(archiveBuf, target, version) {
   return target.archive(version).endsWith('.zip')
     ? extractZipEntry(archiveBuf, target.inner(version))
@@ -143,22 +159,40 @@ export async function ensureNodeRuntimes({
   const missing = [];
   for (const target of targets) {
     const cacheFile = path.join(cacheDir, `${version}-${target.id}`);
-    if (existsSync(cacheFile)) {
-      files.push({ targetId: target.id, name: target.file, data: await readFile(cacheFile), mode: target.mode });
-      continue;
+    // 缓存必须带校验和旁车文件且内容对得上才可信：损坏或来历不明的缓存不打包
+    if (existsSync(cacheFile) && existsSync(`${cacheFile}.sha256`)) {
+      const data = await readFile(cacheFile);
+      const expected = (await readFile(`${cacheFile}.sha256`, 'utf8')).trim().toLowerCase();
+      if (expected && sha256Hex(data) === expected) {
+        files.push({ targetId: target.id, name: target.file, data, mode: target.mode });
+        continue;
+      }
+      log.warn(`[warn] ${target.id} 的内置 Node 运行时缓存校验失败，将重新下载。`);
     }
     if (offline) {
       missing.push(target.id);
       continue;
     }
     try {
-      const url = `https://nodejs.org/dist/${version}/${target.archive(version)}`;
+      const archiveName = target.archive(version);
+      const baseUrl = `https://nodejs.org/dist/${version}`;
+      // 先取官方校验和清单，下载后核对，避免下到损坏/被替换的运行时还照样打包
+      const sumsRes = await fetchImpl(`${baseUrl}/SHASUMS256.txt`);
+      if (!sumsRes?.ok) throw new Error(`HTTP ${sumsRes?.status ?? 'unknown'}（SHASUMS256.txt）`);
+      const expectedHash = parseShasums(await sumsRes.text(), archiveName);
+      if (!expectedHash) throw new Error(`官方校验和清单中找不到 ${archiveName}`);
+      const url = `${baseUrl}/${archiveName}`;
       log.log(`正在下载内置 Node 运行时（${target.id}）：${url}`);
       const res = await fetchImpl(url);
       if (!res?.ok) throw new Error(`HTTP ${res?.status ?? 'unknown'}`);
-      const data = extractInner(Buffer.from(await res.arrayBuffer()), target, version);
+      const archiveBuf = Buffer.from(await res.arrayBuffer());
+      if (sha256Hex(archiveBuf) !== expectedHash) {
+        throw new Error('下载的运行时校验和与官方清单不一致，已丢弃');
+      }
+      const data = extractInner(archiveBuf, target, version);
       await mkdir(cacheDir, { recursive: true });
       await writeFile(cacheFile, data);
+      await writeFile(`${cacheFile}.sha256`, `${sha256Hex(data)}\n`);
       files.push({ targetId: target.id, name: target.file, data, mode: target.mode });
     } catch (err) {
       log.warn(`[warn] 获取 ${target.id} 的内置 Node 运行时失败（${err.message}），该平台将回退到系统 Node。`);
