@@ -168,7 +168,7 @@ function createWebLLMBackend(cfg) {
         signal,
       });
     },
-    async *stream({ messages, signal, onLoop }) {
+    async *stream({ messages, signal, onLoop, temperature: temperatureOverride, maxTokens: maxTokensOverride }) {
       // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
       const system = {
         role: 'system',
@@ -178,8 +178,9 @@ function createWebLLMBackend(cfg) {
       const repetitionPenalty = params.repetitionPenalty ?? cfg.repetitionPenalty ?? null;
       const thinkingOn = getThinkingPref();
       const w = windowsFor(cfg, modelId, thinkingOn);
-      const temperature = params.temperature ?? cfg.temperature;
-      const answerCap = params.maxTokens ?? cfg.maxTokens;
+      // 调用方显式给出的采样参数优先（本机 API 桥接透传），其次管理员参数，最后配置默认值
+      const temperature = temperatureOverride ?? params.temperature ?? cfg.temperature;
+      const answerCap = maxTokensOverride ?? params.maxTokens ?? cfg.maxTokens;
       const overflowError = () =>
         new Error('Prompt tokens exceed context window size：对话内容已占满上下文窗口，请新建对话或减少历史');
       // 历史超出提示词空间时从最早的消息开始丢弃；若启用了思考预算，为强制输出说明预留空间

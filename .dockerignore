@@ -5,4 +5,7 @@ data
 .env
 .env.*
 !.env.example
+.local-api.json
 *.log
+.node-runtime-cache/
+.package-staging/

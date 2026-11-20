@@ -21,6 +21,12 @@ function readAll(storage) {
 
 function writeAll(list, storage) {
   storage.setItem(KEY, JSON.stringify(list));
+  // 让同页面的本机 API 桥接及时把新增/删除的模型同步到 /v1/models。
+  try {
+    globalThis.dispatchEvent?.(new Event('oj-ai:local-models-changed'));
+  } catch {
+    // 非浏览器测试环境没有事件目标时忽略。
+  }
 }
 
 /** @returns {Array<{id: string, label: string, source: string, originId: string, createdAt: string, record: object}>} */

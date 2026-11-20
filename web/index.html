@@ -78,7 +78,14 @@
                 </label>
                 <div id="localModelList" class="local-list"></div>
                 <div class="site-tools">
-                  <button id="downloadSiteBtn" type="button" class="btn ghost small" title="下载网站源码与构建产物（不含任何 AI 模型）">下载网站包</button>
+                  <p class="muted small">下载网站包到自己电脑上（含本机 API，解压双击即可用；不包含任何 AI 模型）。按你的电脑系统只下对应一个：</p>
+                  <div class="site-package-btns">
+                    <button type="button" class="btn ghost small" data-site-package="site-win-x64.zip">Windows 版</button>
+                    <button type="button" class="btn ghost small" data-site-package="site-darwin-arm64.zip">Mac（Apple 芯片）版</button>
+                    <button type="button" class="btn ghost small" data-site-package="site-darwin-x64.zip">Mac（Intel 芯片）版</button>
+                    <button type="button" class="btn ghost small" data-site-package="site-linux-x64.zip">Linux 版</button>
+                  </div>
+                  <p id="sitePackageHint" class="muted small"></p>
                 </div>
                 <div class="data-export">
                   <p class="muted small">导出本机数据（仅保存在你的电脑上，不上传；文件可能包含对话内容）：</p>
@@ -250,6 +257,22 @@
           <pre id="apiCurlExample" class="api-curl-example"></pre>
           <button id="apiCurlCopy" type="button" class="btn ghost small">复制 curl 测试命令</button>
           <p class="warning small">不要将 API Key 放进公开网页代码、浏览器 JS 或手机 App。网页端的 Key 管理口令仅供站点所有者使用。</p>
+        </section>
+        <section id="apiSelfApplySection" class="api-access-section" aria-labelledby="apiSelfApplyTitle" hidden>
+          <h3 id="apiSelfApplyTitle">申请 API Key（本机网页）</h3>
+          <p id="apiBridgeStatus" class="muted small" role="status" aria-live="polite">正在连接本机模型…</p>
+          <p class="muted small">本机 API 由这台电脑的网页（显卡）提供推理：保持本网页打开，外部软件即可用下面的 Key 调用。无需安装 Ollama。</p>
+          <div class="api-access-actions">
+            <button id="apiSelfApplyBtn" type="button" class="btn primary small">申请一把 API Key</button>
+          </div>
+          <div id="apiSelfKeyPanel" class="api-key-new" hidden>
+            <p class="warning small">完整 Key 仅显示这一次；请先复制保存，关闭窗口后无法找回。</p>
+            <div class="api-access-actions">
+              <input id="apiSelfKeyValue" type="text" readonly aria-label="新 API Key" />
+              <button id="apiSelfKeyCopy" type="button" class="btn ghost small">复制 Key</button>
+            </div>
+          </div>
+          <p id="apiSelfApplyError" class="error small" role="alert"></p>
         </section>
         <section class="api-access-section">
           <h3>生成网页分享链接</h3>

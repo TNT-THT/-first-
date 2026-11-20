@@ -72,8 +72,8 @@ The first repository of me,and first of "炸药工厂"
 
 ## 网站包与本机数据导出（仅管理员，静态版）
 
-- **下载网站包**：管理员在“更改权限”面板点“下载网站包”，得到 `oj-ai-site.zip`。内容是网站源码（`web/`）、构建产物（`web/dist/`）、`package.json`、`package-lock.json`、本 README，以及根目录的本机启动文件。**不包含任何 AI 模型**、`.ojmodel` 文件、`training/` 目录、`.env` 或任何密钥。网站包在 `npm run build` 时自动生成，文件为 `web/dist/site.zip`。
-  - **双击打开**：解压后，Windows 双击 `start-windows.bat`（使用系统自带的 PowerShell，无需安装）；macOS 先 `chmod +x start-mac.command` 再双击；Linux 运行 `python3 serve-site.py`。程序只在 127.0.0.1 上启动一个本机服务器并自动打开浏览器，关闭窗口即停止。详见包内的 `使用说明.txt`。
+- **下载网站包**：管理员在“更改权限”面板按自己电脑的系统点对应的下载按钮（Windows / Mac Apple 芯片 / Mac Intel 芯片 / Linux，只下对应一个），得到 `site-win-x64.zip`、`site-darwin-arm64.zip`、`site-darwin-x64.zip` 或 `site-linux-x64.zip`。每个包的内容是网站源码（`web/`）、构建产物（含服务版网页 `web/dist-api/`）、Node 服务端（`server/`，含运行依赖）、本机启动脚本（`scripts/`）、对应平台的内置 Node 运行时（`runtime/`，只需下载自己那一个平台的），以及根目录的双击启动文件。**不包含任何 AI 模型**、`.ojmodel` 文件、`training/` 目录、`.env` 或任何密钥。网站包在 `npm run build` 时自动生成。
+  - **双击打开**：解压后，Windows 双击 `start-windows.bat`、macOS 双击 `start-mac.command`，即可启动本机网站与 API（使用包内内置 Node 运行时，无需预先安装；浏览器自动打开）。只想用静态网页聊天时可用后备启动文件（Windows 的 `start-windows-static.bat`、macOS / Linux 的 `python3 serve-site.py`）。程序只监听 127.0.0.1，关闭窗口即停止。详见包内的 `使用说明.txt`。
   - 直接双击 `index.html` 不可行：浏览器会阻止模块脚本和 Worker，必须通过本机服务器打开。
   - 启动文件的源码在 `scripts/launcher/`。
 - **导出本机数据**：管理员勾选要导出的分区（会话记录、管理员说明/参数/更正、本地知识库、新建AI清单），点“导出所选数据”，得到 `oj-ai-data-日期.json`。文件只保存在你的电脑上，不会上传；它可能包含对话内容，请妥善保管。
@@ -430,6 +430,8 @@ iframe 会回复 `{ type: 'oj-ai:filled' }`，启动后会向父页面发送 `{ 
 - 跨站嵌入时管理员权限需要在 iframe 内重新验证一次（权限保存在 iframe 所在域名的浏览器存储中）。
 
 ## 自建服务器：API 与网页链接接入（不依赖第三方托管平台）
+
+只想在一台电脑上运行网页和 API 时，下载网站包解压后双击 `start-windows.bat` / `start-mac.command` 即可一键启动（网站包已内置 Node 运行时与服务端依赖，无需预先安装 Node.js；服务就绪后浏览器自动打开，登录后在网页“API 接入”里点申请 Key 就能用）。网站包已包含 Node 服务端、本机启动脚本与服务版网页（`web/dist-api/`）。在仓库里也可以用命令 `npm run start:local-api` 启动（自动构建、生成本机口令、只绑定 `127.0.0.1`）。API 默认把请求桥接给同一台电脑上保持打开的网页，由网页里的 WebGPU 模型推理，无需安装 Ollama。逐步说明见 [`docs/local-api.md`](docs/local-api.md)。
 
 服务端模式会同时提供两种远程接入方式：
 
