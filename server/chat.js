@@ -14,6 +14,41 @@ export class HttpError extends Error {
 }
 
 /**
+ * 把 OpenAI 的富文本 content 归一化为纯文本。
+ * 不少客户端（尤其多模态客户端）发的是分段数组：[{ type: 'text', text: '…' }, …]，
+ * 以前这里只认字符串，分段消息会直接 400，导致“请求传不进来、AI 没有响应”。
+ * 文本段按顺序拼接；只有图片等非文本段时明确报 400（本机模型仅支持文本）。
+ * assistant 的 content 为 null（工具调用占位等）按空文本处理，历史回放更宽容。
+ */
+export function normalizeMessageContent(content, { role, index }) {
+  const at = `第 ${index + 1} 条消息`;
+  if (typeof content === 'string') return content;
+  if (content === null || content === undefined) {
+    if (role === 'assistant') return '';
+    throw new HttpError(400, `${at}内容为空`);
+  }
+  if (Array.isArray(content)) {
+    const texts = [];
+    let hasMedia = false;
+    for (const part of content) {
+      if (typeof part === 'string') { texts.push(part); continue; }
+      if (!part || typeof part !== 'object') continue;
+      if ((part.type === 'text' || part.type === 'input_text') && typeof part.text === 'string') {
+        texts.push(part.text);
+      } else if (part.type === 'image_url' || part.type === 'input_image' || part.type === 'image') {
+        hasMedia = true;
+      }
+    }
+    const text = texts.join('');
+    if (!text && hasMedia) {
+      throw new HttpError(400, `${at}包含图片等非文本内容，本机模型仅支持文本消息，请去掉图片后重试`);
+    }
+    return text;
+  }
+  throw new HttpError(400, `${at}格式错误`);
+}
+
+/**
  * 校验并清洗对话历史。
  * 默认（网页 /api/chat）只允许 user / assistant 角色；
  * allowSystem=true 时（外部 /v1/chat/completions）额外允许 system / developer，
@@ -35,15 +70,17 @@ export function validateMessages(input, { allowSystem = false } = {}) {
     if (!allowed.includes(role)) {
       throw new HttpError(400, `第 ${i + 1} 条消息角色非法`);
     }
-    if (typeof m.content !== 'string' || m.content.trim() === '') {
+    const content = normalizeMessageContent(m.content, { role, index: i });
+    // 用户消息必须有实际内容；assistant 历史允许空文本（占位/被中断的回复）
+    if (role === 'user' && content.trim() === '') {
       throw new HttpError(400, `第 ${i + 1} 条消息内容为空`);
     }
-    if (m.content.length > LIMITS.maxMessageChars) {
+    if (content.length > LIMITS.maxMessageChars) {
       throw new HttpError(400, `第 ${i + 1} 条消息过长`);
     }
-    total += m.content.length;
-    return { role, content: m.content };
-  });
+    total += content.length;
+    return { role, content };
+  }).filter((m) => m.role === 'user' || m.content.trim() !== '');
   if (total > LIMITS.maxTotalChars) throw new HttpError(400, '对话总长度超过限制，请新建会话');
   if (out[out.length - 1].role !== 'user') throw new HttpError(400, '最后一条消息必须来自用户');
   return out;

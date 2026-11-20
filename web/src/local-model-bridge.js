@@ -295,6 +295,9 @@ export function startLocalModelBridge({ webllmCfg, onStatus, backendFactory = cr
   const controllers = new Map();
   // 已被服务端取消、但还在排队没轮到的请求：轮到时直接跳过，不要白占显卡
   const cancelledIds = new Set();
+  // 已确认缓存完整的本地导入模型（id -> 登记指纹）。全量枚举缓存不便宜，
+  // 同一条登记只查一次；登记变化（导入/删除）时清空重查。
+  const verifiedLocalModels = new Map();
 
   const send = (obj) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -353,13 +356,19 @@ export function startLocalModelBridge({ webllmCfg, onStatus, backendFactory = cr
         return;
       }
       modelDiagnostics = bridgeModelDiagnostics(webllmCfg, model);
+      backend.setModel(model);
       const localEntry = loadLocalModels().find((entry) => entry.id === model);
       if (localEntry) {
-        // 本地导入模型先查缓存完整性：缺分片/配置时直接报清楚，不必等 GPU 加载到一半才失败
-        phase = 'check-local-model';
-        await collectModelEntries(localEntry.record);
+        const fingerprint = `${localEntry.id}|${localEntry.record?.model || ''}|${localEntry.record?.model_lib || ''}`;
+        // 引擎已经装好这个模型时不用再查；同一登记在本次页面会话内也只全量查一次，
+        // 避免每次 API 请求都枚举一遍 Cache Storage（模型多时明显拖慢首字）。
+        if (verifiedLocalModels.get(model) !== fingerprint && backend.isReady?.() !== true) {
+          // 本地导入模型先查缓存完整性：缺分片/配置时直接报清楚，不必等 GPU 加载到一半才失败
+          phase = 'check-local-model';
+          await collectModelEntries(localEntry.record);
+          verifiedLocalModels.set(model, fingerprint);
+        }
       }
-      backend.setModel(model);
       phase = 'load-model';
       readyInfo = await backend.ensureReady(() => {}, { signal: controller.signal });
       if (controller.signal.aborted) return;
@@ -461,9 +470,15 @@ export function startLocalModelBridge({ webllmCfg, onStatus, backendFactory = cr
     };
   }
 
-  const onLocalModelsChanged = () => refreshModels();
+  const onLocalModelsChanged = () => {
+    verifiedLocalModels.clear();
+    refreshModels();
+  };
   const onStorage = (event) => {
-    if (event.key === null || event.key === 'oj-ai.localModels') refreshModels();
+    if (event.key === null || event.key === 'oj-ai.localModels') {
+      verifiedLocalModels.clear();
+      refreshModels();
+    }
   };
   globalThis.addEventListener?.('oj-ai:local-models-changed', onLocalModelsChanged);
   globalThis.addEventListener?.('storage', onStorage);

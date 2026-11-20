@@ -748,6 +748,106 @@ test('真实 WebSocket 桥接：旧版标签页不能抢走新版标签页，新
 
   wsNew.close();
   await new Promise((resolve) => setTimeout(resolve, 100));
+  // 旧版标签页此前已被停放（连接被关），它按自身退避重连后才能兜底
+  const wsOld2 = await connect();
+  t.after(() => { try { wsOld2.close(); } catch {} });
+  let old2Hits = 0;
+  wsOld2.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'request') {
+      old2Hits += 1;
+      wsOld2.send(JSON.stringify({ type: 'complete', id: msg.id, finishReason: 'stop' }));
+    }
+  });
   await bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'fallback' }] }, {});
-  assert.equal(oldHits, 1, '新版关闭后旧版才兜底提供');
+  assert.equal(old2Hits, 1, '新版关闭、旧版重连后才由旧版兜底提供');
+});
+
+test('消息校验：OpenAI 富文本分段 content 归一化为纯文本，图片段明确拒绝', async () => {
+  const { validateMessages } = await import('../server/chat.js');
+  const out = validateMessages([
+    { role: 'system', content: [{ type: 'text', text: '规则' }] },
+    { role: 'assistant', content: null },
+    { role: 'user', content: [{ type: 'text', text: '你好' }, { type: 'input_text', text: '，请讲题' }] },
+  ], { allowSystem: true });
+  assert.deepEqual(out, [
+    { role: 'system', content: '规则' },
+    { role: 'user', content: '你好，请讲题' },
+  ]);
+  assert.throws(
+    () => validateMessages([{ role: 'user', content: [{ type: 'image_url', image_url: { url: 'data:image/png;base64,x' } }] }], { allowSystem: true }),
+    /仅支持文本消息/,
+  );
+  assert.throws(
+    () => validateMessages([{ role: 'user', content: [{ type: 'text', text: '  ' }] }], { allowSystem: true }),
+    /内容为空/,
+  );
+});
+
+test('桥接模式：/v1 忽略 user/stream_options/metadata/n=1 等元数据字段，真正的生成参数照常拒绝', async (t) => {
+  const base = await setup(t);
+  const key = await applyKey(base);
+  const ok = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'test-model',
+      user: 'tester',
+      stream_options: { include_usage: true },
+      metadata: { scene: 'unit' },
+      n: 1,
+      messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }],
+    }),
+  });
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).choices[0].message.content, '你好，世界');
+  assert.deepEqual(lastFakeBridge.lastPayload.messages, [{ role: 'user', content: '你好' }]);
+  assert.equal(lastFakeBridge.lastPayload.params.user, undefined);
+  assert.equal(lastFakeBridge.lastPayload.params.stream_options, undefined);
+
+  const bad = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'test-model',
+      logprobs: true,
+      messages: [{ role: 'user', content: '你好' }],
+    }),
+  });
+  assert.equal(bad.status, 400);
+  assert.match((await bad.json()).error.message, /不支持生成参数：logprobs/);
+});
+
+test('真实 WebSocket 桥接：新版在场时旧版标签页会被停放，新版关闭后旧版才可兜底', async (t) => {
+  const { bridge, base, connect } = await setupRealBridge(t);
+  const wsNew = await connect({ protocolVersion: 2 });
+  wsNew.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'request') wsNew.send(JSON.stringify({ type: 'complete', id: msg.id, finishReason: 'stop' }));
+  });
+  // 手动连旧版：先挂上 close 监听再发 ready，避免错过服务端的停放关闭事件
+  const wsOld = new WebSocket(`${base.replace('http:', 'ws:')}/api/local-model-bridge`, {
+    headers: { origin: base },
+  });
+  t.after(() => { try { wsOld.terminate(); } catch {} });
+  const oldClosed = new Promise((resolve) => wsOld.once('close', (closeCode) => resolve(closeCode)));
+  await new Promise((resolve, reject) => {
+    wsOld.once('open', resolve);
+    wsOld.once('error', reject);
+  });
+  wsOld.send(JSON.stringify({ type: 'ready', models: [{ id: 'ws-model', label: 'WS Model' }] }));
+  const code = await Promise.race([oldClosed, new Promise((resolve) => setTimeout(() => resolve('timeout'), 2000))]);
+  assert.equal(code, 1012, '旧版备用连接应被 1012 停放');
+  assert.equal(bridge.status().latestProtocolVersion, 2);
+
+  // 请求仍由新版提供
+  const result = await bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {});
+  assert.equal(result.finishReason, 'stop');
+
+  // 新版关闭后，重新连上的旧版可以兜底（哪怕它只回通用错误文案，也由服务端标注来源）
+  wsNew.close();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  const wsOld2 = await connect();
+  t.after(() => { try { wsOld2.close(); } catch {} });
+  assert.equal(bridge.status().clientProtocolVersion, 0);
 });

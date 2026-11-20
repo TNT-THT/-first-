@@ -56,6 +56,14 @@ const UPSTREAM = {
   'Llama-2-13b-chat-hf-q4f16_1-MLC': ['meta-llama/Llama-2-13b-chat-hf', 'llama-2', 13.0],
   'Llama-3.1-70B-Instruct-q3f16_1-MLC': ['meta-llama/Llama-3.1-70B-Instruct', 'llama-3', 70.6],
   'Llama-3-70B-Instruct-q3f16_1-MLC': ['meta-llama/Meta-Llama-3-70B-Instruct', 'llama-3', 70.6],
+  // 中小型扩充（WebLLM 预编译、各自独立运行库）
+  'Ministral-3-3B-Reasoning-2512-q4f16_1-MLC': ['mistralai/Ministral-3-3B-Reasoning-2512', 'mistral_default', 3.4],
+  'Llama-3.2-1B-Instruct-q4f16_1-MLC': ['meta-llama/Llama-3.2-1B-Instruct', 'llama-3', 1.2],
+  'Llama-3.2-3B-Instruct-q4f16_1-MLC': ['meta-llama/Llama-3.2-3B-Instruct', 'llama-3', 3.2],
+  'gemma-2-2b-it-q4f16_1-MLC': ['google/gemma-2-2b-it', 'gemma_instruction', 2.6],
+  'Phi-3.5-mini-instruct-q4f16_1-MLC': ['microsoft/Phi-3.5-mini-instruct', 'phi-3', 3.8],
+  'Mistral-7B-Instruct-v0.3-q4f16_1-MLC': ['mistralai/Mistral-7B-Instruct-v0.3', 'mistral_default', 7.3],
+  'Llama-3.1-8B-Instruct-q4f16_1-MLC': ['meta-llama/Llama-3.1-8B-Instruct', 'llama-3', 8.0],
 };
 
 // 仅训练目录（不在网页下拉框中）的超大模型：WebLLM 0.2.86 没有预编译的运行库，

@@ -242,3 +242,118 @@ test('网页桥接全链路模拟：本地导入模型缓存不完整时在加�
   assert.match(frame.message, /本地导入模型/);
   assert.equal(ensureCalled, false, '缓存不完整时不应启动 GPU 加载');
 });
+
+function setupLocalModelGlobals(t, cacheStorage) {
+  const previousLocalStorage = globalThis.localStorage;
+  const previousCaches = globalThis.caches;
+  const store = new Map();
+  const localEntry = {
+    id: 'local-model',
+    label: 'Local Model（导入）',
+    originId: 'Huihui-Qwen3.5-4B-abliterated-q4f16_1-MLC',
+    record: {
+      model_id: 'local-model',
+      model: 'https://local.oj-ai.invalid/models/local-model',
+      model_lib: 'https://example.com/Qwen3.5-4B-q4f16_1_cs1k-webgpu.wasm',
+    },
+  };
+  store.set('oj-ai.localModels', JSON.stringify([localEntry]));
+  globalThis.localStorage = {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => store.set(key, String(value)),
+    removeItem: (key) => store.delete(key),
+  };
+  globalThis.caches = cacheStorage;
+  t.after(() => {
+    globalThis.localStorage = previousLocalStorage;
+    globalThis.caches = previousCaches;
+  });
+}
+
+test('网页桥接：本地模型缓存完整性同一登记只全量检查一次，后续请求不再枚举缓存', async (t) => {
+  const base = 'https://local.oj-ai.invalid/models/local-model/resolve/main/';
+  const wasmUrl = 'https://example.com/Qwen3.5-4B-q4f16_1_cs1k-webgpu.wasm';
+  let keysCalls = 0;
+  const completeCache = (scope) => ({
+    keys: async () => {
+      keysCalls += 1;
+      if (scope === 'webllm/wasm') return [{ url: wasmUrl }];
+      return [
+        { url: `${base}tensor-cache.json` },
+        { url: `${base}tokenizer.json` },
+        { url: `${base}mlc-chat-config.json` },
+      ];
+    },
+    match: async () => ({ json: async () => ({ records: [] }) }),
+    put: async () => {},
+    delete: async () => false,
+  });
+  setupLocalModelGlobals(t, { open: async (scope) => completeCache(scope) });
+
+  const socket = await runFakeBridgeScenario(t, {
+    setModel() {},
+    async ensureReady() { return { healthy: true }; },
+    async *stream() { yield '你好'; },
+  });
+  for (const id of ['req-a', 'req-b']) {
+    const sentBefore = socket.sent.length;
+    socket.receive({ type: 'request', id, payload: { model: 'local-model', messages: [{ role: 'user', content: '你好' }] } });
+    const deadline = Date.now() + 2000;
+    let done = null;
+    while (Date.now() < deadline && !done) {
+      done = socket.sent.slice(sentBefore).find((f) => f.type === 'complete' && f.id === id);
+      if (!done) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(done, `请求 ${id} 应完成`);
+  }
+  assert.equal(keysCalls, 3, '两次请求只应做一次三作用域的缓存枚举');
+});
+
+test('网页桥接：引擎已就绪时跳过本地缓存检查，缓存为空也不误报', async (t) => {
+  const emptyCache = { keys: async () => [], match: async () => null, put: async () => {}, delete: async () => false };
+  setupLocalModelGlobals(t, { open: async () => emptyCache });
+  const socket = await runFakeBridgeScenario(t, {
+    setModel() {},
+    isReady: () => true,
+    async ensureReady() { return { healthy: true }; },
+    async *stream() { yield '你好'; },
+  });
+  socket.receive({ type: 'request', id: 'req-ready', payload: { model: 'local-model', messages: [{ role: 'user', content: '你好' }] } });
+  const frame = await waitForFrame(socket, 'complete');
+  assert.equal(frame.id, 'req-ready');
+});
+
+test('foldSystemMessages：调用方自带的 system 折叠进开头唯一一条，不再触发模板顺序错误', async () => {
+  const { foldSystemMessages } = await import('../web/src/engines/backend.js');
+  // 典型触发场景：本站 system + 软件自带 system + user（原样发给 WebLLM 会抛 SystemMessageOrderError）
+  const a = foldSystemMessages('本站系统提示', [
+    { role: 'system', content: 'You are a helpful assistant.' },
+    { role: 'user', content: '你好' },
+  ]);
+  assert.equal(a.rest.length, 1);
+  assert.equal(a.rest[0].role, 'user');
+  assert.ok(a.systemContent.startsWith('本站系统提示'));
+  assert.ok(a.systemContent.includes('You are a helpful assistant.'));
+
+  // system 夹在历史中间、多条 system：全部折叠，其余消息顺序不变
+  const b = foldSystemMessages('S0', [
+    { role: 'user', content: 'u1' },
+    { role: 'system', content: 'S1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'system', content: 'S2' },
+    { role: 'user', content: 'u2' },
+  ]);
+  assert.deepEqual(b.rest.map((m) => m.content), ['u1', 'a1', 'u2']);
+  assert.ok(b.systemContent.indexOf('S1') < b.systemContent.indexOf('S2'));
+
+  // 已包含的片段不重复添加；空白 system 忽略；无 system 时原样返回
+  const c = foldSystemMessages('S0\n\nS1', [
+    { role: 'system', content: 'S1' },
+    { role: 'system', content: '   ' },
+    { role: 'user', content: 'hi' },
+  ]);
+  assert.equal(c.systemContent, 'S0\n\nS1');
+  const d = foldSystemMessages('S0', [{ role: 'user', content: 'hi' }]);
+  assert.equal(d.systemContent, 'S0');
+  assert.equal(d.rest.length, 1);
+});

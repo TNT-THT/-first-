@@ -95,13 +95,18 @@ class CliTest(unittest.TestCase):
         self.assertIn("流程已暂停", out)
 
     def test_models_lists_catalog(self):
+        catalog_path = os.path.join(os.path.dirname(__file__), "..", "catalog.json")
+        with open(catalog_path, encoding="utf-8") as f:
+            catalog = json.load(f)["models"]
+        total = len(catalog)
+        dropdown = sum(1 for m in catalog if m.get("in_dropdown", True))
         code, out = run(["models"])
         self.assertEqual(code, 0)
-        self.assertIn("共 34 个：网页下拉框 32 个", out)
+        self.assertIn(f"共 {total} 个：网页下拉框 {dropdown} 个", out)
         self.assertIn("Qwen2.5-3B-Instruct-q4f16_1-MLC", out)
         code, out = run(["models", "--json"])
         self.assertEqual(code, 0)
-        self.assertEqual(len(json.loads(out)), 34)  # 整个训练目录（含仅训练目录的 2 个模型）
+        self.assertEqual(len(json.loads(out)), total)  # 整个训练目录（含仅训练目录的模型）
 
     def test_init_with_catalog_model(self):
         code, out = run(["init", "--config", self.cfg, "--model", "Qwen3-8B-q4f16_1-MLC"])
