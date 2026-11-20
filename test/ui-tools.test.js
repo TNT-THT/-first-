@@ -118,6 +118,8 @@ test('管理员面板入口：静态版名称明确，点击打开本机管理�
   assert.equal($('#adminPanelBtn').hidden, true, '纯静态版没有服务端管理员面板入口');
   assert.equal($('#adminPanelBtn').textContent.trim(), 'API 管理', '服务端控制台入口应与本机管理员面板区分名称');
   assert.equal($('#localApiInfo').hidden, true, '静态版管理员面板不显示本机 API 地址（没有本机服务）');
+  assert.ok($('#apiAccessBase'), 'API 接入应单独显示基础地址（Base URL），避免用户把完整对话接口填进软件');
+  assert.match(document.body.textContent, /不要填完整对话接口/);
   assert.equal($('#rolePanel').hidden, true);
   $('#roleBtn').click();
   assert.equal($('#rolePanel').hidden, false, '点击管理员面板应打开本机管理员面板');

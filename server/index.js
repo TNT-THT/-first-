@@ -411,7 +411,9 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     ? browserBridge.status().models.map((model) => ({ id: model.id, object: 'model', created: 0, owned_by: 'oj-ai-assistant', name: model.label }))
     : cfg.llmModel ? [modelObject()] : [];
 
-  app.get('/v1/models', requireApiAuth, (_req, res) => {
+  // 兼容把完整对话接口误填为 Base URL 的客户端：它们会在其后拼接 /models 取列表，
+  // 请求 /v1/chat/completions/models 时同样返回模型列表，避免用户被莫名其妙的 404 卡住。
+  app.get(['/v1/models', '/v1/chat/completions/models'], requireApiAuth, (_req, res) => {
     res.json({ object: 'list', data: availableApiModels() });
   });
 
@@ -421,7 +423,8 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     return res.json(model);
   });
 
-  app.post('/v1/chat/completions', requireApiAuth, async (req, res) => {
+  // 同上兼容：Base URL 误填为完整对话接口时，客户端会请求 /v1/chat/completions/chat/completions，一并处理。
+  app.post(['/v1/chat/completions', '/v1/chat/completions/chat/completions'], requireApiAuth, async (req, res) => {
     const ac = new AbortController();
     res.on('close', () => {
       if (!res.writableFinished) ac.abort();
@@ -528,6 +531,17 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
       }
     }
   });
+
+  // /v1 下未匹配到的路径：返回 OpenAI 风格的 JSON 404 并给出填写提示，
+  // 避免 Express 默认的 HTML 错误页让客户端（如自动获取模型列表的软件）报出看不懂的错。
+  app.use('/v1', (req, res) =>
+    openAiError(
+      res,
+      404,
+      `接口不存在：${req.method} ${req.path}。请确认软件里的 Base URL 以 /v1 结尾（例如 http://127.0.0.1:3000/v1）：模型列表是 GET /v1/models，对话是 POST /v1/chat/completions；不要把完整的对话接口地址当作 Base URL。`,
+      'invalid_request_error',
+    ),
+  );
 
   // ---- 前端静态资源 ----
   if (existsSync(WEB_DIST)) {

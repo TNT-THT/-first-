@@ -165,6 +165,7 @@ const els = {
   apiPlaygroundSection: $('#apiPlaygroundSection'),
   apiAdminSettingsSection: $('#apiAdminSettingsSection'),
   apiKeyManagerSection: $('#apiKeyManagerSection'),
+  apiAccessBase: $('#apiAccessBase'),
   apiAccessEndpoint: $('#apiAccessEndpoint'),
   apiAccessModel: $('#apiAccessModel'),
   apiSelfApplySection: $('#apiSelfApplySection'),
@@ -2734,10 +2735,11 @@ function accessBaseUrl() {
 function renderApiAccessInfo() {
   const base = accessBaseUrl();
   const apiBase = new URL(state.appConfig.apiBaseUrl || '/v1', `${base}/`).href.replace(/\/$/, '');
+  if (els.apiAccessBase) els.apiAccessBase.textContent = apiBase;
   els.apiAccessEndpoint.textContent = `${apiBase}/chat/completions`;
   if (state.appConfig.localBrowserBridge) {
     els.apiAccessModel.textContent = apiDisplayModel()
-      ? `${apiDisplayModel()}（共 ${apiBridgeModels.length} 个网页模型；完整列表请求 GET /v1/models）`
+      ? `${apiDisplayModel()}（共 ${apiBridgeModels.length} 个网页模型；API 以每次请求里的 model 为准，完整列表请求 GET /v1/models；下方调试台可切换这里显示的模型）`
       : '等待本机网页连接模型…';
   } else {
     els.apiAccessModel.textContent = state.appConfig.model || '服务端尚未配置模型';

@@ -220,6 +220,31 @@ test('/v1/models：API Key 鉴权、OpenAI 格式模型列表与 CORS', async ()
   assert.match(cors.headers.get('access-control-allow-headers'), /Authorization/i);
 });
 
+test('误把完整对话接口填为 Base URL 时的兼容路径，以及 /v1 未知路径的 JSON 404', async () => {
+  // 客户端在误填的 Base URL 后拼接 /models 取模型列表
+  const models = await req('/v1/chat/completions/models', { token: 'sk-external-api-key-1' });
+  assert.equal(models.status, 200);
+  const modelsData = await models.json();
+  assert.deepEqual(modelsData.data.map((m) => m.id), ['qwen-test']);
+
+  // 同样误填时拼接出的双重对话路径也能正常对话
+  const chat = await req('/v1/chat/completions/chat/completions', {
+    method: 'POST',
+    token: 'sk-external-api-key-1',
+    body: { model: 'qwen-test', messages: [{ role: 'user', content: '你好' }], stream: false },
+  });
+  assert.equal(chat.status, 200);
+  const chatData = await chat.json();
+  assert.equal(chatData.object, 'chat.completion');
+
+  // 其他未知 /v1 路径返回 OpenAI 风格 JSON（而不是 HTML），并提示 Base URL 的正确填法
+  const missing = await req('/v1/what/is/this', { token: 'sk-external-api-key-1' });
+  assert.equal(missing.status, 404);
+  assert.match(missing.headers.get('content-type'), /application\/json/);
+  const missingData = await missing.json();
+  assert.match(missingData.error.message, /Base URL 以 \/v1 结尾/);
+});
+
 test('网站登录令牌不能调用 /v1；API 管理员令牌可用于网页调试台', async () => {
   const webToken = await login();
   const webSessionDenied = await req('/v1/models', { token: webToken });
