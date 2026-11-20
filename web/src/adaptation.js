@@ -21,7 +21,7 @@ const KB_KEY = 'oj-ai.kb.v1';
 export const MAX_NOTES_PER_MODEL = 30;
 export const MAX_KB_ENTRIES = 50;
 export const MAX_PARAM_LOG = 50;
-const PARAM_LIMITS = {
+export const PARAM_LIMITS = {
   temperature: [0, 1.5],
   repetitionPenalty: [1, 2],
   maxTokens: [64, 16384],
