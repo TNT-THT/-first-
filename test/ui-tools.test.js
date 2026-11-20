@@ -153,6 +153,47 @@ test('网站包下载：点击后立即给出反馈，并走浏览器原生下�
   }
 });
 
+test('管理员面板直接改参数：填数字保存即写入本机覆盖，清空一项恢复默认', async () => {
+  const modelId = config.webllm.defaultModel;
+  localStorage.setItem('oj-ai.admin', JSON.stringify({ exp: Date.now() + 60_000 }));
+  try {
+    $('#roleBtn').click(); // 打开管理员面板，渲染参数表单
+    const form = document.querySelector('#paramOverrides .param-form');
+    assert.ok(form, '管理员面板应有直接改参数的表单，不必再去对话里发参数指令');
+    assert.equal(form.querySelectorAll('[data-param-key]').length, 6, '应有温度、重复惩罚、最大输出与三个窗口共 6 项');
+    form.querySelector('[data-param-key="temperature"]').value = '0.9';
+    form.querySelector('[data-param-key="maxTokens"]').value = '1234';
+    form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    const saved = await waitFor(() => {
+      const adapt = JSON.parse(localStorage.getItem('oj-ai.adapt.v1') || '{"models":{}}');
+      return adapt.models[modelId]?.params?.temperature === 0.9 && adapt.models[modelId].params;
+    });
+    assert.ok(saved, '保存后参数应写入本机覆盖');
+    assert.equal(saved.maxTokens, 1234);
+    const status = await waitFor(() => /已保存「/.test($('#statusText').textContent) && $('#statusText').textContent);
+    assert.ok(status, '保存后状态栏应给出已保存反馈');
+
+    // 表单已按新覆盖重渲染：把温度清空并保存，应去掉该项覆盖（恢复默认）
+    const form2 = document.querySelector('#paramOverrides .param-form');
+    assert.equal(form2.querySelector('[data-param-key="temperature"]').value, '0.9', '已有覆盖应预填在输入框中');
+    form2.querySelector('[data-param-key="temperature"]').value = '';
+    form2.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    const afterReset = await waitFor(() => {
+      const adapt = JSON.parse(localStorage.getItem('oj-ai.adapt.v1') || '{"models":{}}');
+      const params = adapt.models[modelId]?.params || {};
+      return !('temperature' in params) && params;
+    });
+    assert.ok(afterReset, '清空并保存后应恢复默认');
+    assert.equal(afterReset.maxTokens, 1234, '未清空的项应保持不变');
+    const log = JSON.parse(localStorage.getItem('oj-ai.adapt.v1')).models[modelId].log || [];
+    assert.ok(log.some((e) => e.source === 'panel'), '变更记录应标明来源为管理员面板');
+  } finally {
+    localStorage.removeItem('oj-ai.admin');
+    localStorage.removeItem('oj-ai.adapt.v1');
+    if (!$('#rolePanel').hidden) $('#roleBtn').click();
+  }
+});
+
 test('工具面板：三行工具、可展开卡片、开关写入本机偏好', async () => {
   assert.equal($('#toolList').children.length, 3, '应有思考模式、滑动窗口、联网资料检索三项');
   assert.equal($('#toolsPanel').hidden, true);

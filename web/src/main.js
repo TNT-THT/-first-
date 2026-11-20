@@ -83,6 +83,8 @@ import {
   listKnowledge,
   listParamLog,
   migrateAdaptation,
+  PARAM_LABELS,
+  PARAM_LIMITS,
   parseCorrections,
   recordFeedback,
   removeCorrection,
@@ -3816,7 +3818,7 @@ function renderAdaptList() {
   }
 }
 
-const PARAM_SOURCE_LABEL = { explicit: '参数行', suggestion: '关键词识别', reset: '恢复默认' };
+const PARAM_SOURCE_LABEL = { explicit: '参数行', suggestion: '关键词识别', reset: '恢复默认', panel: '管理员面板' };
 
 function formatLogTime(ts) {
   return new Date(ts).toLocaleString('zh-CN', { hour12: false });
@@ -3902,9 +3904,13 @@ function paramSummary(params) {
   return Object.entries(params).map(([k, v]) => `${k}=${v}`).join('，');
 }
 
+/** 可在管理员面板直接修改的参数（顺序即表单中的显示顺序）。 */
+const PARAM_FORM_KEYS = ['temperature', 'repetitionPenalty', 'maxTokens', 'contextWindow', 'slidingWindow', 'thinkingWindow'];
+
 /**
- * “管理员面板”中，所有用户都能看到当前模型的本机参数覆盖，并可撤回。
- * 参数对同一浏览器的所有用户生效，因此这里不限定管理员。
+ * “管理员面板”中的参数区（仅管理员可见）：直接填数字即可修改当前模型的参数，
+ * 不用再去对话里发“参数：temperature=…”指令。保存后立即生效（仅本机）。
+ * 某项留空并保存 = 该项恢复默认/预设（去掉本机覆盖）；已有覆盖会在输入框中预填。
  */
 function renderParamOverrides() {
   const box = els.paramOverrides;
@@ -3916,43 +3922,112 @@ function renderParamOverrides() {
   box.hidden = false;
   const modelId = state.backend.modelId;
   const overrides = sanitizeParams(listAdaptation(modelId).params) || {};
+  const eff = effectiveParams(modelId);
   const head = document.createElement('p');
   head.className = 'muted small';
-  head.textContent = `当前模型「${modelDisplayName(modelId)}」的自定义参数（对本浏览器所有用户生效）：`;
+  head.textContent = `直接修改当前模型「${modelDisplayName(modelId)}」的参数（仅本机，对本浏览器所有用户生效）：`;
   box.append(head);
-  const keys = Object.keys(overrides);
-  if (!keys.length) {
-    const none = document.createElement('p');
-    none.className = 'muted small';
-    none.textContent = '没有自定义参数，使用默认值。';
-    box.append(none);
-    return;
-  }
-  for (const key of keys) {
+
+  const form = document.createElement('form');
+  form.className = 'param-form';
+  for (const key of PARAM_FORM_KEYS) {
+    const [min, max] = PARAM_LIMITS[key];
     const row = document.createElement('div');
-    row.className = 'local-row';
-    const t = document.createElement('div');
-    t.className = 'small';
-    t.textContent = `${key} = ${overrides[key]}（本机覆盖）`;
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'btn ghost small';
-    btn.dataset.action = 'param-revert';
-    btn.dataset.id = modelId;
-    btn.dataset.key = key;
-    btn.textContent = '恢复默认';
-    row.append(t, btn);
-    box.append(row);
+    row.className = 'param-row';
+    const label = document.createElement('label');
+    label.className = 'small param-name';
+    label.htmlFor = `paramInput-${key}`;
+    label.textContent = `${PARAM_LABELS[key] || key}（${key}）`;
+    const input = document.createElement('input');
+    input.id = `paramInput-${key}`;
+    input.type = 'number';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = key === 'temperature' || key === 'repetitionPenalty' ? '0.05' : '1';
+    input.dataset.paramKey = key;
+    if (key in overrides) input.value = String(overrides[key]);
+    input.placeholder = `当前 ${eff[key]}`;
+    input.title = `允许范围 ${min} – ${max}`;
+    const hint = document.createElement('span');
+    hint.className = 'muted small param-hint';
+    hint.textContent = `范围 ${min}–${max}；当前生效 ${eff[key]}（${paramSourceOf(key, modelId)}）`;
+    row.append(label, input, hint);
+    form.append(row);
   }
-  if (keys.length > 1) {
+  const actions = document.createElement('div');
+  actions.className = 'param-actions';
+  const save = document.createElement('button');
+  save.type = 'submit';
+  save.className = 'btn primary small';
+  save.textContent = '保存参数';
+  actions.append(save);
+  if (Object.keys(overrides).length) {
     const all = document.createElement('button');
     all.type = 'button';
     all.className = 'btn ghost small';
     all.dataset.action = 'param-revert-all';
     all.dataset.id = modelId;
     all.textContent = '全部恢复默认';
-    box.append(all);
+    actions.append(all);
   }
+  form.append(actions);
+  const note = document.createElement('p');
+  note.className = 'muted small';
+  note.textContent = '填好后点“保存参数”立即生效，不用再去对话里发参数指令。某项留空并保存，表示该项恢复默认（去掉本机覆盖）。窗口类参数变化时会释放显存，下次发送时按新参数加载模型。';
+  form.append(note);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    void savePanelParams(modelId, form);
+  });
+  box.append(form);
+}
+
+/**
+ * 保存管理员面板中直接填写的参数：写入的项成为本机覆盖，清空的项恢复默认。
+ * 数值范围由 setModelParams / resetParam 按 PARAM_LIMITS 夹紧与记录，来源标记为 panel。
+ */
+async function savePanelParams(modelId, form) {
+  if (!requireAdmin('修改参数')) return;
+  const overrides = sanitizeParams(listAdaptation(modelId).params) || {};
+  const eff = effectiveParams(modelId);
+  const toWrite = {};
+  const resetKeys = [];
+  const invalid = [];
+  for (const input of form.querySelectorAll('[data-param-key]')) {
+    const key = input.dataset.paramKey;
+    const raw = input.value.trim();
+    if (!raw) {
+      if (key in overrides) resetKeys.push(key);
+      continue;
+    }
+    const value = Number(raw);
+    if (!Number.isFinite(value)) {
+      invalid.push(PARAM_LABELS[key] || key);
+      continue;
+    }
+    // 与当前覆盖（或无覆盖时的生效值）相同则不重复写入，避免产生无意义的变更记录
+    if (key in overrides ? value !== overrides[key] : value !== eff[key]) toWrite[key] = value;
+  }
+  if (invalid.length) {
+    showStatus(`参数填写有误：${invalid.join('、')} 不是有效数字，未保存任何修改。`, { error: true });
+    return;
+  }
+  for (const key of resetKeys) resetParam(modelId, key);
+  const written = Object.keys(toWrite).length
+    ? setModelParams(modelId, toWrite, { source: 'panel', reason: '管理员面板直接输入' })
+    : null;
+  refreshParamViews();
+  renderExportParamsOption();
+  if (!written && !resetKeys.length) {
+    showStatus('参数没有变化，未保存。');
+    return;
+  }
+  const released = await releaseAfterSettingChange();
+  const parts = [];
+  if (written) parts.push(`已设置 ${paramSummary(written)}`);
+  if (resetKeys.length) parts.push(`已恢复默认：${resetKeys.map((k) => PARAM_LABELS[k] || k).join('、')}`);
+  const tail = released ? '已释放多余显存，下次发送时按新参数加载模型。' : '从下一次回答起生效。';
+  showStatus(`已保存「${modelDisplayName(modelId)}」的参数（仅本机）：${parts.join('；')}。${tail}`);
 }
 
 /** 导出选项：有自定义参数时可勾选保存；没有时禁用。 */
