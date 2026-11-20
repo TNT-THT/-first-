@@ -431,6 +431,8 @@ iframe 会回复 `{ type: 'oj-ai:filled' }`，启动后会向父页面发送 `{ 
 
 ## 自建服务器：API 与网页链接接入（不依赖第三方托管平台）
 
+只想在一台电脑上运行网页和 API 时，可使用本机启动命令 `npm run start:local-api`；它会自动构建远程版、生成本机口令，并且只绑定 `127.0.0.1`。默认模型服务为同一台电脑上的 Ollama。逐步说明见 [`docs/local-api.md`](docs/local-api.md)。
+
 服务端模式会同时提供两种远程接入方式：
 
 1. **自建服务器 API**：OpenAI 兼容的 `GET /v1/models`、`POST /v1/chat/completions`，支持流式 SSE 和非流式；任意后端程序可用 API Key 调用。
