@@ -1,10 +1,12 @@
 node_modules/
 web/dist/
+web/dist-api/
 # 网站端生成的 API Key 哈希存储（绝不可提交）
 data/
 .env
 .env.*
 !.env.example
+.local-api.json
 *.log
 .DS_Store
 
@@ -23,3 +25,5 @@ training/**/__pycache__/
 
 # Python 缓存（本机生图脚本的测试等）
 __pycache__/
+.node-runtime-cache/
+.package-staging/

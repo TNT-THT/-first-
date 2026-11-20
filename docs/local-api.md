@@ -1,0 +1,85 @@
+# 单台电脑本机运行网页与 API（网页显卡推理）
+
+本指南把网站和 OpenAI 兼容 API 都运行在同一台电脑上。API 只绑定 `127.0.0.1`，只有这台电脑上的浏览器和软件能访问；不需要公网域名、VPS 或第三方托管平台，也**不需要安装 Ollama**。
+
+> **推理方式：**本机 API 不直接跑模型，而是把请求通过 WebSocket 桥接给**正在打开的本网页**，由网页里的 WebLLM（WebGPU）用显卡生成回答。网页必须保持打开；关闭网页后 API 会返回“本机模型网页尚未连接”，重新打开网页即可自动恢复。
+
+> **为什么不能只点网页按钮就启动？** 浏览器出于安全限制，不能自己在电脑上监听端口、也不能替你启动程序，所以必须有一个一次性的“双击启动”动作把本机服务跑起来。除此之外全部在网页里完成：服务启动后浏览器会自动打开网页，你只需登录并在网页里点“申请 API Key”。
+
+## 准备
+
+1. **什么都不用装。** 网站包已内置 Node 运行时（`runtime/`）和服务端依赖（`server/node_modules/`），下载解压后双击即可，不需要预先安装 Node.js，也不用再联网安装组件。（只有当内置运行时在个别电脑上无法运行时，启动窗口才会提示去安装 Node.js LTS 作为后备。）
+2. 用最新版 Chrome 或 Edge（桌面端）打开网页，并确认显卡驱动正常（网页需要 WebGPU）。
+3. 首次使用某个模型时，网页会从 Hugging Face 下载权重并缓存在浏览器中（每个模型约几百 MB 到数 GB，取决于模型大小）；之后可离线使用。
+
+> 仅当你在 Git 仓库里用 `npm run start:local-api` 手动启动（进阶方式）时，才需要自己安装 Node.js 18.18 或更高版本。
+
+## 启动（新手：下载网站包，双击一次）
+
+1. 在 GitHub Pages 网站里按你电脑的系统下载对应的网站压缩包（Windows 版 `site-win-x64.zip`、Mac Apple 芯片版 `site-darwin-arm64.zip`、Mac Intel 芯片版 `site-darwin-x64.zip`、Linux 版 `site-linux-x64.zip`，**只下你那一个**；网页会按你当前的电脑标出推荐项），**完整解压**到一个文件夹。
+   每个包已内置本机 API 所需的全部内容：对应平台的 Node 运行时（`runtime/`，只有一个，不用一次下四个平台）、Node 服务端（`server/`，含运行依赖）、启动脚本（`scripts/`）、服务版网页（`web/dist-api/`）和双击启动文件。下载这一次就够了，不需要再下载或安装其他任何东西（模型权重除外，见“准备”第 3 条）。下错版本时启动器会提示，回到网站重新下对应版本即可。
+2. Windows 双击 `start-windows.bat`；macOS 双击 `start-mac.command`。启动器会优先使用包内内置的 Node 运行时。
+3. 黑色窗口会显示生成的「网站口令」和「管理口令」，请记下来。
+   第一次启动的口令会保存到被 Git 忽略的 `.local-api.json`；若项目已有有效 `.env` 配置，则尽量沿用。服务强制绑定 `127.0.0.1`，不会向局域网或公网开放。
+4. 浏览器会**自动打开** `http://127.0.0.1:3000`，用「网站口令」登录即可。之后所有操作都在网页里完成。
+
+- 网页：`http://127.0.0.1:3000`
+- API Base URL：`http://127.0.0.1:3000/v1`
+- 对话接口：`http://127.0.0.1:3000/v1/chat/completions`
+
+网页打开后会自动连上 API 桥接（网页里“API 接入”能看到连接状态和可用模型数）。使用期间不要关闭黑色窗口，也不要关闭网页；关闭黑色窗口即停止服务。电脑休眠、停止服务或关闭网页后，API 就不能生成回答，重新双击启动文件并打开网页即可恢复。
+
+没有 Node.js 时的后备方式（只有网页聊天、没有 API）：Windows 双击 `start-windows-static.bat`；macOS / Linux 在解压目录运行 `python3 serve-site.py`。
+
+### 进阶：在仓库里用命令启动（可选）
+
+在项目根目录运行 `npm run start:local-api` 效果相同（缺少依赖时自动 `npm ci`、自动构建服务版网页、就绪后自动打开浏览器）。
+
+如果 3000 端口已被占用，可设置 `LOCAL_API_PORT` 后启动，例如：
+
+```bash
+LOCAL_API_PORT=3001 npm run start:local-api
+```
+
+Windows PowerShell：
+
+```powershell
+$env:LOCAL_API_PORT = "3001"
+npm run start:local-api
+```
+
+## 申请并使用 API Key（网页自助）
+
+1. 先用首次启动时显示的网站口令 `APP_PASSWORD` 登录本机网页，再打开 **API 接入**。
+2. 在 **“申请 API Key（本机网页）”** 一节点击 **“申请一把 API Key”**，完整 Key 只显示一次，请立即复制保存。点完这一步，API 就可以用了，不需要再做任何配置。
+3. 在兼容 OpenAI 的客户端填写 Base URL `http://127.0.0.1:3000/v1` 和这把 Key；模型名使用网页下拉框里显示的模型 ID（例如 `Qwen2.5-3B-Instruct-q4f16_1-MLC`）。也可以先请求 `GET /v1/models` 查看当前网页提供的全部模型。
+
+本机命令行测试示例：
+
+```bash
+curl http://127.0.0.1:3000/v1/chat/completions \
+  -H 'Authorization: Bearer <API_KEY>' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen2.5-3B-Instruct-q4f16_1-MLC","messages":[{"role":"user","content":"你好"}],"stream":false}'
+```
+
+Windows 可在 PowerShell 中使用 `curl.exe`，或在兼容 OpenAI 的软件里填写相同地址和 Key。
+
+## 可用模型
+
+- 网站内置的 32 个模型（见 `web/public/config.json`）都可通过 API 调用，首次调用某个模型时网页会先下载并加载权重，耗时较长；之后调用会直接使用已加载的模型。
+- 已在这台电脑的同一浏览器来源中登记的“导入模型 / 新建 AI”也会出现在 `/v1/models` 中（导入记录只存在于这台电脑的浏览器里；新登记后桥接会自动同步，必要时刷新本页）。
+- 同一时间只处理一个 API 请求（显卡一次只能跑一个生成），多余请求会排队；队列满时返回 429。
+
+## 管理员
+
+- 用首次启动时显示的 `API_ADMIN_PASSWORD` 在 **API 接入 → 管理员验证** 解锁控制台，可管理全站 API Key、调整服务端参数（temperature、输出上限等），并使用 API 调试台。
+- 普通网站口令（`APP_PASSWORD`）不能代替管理员口令，也不能直接调用 `/v1`。
+
+## 安全和限制
+
+- 此本机模式**不会**让其他电脑通过 LAN、GitHub Pages 或互联网访问 API；`127.0.0.1` 只指向本机。
+- 不要把 `.env`、`.local-api.json` 或创建的 API Key 提交到 Git，也不要把 Key 放到公开网页前端。
+- 首次下载模型权重需要网络和磁盘空间；下载完成后，推理完全在本机显卡上完成，不必调用云模型 API。
+- 如果只打开 `https://tnt-tht.github.io/-first-/`，那仍是 GitHub Pages 的静态版，不会连接本机 API。必须打开本机启动后的 `http://127.0.0.1:3000`（从压缩包双击启动会自动打开）。
+- 若要让其他电脑访问，需要改成局域网/公网部署并配置相应的访问控制与 HTTPS；本指南刻意不开放网络监听。

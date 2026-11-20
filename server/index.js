@@ -1,4 +1,7 @@
 import express from 'express';
+import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
+import { BrowserModelBridge } from './browser-model-bridge.js';
 import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +20,10 @@ import { ApiKeyStore } from './api-key-store.js';
 import { ApiSettingsStore } from './settings-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WEB_DIST = path.resolve(__dirname, '..', 'web', 'dist');
+// 网站包里静态版与服务版网页共存（web/dist 与 web/dist-api），可用 OJ_WEB_DIST 指定服务版目录。
+const WEB_DIST = process.env.OJ_WEB_DIST
+  ? path.resolve(process.cwd(), process.env.OJ_WEB_DIST)
+  : path.resolve(__dirname, '..', 'web', 'dist');
 
 /** 简单的内存登录限流：每个 IP 15 分钟内最多 10 次失败尝试。 */
 function createLoginLimiter({ windowMs = 15 * 60 * 1000, max = 10 } = {}) {
@@ -76,7 +82,7 @@ function originMatches(origin, pattern) {
   }
 }
 
-export function createApp(cfg = loadConfig()) {
+export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', cfg.trustProxy);
@@ -109,16 +115,22 @@ export function createApp(cfg = loadConfig()) {
   // ---- 安全响应头 ----
   // 注意：这里刻意【不】设置 X-Frame-Options，否则浏览器会禁止被 iframe 嵌入。
   // 嵌入范围改由 CSP 的 frame-ancestors 控制。
+  // 本机桥接模式下，网页要在浏览器里编译 WebAssembly 并从 Hugging Face 下载模型权重，
+  // 因此仅在该模式放行 'wasm-unsafe-eval' 与模型下载域名，否则网页模型根本加载不了。
+  const scriptSrc = browserBridge ? "script-src 'self' 'wasm-unsafe-eval'" : "script-src 'self'";
+  const connectSrc = `'self'${cfg.cspConnectSrc ? ` ${cfg.cspConnectSrc}` : ''}${
+    browserBridge ? ' https://huggingface.co https://*.huggingface.co https://*.hf.co' : ''
+  }`;
   app.use((req, res, next) => {
     res.setHeader(
       'Content-Security-Policy',
       [
         "default-src 'self'",
-        "script-src 'self'",
+        scriptSrc,
         "style-src 'self' 'unsafe-inline'",
         "img-src 'self' data: blob:",
         "font-src 'self' data:",
-        `connect-src 'self'${cfg.cspConnectSrc ? ` ${cfg.cspConnectSrc}` : ''}`,
+        `connect-src ${connectSrc}`,
         "object-src 'none'",
         "base-uri 'self'",
         `frame-ancestors ${cfg.frameAncestors}`,
@@ -131,6 +143,7 @@ export function createApp(cfg = loadConfig()) {
 
   const limiter = createLoginLimiter();
   const apiKeyAdminLimiter = createLoginLimiter();
+  const publicKeyApplyLimiter = createLoginLimiter({ windowMs: 10 * 60 * 1000, max: 3 });
   const apiKeyStore = new ApiKeyStore(cfg.apiKeysFile);
   const apiSettingsStore = new ApiSettingsStore(cfg.apiSettingsFile);
   apiSettingsStore.apply(cfg);
@@ -173,11 +186,41 @@ export function createApp(cfg = loadConfig()) {
     return next();
   };
 
-  app.get('/healthz', (_req, res) =>
-    res.json({ ok: true, version: API_VERSION, model: cfg.llmModel || null, modelConfigured: !!(cfg.llmBaseUrl && cfg.llmModel) })
-  );
+  app.get('/healthz', (_req, res) => {
+    const bridgeStatus = browserBridge?.status();
+    return res.json({
+      ok: true,
+      version: API_VERSION,
+      model: bridgeStatus?.models?.[0]?.id || cfg.llmModel || null,
+      modelConfigured: bridgeStatus ? bridgeStatus.connected : !!(cfg.llmBaseUrl && cfg.llmModel),
+      localBrowserBridge: !!browserBridge,
+      browserModelConnected: bridgeStatus?.connected ?? null,
+    });
+  });
 
   // 公开配置：前端据此决定 postMessage 的白名单等，不含任何密钥
+  app.get('/api/local-model-bridge/status', (_req, res) => {
+    if (!browserBridge) return res.status(404).json({ error: '本机浏览器模型 API 未启用。' });
+    return res.json(browserBridge.status());
+  });
+
+  // 本机 API 申请：仅本机/局域网部署开启；每个 IP 每 10 分钟最多申请 3 把。
+  app.post('/api/api-keys/apply', async (req, res, next) => {
+    if (!browserBridge) return res.status(404).json({ error: '本机 API Key 申请未启用。' });
+    const ip = req.ip;
+    if (publicKeyApplyLimiter.blocked(ip)) {
+      return res.status(429).json({ error: '申请次数过多，请 10 分钟后再试。' });
+    }
+    publicKeyApplyLimiter.fail(ip);
+    try {
+      const label = typeof req.body?.label === 'string' ? req.body.label : '网页自助申请';
+      return res.status(201).json(await apiKeyStore.create(label));
+    } catch (err) {
+      if (/最多只能创建/.test(err.message)) return res.status(429).json({ error: err.message });
+      return next(err);
+    }
+  });
+
   app.get('/api/config', (_req, res) => {
     res.json({
       appName: cfg.appName,
@@ -187,6 +230,7 @@ export function createApp(cfg = loadConfig()) {
       apiBaseUrl: cfg.publicBaseUrl ? `${cfg.publicBaseUrl}/v1` : '/v1',
       apiKeyAuth: !!cfg.apiKeys?.length || !!cfg.apiAdminPassword,
       apiKeyManagerEnabled: !!cfg.apiAdminPassword,
+      localBrowserBridge: !!browserBridge,
       apiDefaultTemperature: cfg.llmTemperature,
       apiMaxTokens: cfg.apiMaxTokens,
       version: API_VERSION,
@@ -299,9 +343,46 @@ export function createApp(cfg = loadConfig()) {
       res.on('close', () => {
         if (!res.writableFinished) ac.abort();
       });
+      if (browserBridge) {
+        // 本机桥接模式下没有服务端上游：网页自身的聊天也交给本机网页的 WebGPU 模型，
+        // 使用桥接上报的第一个模型（即网页当前可用模型）。这样打开本机网页即可直接聊天，
+        // 不会出现“能申请 API Key、网页却不能对话”的割裂体验。
+        const bridgeStatus = browserBridge.status();
+        const model = bridgeStatus.models?.[0]?.id;
+        if (!bridgeStatus.connected || !model) {
+          return res.status(503).json({ error: '本机模型尚未连接：请保持本网页打开，待模型连接后再发送。' });
+        }
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Accel-Buffering', 'no');
+        res.flushHeaders?.();
+        const id = `chatcmpl-${randomUUID().replaceAll('-', '')}`;
+        const created = Math.floor(Date.now() / 1000);
+        const emit = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+        emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
+        await browserBridge.run(
+          { model, messages, temperature: cfg.llmTemperature, maxTokens: cfg.apiMaxTokens ?? 8192 },
+          {
+            signal: ac.signal,
+            onDelta(delta) {
+              emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] });
+            },
+          },
+        );
+        if (!ac.signal.aborted && !res.destroyed) {
+          emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }
+        return;
+      }
       await proxyChatStream({ cfg, messages, res, signal: ac.signal });
     } catch (err) {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = err instanceof HttpError
+        ? err.status
+        : (Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500);
       if (!(err instanceof HttpError)) console.error('[chat] unexpected:', err);
       if (res.headersSent) {
         res.end();
@@ -319,15 +400,18 @@ export function createApp(cfg = loadConfig()) {
     owned_by: 'oj-ai-assistant',
   });
 
+  const availableApiModels = () => browserBridge
+    ? browserBridge.status().models.map((model) => ({ id: model.id, object: 'model', created: 0, owned_by: 'oj-ai-assistant', name: model.label }))
+    : cfg.llmModel ? [modelObject()] : [];
+
   app.get('/v1/models', requireApiAuth, (_req, res) => {
-    res.json({ object: 'list', data: cfg.llmModel ? [modelObject()] : [] });
+    res.json({ object: 'list', data: availableApiModels() });
   });
 
   app.get('/v1/models/:id', requireApiAuth, (req, res) => {
-    if (!cfg.llmModel || req.params.id !== cfg.llmModel) {
-      return openAiError(res, 404, `模型不存在：${req.params.id}`, 'model_not_found');
-    }
-    return res.json(modelObject());
+    const model = availableApiModels().find((entry) => entry.id === req.params.id);
+    if (!model) return openAiError(res, 404, `模型不存在或本机网页尚未连接：${req.params.id}`, 'model_not_found');
+    return res.json(model);
   });
 
   app.post('/v1/chat/completions', requireApiAuth, async (req, res) => {
@@ -336,9 +420,69 @@ export function createApp(cfg = loadConfig()) {
       if (!res.writableFinished) ac.abort();
     });
     try {
-      const { messages, stream, temperature, maxTokens, params } = validateChatCompletionBody(req.body, cfg);
+      const requestCfg = browserBridge ? { ...cfg, llmModel: '' } : cfg;
+      const { messages, stream, temperature, maxTokens, params, model: requestedModel } = validateChatCompletionBody(req.body, requestCfg);
       // 即使调用方未提交 max_tokens，也应用服务端上限，避免无限制生成消耗服务器额度。
       const outputLimit = maxTokens ?? cfg.apiMaxTokens ?? 8192;
+      if (browserBridge) {
+        if (!browserBridge.status().connected) {
+          return openAiError(res, 503, '本机模型网页尚未连接。请在这台电脑打开服务网页，并保持网页打开。', 'service_unavailable');
+        }
+        const available = availableApiModels();
+        const model = requestedModel || available[0]?.id;
+        if (!model || !available.some((entry) => entry.id === model)) {
+          return openAiError(res, 404, `模型不存在或本机网页未提供该模型：${model || '(未指定)'}`, 'model_not_found');
+        }
+        const id = `chatcmpl-${randomUUID().replaceAll('-', '')}`;
+        const created = Math.floor(Date.now() / 1000);
+        let content = '';
+        if (stream) {
+          res.status(200);
+          res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache, no-transform');
+          res.setHeader('Connection', 'keep-alive');
+          res.flushHeaders?.();
+          const emit = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+          emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
+          await browserBridge.run({
+            model,
+            messages,
+            temperature: temperature ?? cfg.llmTemperature,
+            maxTokens: outputLimit,
+            params: { ...(cfg.defaultGenerationParams || {}), ...params },
+          }, {
+            signal: ac.signal,
+            onDelta(delta) {
+              content += delta;
+              emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] });
+            },
+          });
+          if (!ac.signal.aborted && !res.destroyed) {
+            emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+            res.write('data: [DONE]\n\n');
+            res.end();
+          }
+          return;
+        }
+        const result = await browserBridge.run({
+          model,
+          messages,
+          temperature: temperature ?? cfg.llmTemperature,
+          maxTokens: outputLimit,
+          params: { ...(cfg.defaultGenerationParams || {}), ...params },
+        }, {
+          signal: ac.signal,
+          onDelta(delta) { content += delta; },
+        });
+        if (ac.signal.aborted || res.destroyed) return;
+        const promptTokens = messages.reduce((n, m) => n + Math.ceil(m.content.length / 4), 0);
+        const completionTokens = Math.ceil(content.length / 4);
+        return res.json({
+          id, object: 'chat.completion', created, model,
+          choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: result.finishReason || 'stop' }],
+          usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+        });
+      }
       if (stream) {
         await proxyChatStream({ cfg, messages, res, signal: ac.signal, temperature, maxTokens: outputLimit, params, normalize: true });
         return;
@@ -366,7 +510,9 @@ export function createApp(cfg = loadConfig()) {
         },
       });
     } catch (err) {
-      const status = err instanceof HttpError ? err.status : 500;
+      const status = err instanceof HttpError
+        ? err.status
+        : (Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500);
       if (!(err instanceof HttpError)) console.error('[v1/chat] unexpected:', err);
       if (res.headersSent) {
         res.end();
@@ -428,13 +574,19 @@ if (isMain) {
   if (cfg.sessionSecretIsRandom) {
     console.warn('[warn] 未设置 SESSION_SECRET，本次使用随机密钥，重启后需重新登录。');
   }
-  if (!cfg.llmBaseUrl || !cfg.llmModel) {
+  const bridgeEnabled = process.env.LOCAL_BROWSER_BRIDGE === '1';
+  if (bridgeEnabled) {
+    console.log('[local] 本机网页模型桥接已启用：打开本网页并保持打开，即可聊天并使用 /v1 API（无需配置 LLM_BASE_URL / LLM_MODEL）。');
+  } else if (!cfg.llmBaseUrl || !cfg.llmModel) {
     console.warn('[warn] 未配置 LLM_BASE_URL / LLM_MODEL，聊天功能暂不可用。');
   }
   if (!cfg.apiKeys?.length && !cfg.apiAdminPassword) {
     console.warn('[warn] 未配置 API_KEYS 或 API_ADMIN_PASSWORD，外部 API（/v1/*）仅接受网页登录令牌；如需供外部系统调用，请配置其中一项。');
   }
-  createApp(cfg).listen(cfg.port, cfg.host, () => {
+  const browserBridge = process.env.LOCAL_BROWSER_BRIDGE === '1' ? new BrowserModelBridge() : null;
+  const server = createServer(createApp(cfg, { browserBridge }));
+  browserBridge?.attach(server);
+  server.listen(cfg.port, cfg.host, () => {
     console.log(`${cfg.appName} 已启动: http://${cfg.host}:${cfg.port}`);
     console.log(`  网站链接: http://${cfg.host}:${cfg.port}/`);
     console.log(`  API 入口: http://${cfg.host}:${cfg.port}/v1/chat/completions`);

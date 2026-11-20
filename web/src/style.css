@@ -715,6 +715,16 @@ body.embed .role-section { display: none !important; }
 .data-export {
   margin-top: 8px;
 }
+.site-package-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.site-package-btns .is-recommended {
+  border-color: var(--accent, #2563eb);
+  font-weight: 600;
+}
 .data-section-list {
   display: flex;
   flex-direction: column;

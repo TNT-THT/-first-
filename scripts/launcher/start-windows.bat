@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-rem Double-click this file to open the site locally (uses built-in PowerShell).
+rem Double-click: start the local site + API (needs Node.js, checked inside).
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0serve-site.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0serve-api.ps1"
 if errorlevel 1 pause

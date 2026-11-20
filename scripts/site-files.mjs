@@ -1,7 +1,9 @@
 /**
- * 网站包（静态版）包含哪些文件：纯逻辑，便于测试。
+ * 网站包包含哪些文件：纯逻辑，便于测试。
  *
- * 采用白名单：只收录网站源码、构建产物和说明文件。
+ * 采用白名单：只收录网站源码、构建产物、本机 API 服务端与启动脚本和说明文件。
+ * 这样解压后的网站包既能双击打开静态网页，也能一键启动本机 API 服务
+ * （Node 服务端 + 服务版网页 web/dist-api + 网页显卡桥接），无需再去仓库敲命令。
  * 模型权重、导出的 .ojmodel、训练数据、环境变量与密钥一律排除。
  * 网站本身不包含任何 AI 模型：模型由浏览器从 Hugging Face 下载并缓存，
  * 或由管理员单独导出一个 .ojmodel（聊天）/ .ojimage（生图）文件。
@@ -9,8 +11,18 @@
  */
 
 export const SITE_ROOT_FILES = ['package.json', 'package-lock.json', 'README.md'];
-export const SITE_DIRS = ['web/'];
-export const SITE_ZIP_NAME = 'web/dist/site.zip';
+export const SITE_DIRS = ['web/', 'server/', 'scripts/'];
+/** 网站包按平台分别打包（每个包只含对应平台的内置 Node 运行时），用户按需下载一个。 */
+export const SITE_ZIP_DIR = 'web/dist';
+export function siteZipName(targetId) {
+  return `site-${targetId}.zip`;
+}
+export function siteZipPath(targetId) {
+  return `${SITE_ZIP_DIR}/${siteZipName(targetId)}`;
+}
+export function isSiteZipPath(path) {
+  return /^web\/dist\/site(-[^/]+)?\.zip$/.test(String(path).replace(/\\/g, '/'));
+}
 export const MAX_SITE_FILE_BYTES = 20 * 1024 * 1024;
 /**
  * 生图运行库（ONNX Runtime 的 wasm 文件，见 vite.config.js）允许更大：
@@ -26,13 +38,15 @@ export const MAX_RUNTIME_FILE_BYTES = 40 * 1024 * 1024;
 export const LAUNCHER_DIR = 'scripts/launcher';
 export const LAUNCHER_FILES = [
   { from: 'start-windows.bat', to: 'start-windows.bat', mode: 0o644 },
+  { from: 'serve-api.ps1', to: 'serve-api.ps1', mode: 0o644 },
+  { from: 'start-windows-static.bat', to: 'start-windows-static.bat', mode: 0o644 },
   { from: 'serve-site.ps1', to: 'serve-site.ps1', mode: 0o644 },
   { from: 'start-mac.command', to: 'start-mac.command', mode: 0o755 },
   { from: 'serve-site.py', to: 'serve-site.py', mode: 0o755 },
   { from: '使用说明.txt', to: '使用说明.txt', mode: 0o644 },
 ];
 
-const EXCLUDED_SEGMENTS = new Set(['node_modules', '.git']);
+const EXCLUDED_SEGMENTS = new Set(['node_modules', '.git', '__pycache__']);
 const EXCLUDED_EXTENSIONS = [
   '.ojmodel',
   '.ojmodel.part',
@@ -60,7 +74,7 @@ export function exclusionReason(path, size = 0) {
   if (parts.some((s) => EXCLUDED_SEGMENTS.has(s))) return '依赖或版本库目录';
   const base = parts[parts.length - 1];
   if (/^\.env(\.|$)/.test(base)) return '环境变量或密钥文件';
-  if (p === SITE_ZIP_NAME) return '网站包本身';
+  if (isSiteZipPath(p)) return '网站包本身';
   if (ALLOWED_MODEL_GRAPHS.has(p)) return null;
   if (EXCLUDED_EXTENSIONS.some((ext) => base.toLowerCase().endsWith(ext))) return '模型或权重文件';
   const limit = p.startsWith(RUNTIME_DIR) ? MAX_RUNTIME_FILE_BYTES : MAX_SITE_FILE_BYTES;

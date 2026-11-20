@@ -164,6 +164,13 @@ const els = {
   apiKeyManagerSection: $('#apiKeyManagerSection'),
   apiAccessEndpoint: $('#apiAccessEndpoint'),
   apiAccessModel: $('#apiAccessModel'),
+  apiSelfApplySection: $('#apiSelfApplySection'),
+  apiBridgeStatus: $('#apiBridgeStatus'),
+  apiSelfApplyBtn: $('#apiSelfApplyBtn'),
+  apiSelfKeyPanel: $('#apiSelfKeyPanel'),
+  apiSelfKeyValue: $('#apiSelfKeyValue'),
+  apiSelfKeyCopy: $('#apiSelfKeyCopy'),
+  apiSelfApplyError: $('#apiSelfApplyError'),
   apiCurlExample: $('#apiCurlExample'),
   apiCurlCopy: $('#apiCurlCopy'),
   apiPlaygroundForm: $('#apiPlaygroundForm'),
@@ -248,7 +255,8 @@ const els = {
   statusProgress: $('#statusProgress'),
   statusBarFill: $('#statusBarFill'),
   exportModelBtn: $('#exportModelBtn'),
-  downloadSiteBtn: $('#downloadSiteBtn'),
+  sitePackageBtns: [...document.querySelectorAll('[data-site-package]')],
+  sitePackageHint: $('#sitePackageHint'),
   exportDataBtn: $('#exportDataBtn'),
   dataSectionList: $('#dataSectionList'),
   importModelBtn: $('#importModelBtn'),
@@ -2293,20 +2301,49 @@ function requireAdmin(action) {
   return false;
 }
 
-/** 下载网站包（静态版，构建时生成的 site.zip）。仅管理员。不包含任何 AI 模型。 */
-async function downloadSitePackage() {
+/**
+ * 下载网站包（构建时按平台生成的 site-<平台>.zip，每个包只含对应平台的内置运行时）。
+ * 仅管理员。不包含任何 AI 模型。
+ */
+async function downloadSitePackage(file, btn) {
   if (!requireAdmin('下载网站包')) return;
-  els.downloadSiteBtn.disabled = true;
+  btn.disabled = true;
   try {
-    const res = await fetch('site.zip', { cache: 'no-store' });
-    if (!res.ok) throw new Error(`找不到网站包（HTTP ${res.status}）。请先运行 npm run build 生成。`);
+    const res = await fetch(file, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`找不到网站包 ${file}（HTTP ${res.status}）。请先运行 npm run build 生成。`);
     const blob = await res.blob();
-    downloadBlob(blob, 'oj-ai-site.zip');
-    showStatus(`已下载网站包（${formatBytes(blob.size)}）。网站包不包含任何 AI 模型。`);
+    downloadBlob(blob, file);
+    showStatus(`已下载网站包 ${file}（${formatBytes(blob.size)}）。解压后双击启动文件即可；网站包不包含任何 AI 模型。`);
   } catch (err) {
     showStatus(`下载网站包失败：${err.message}`, { error: true });
   } finally {
-    els.downloadSiteBtn.disabled = !isAdmin();
+    btn.disabled = !isAdmin();
+  }
+}
+
+/** 按当前电脑的系统给四个网站包下载按钮标一个推荐项（Mac 芯片无法可靠自动区分时默认推荐 Apple 芯片版）。 */
+function renderSitePackageHint() {
+  if (!els.sitePackageBtns?.length) return;
+  const ua = navigator.userAgent || '';
+  let file = '';
+  let label = '';
+  if (/Windows/i.test(ua)) {
+    file = 'site-win-x64.zip';
+    label = 'Windows 版';
+  } else if (/Macintosh|Mac OS X/i.test(ua)) {
+    file = 'site-darwin-arm64.zip';
+    label = 'Mac（Apple 芯片）版';
+  } else if (/Linux/i.test(ua)) {
+    file = 'site-linux-x64.zip';
+    label = 'Linux 版';
+  }
+  for (const btn of els.sitePackageBtns) {
+    btn.classList.toggle('is-recommended', btn.dataset.sitePackage === file);
+  }
+  if (els.sitePackageHint) {
+    els.sitePackageHint.textContent = file
+      ? `按你正在用的这台电脑，推荐下载「${label}」。下错版本也没关系，回来重新下对应版本即可。`
+      : '';
   }
 }
 
@@ -2491,7 +2528,9 @@ async function deleteLocalModel(id) {
 }
 
 els.exportModelBtn.addEventListener('click', exportCurrentModel);
-els.downloadSiteBtn.addEventListener('click', downloadSitePackage);
+for (const btn of els.sitePackageBtns) {
+  btn.addEventListener('click', () => downloadSitePackage(btn.dataset.sitePackage, btn));
+}
 els.exportDataBtn.addEventListener('click', exportLocalData);
 // 数据分区的复选框（默认全部勾选，管理员可取消）
 els.dataSectionList.replaceChildren(
@@ -2589,6 +2628,12 @@ let apiKeyManagerEpoch = 0;
 let apiKeyNewId = '';
 let apiPlaygroundController = null;
 let apiPlaygroundRunId = 0;
+let apiBridgeModels = [];
+
+function apiDisplayModel() {
+  if (state.appConfig.localBrowserBridge) return apiBridgeModels[0]?.id || '';
+  return state.appConfig.model || '';
+}
 
 function accessBaseUrl() {
   return state.appConfig.publicBaseUrl || window.location.origin;
@@ -2598,7 +2643,13 @@ function renderApiAccessInfo() {
   const base = accessBaseUrl();
   const apiBase = new URL(state.appConfig.apiBaseUrl || '/v1', `${base}/`).href.replace(/\/$/, '');
   els.apiAccessEndpoint.textContent = `${apiBase}/chat/completions`;
-  els.apiAccessModel.textContent = state.appConfig.model || '服务端尚未配置模型';
+  if (state.appConfig.localBrowserBridge) {
+    els.apiAccessModel.textContent = apiDisplayModel()
+      ? `${apiDisplayModel()}（共 ${apiBridgeModels.length} 个网页模型；完整列表请求 GET /v1/models）`
+      : '等待本机网页连接模型…';
+  } else {
+    els.apiAccessModel.textContent = state.appConfig.model || '服务端尚未配置模型';
+  }
   updateApiCurlExample();
   const enabled = !!state.appConfig.apiKeyManagerEnabled;
   if (!enabled) {
@@ -2617,6 +2668,35 @@ function renderApiAccessInfo() {
   els.apiKeyManagerPanel.hidden = !adminVerified;
 }
 
+let bridgeStatusRetries = 0;
+
+async function refreshBridgeStatus() {
+  if (!state.appConfig.localBrowserBridge || !els.apiSelfApplySection) return;
+  els.apiSelfApplySection.hidden = false;
+  try {
+    const res = await fetch('/api/local-model-bridge/status', { cache: 'no-store' });
+    const data = await res.json().catch(() => ({}));
+    apiBridgeModels = Array.isArray(data.models) ? data.models.filter((m) => m && typeof m.id === 'string') : [];
+    if (data.connected) {
+      bridgeStatusRetries = 0;
+      els.apiBridgeStatus.textContent = `本机模型已连接：可用模型 ${apiBridgeModels.length} 个（保持本网页打开即可供 API 调用）。`;
+    } else {
+      els.apiBridgeStatus.textContent = '本机模型尚未连接：请保持本网页打开，API 会自动重连。';
+      // 面板还开着时自动重试几次，免得用户刚打开面板、桥接还没连上就以为用不了。
+      if (els.apiAccessDialog.open && bridgeStatusRetries < 5) {
+        bridgeStatusRetries += 1;
+        setTimeout(() => {
+          if (els.apiAccessDialog.open) refreshBridgeStatus();
+        }, 2000);
+      }
+    }
+    renderApiAccessInfo();
+    updateApiPlaygroundRequest();
+  } catch {
+    els.apiBridgeStatus.textContent = '本机模型状态读取失败。';
+  }
+}
+
 function apiPlaygroundPayload() {
   const messages = [];
   const system = els.apiPlaygroundSystem.value.trim();
@@ -2624,7 +2704,7 @@ function apiPlaygroundPayload() {
   if (system) messages.push({ role: 'system', content: system });
   if (prompt) messages.push({ role: 'user', content: prompt });
   const payload = {
-    model: state.appConfig.model || '<MODEL>',
+    model: apiDisplayModel() || '<MODEL>',
     messages,
     stream: els.apiPlaygroundStream.checked,
   };
@@ -2726,8 +2806,10 @@ async function submitApiPlayground(event) {
     els.apiPlaygroundPrompt.focus();
     return;
   }
-  if (!state.appConfig.model) {
-    els.apiPlaygroundStatus.textContent = '服务器尚未配置模型，请联系站点所有者。';
+  if (!apiDisplayModel()) {
+    els.apiPlaygroundStatus.textContent = state.appConfig.localBrowserBridge
+      ? '本机模型网页尚未连接或尚未上报模型，请保持本网页打开后重试。'
+      : '服务器尚未配置模型，请联系站点所有者。';
     return;
   }
   const token = state.apiKeyAdminToken;
@@ -2797,9 +2879,9 @@ async function submitApiPlayground(event) {
 
 function updateApiCurlExample() {
   if (!els.apiCurlExample) return;
-  const key = els.apiKeyNewValue.value || '<API_KEY>';
+  const key = els.apiKeyNewValue.value || els.apiSelfKeyValue?.value || '<API_KEY>';
   const body = {
-    model: state.appConfig.model || '<MODEL>',
+    model: apiDisplayModel() || '<MODEL>',
     messages: [{ role: 'user', content: '你好，请用一句话介绍你自己。' }],
     stream: false,
   };
@@ -2839,6 +2921,7 @@ function updateShareOutputs() {
 function openApiAccess() {
   if (MODE !== 'remote') return;
   renderApiAccessInfo();
+  refreshBridgeStatus();
   els.apiPlaygroundTemperature.value = String(state.appConfig.apiDefaultTemperature ?? 0.3);
   els.apiPlaygroundMaxTokens.max = String(state.appConfig.apiMaxTokens ?? 8192);
   updateApiPlaygroundRequest();
@@ -2865,6 +2948,9 @@ function lockApiKeyManager() {
   apiKeyNewId = '';
   els.apiKeyNewValue.value = '';
   els.apiKeyNewPanel.hidden = true;
+  if (els.apiSelfKeyValue) els.apiSelfKeyValue.value = '';
+  if (els.apiSelfKeyPanel) els.apiSelfKeyPanel.hidden = true;
+  if (els.apiSelfApplyError) els.apiSelfApplyError.textContent = '';
   updateApiCurlExample();
   els.apiKeyList.replaceChildren();
   els.apiKeyManagerError.textContent = '';
@@ -3017,6 +3103,29 @@ async function copyPlainText(value, button) {
 
 els.apiAccessBtn.addEventListener('click', openApiAccess);
 els.apiAccessClose.addEventListener('click', () => els.apiAccessDialog.close());
+els.apiSelfApplyBtn?.addEventListener('click', async () => {
+  els.apiSelfApplyError.textContent = '';
+  els.apiSelfApplyBtn.disabled = true;
+  try {
+    const res = await fetch('/api/api-keys/apply', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ label: '网页自助申请' }),
+      cache: 'no-store',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `申请失败（HTTP ${res.status}）`);
+    els.apiSelfKeyValue.value = data.key || '';
+    els.apiSelfKeyPanel.hidden = false;
+    els.apiSelfKeyValue.select();
+    updateApiCurlExample();
+  } catch (err) {
+    els.apiSelfApplyError.textContent = err.message || '申请失败';
+  } finally {
+    els.apiSelfApplyBtn.disabled = false;
+  }
+});
+els.apiSelfKeyCopy?.addEventListener('click', () => copyPlainText(els.apiSelfKeyValue.value, els.apiSelfKeyCopy));
 els.apiAccessDialog.addEventListener('close', () => {
   // 管理令牌与新建密钥只在面板打开期间留在内存，关闭时立即清除。
   lockApiKeyManager();
@@ -3227,11 +3336,12 @@ function refreshRoleUI() {
     els.roleStatus.textContent = '未配置管理员密钥，无法升级权限。';
   }
   els.exportModelBtn.disabled = !admin;
-  els.downloadSiteBtn.disabled = !admin;
+  for (const btn of els.sitePackageBtns) btn.disabled = !admin;
   els.exportDataBtn.disabled = !admin;
   // 网站包与本机数据导出只用于静态版（远程模式的数据在服务端）
   els.dataSectionList.closest('.data-export').hidden = MODE !== 'webllm';
-  els.downloadSiteBtn.closest('.site-tools').hidden = MODE !== 'webllm';
+  if (els.sitePackageBtns[0]) els.sitePackageBtns[0].closest('.site-tools').hidden = MODE !== 'webllm';
+  renderSitePackageHint();
   setImportButtons(admin);
   els.modelAdminHint.textContent = admin
     ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
@@ -5097,6 +5207,7 @@ async function loadAppConfig() {
       apiBaseUrl: c.apiBaseUrl || '/v1',
       apiKeyAuth: !!c.apiKeyAuth,
       apiKeyManagerEnabled: !!c.apiKeyManagerEnabled,
+      localBrowserBridge: !!c.localBrowserBridge,
       apiDefaultTemperature: Number.isFinite(Number(c.apiDefaultTemperature)) ? Number(c.apiDefaultTemperature) : 0.3,
       apiMaxTokens: Number.isInteger(Number(c.apiMaxTokens)) && Number(c.apiMaxTokens) > 0 ? Number(c.apiMaxTokens) : 8192,
       publicBaseUrl: c.publicBaseUrl || null,
@@ -5129,6 +5240,19 @@ async function init() {
   state.search.prefs = resolveSearchPrefs(state.search.config, loadSearchPrefs());
 
   state.backend = createBackend({ mode: MODE, appConfig: state.appConfig });
+  // 本机浏览器模型桥接：把网页里的 WebGPU 引擎暴露给同机 API（保持网页打开即可）
+  if (MODE === 'remote' && state.appConfig.localBrowserBridge) {
+    try {
+      const res = await fetch('config.json', { cache: 'no-store' });
+      const siteConfig = res.ok ? await res.json() : null;
+      if (siteConfig?.webllm) {
+        const { startLocalModelBridge } = await import('./local-model-bridge.js');
+        startLocalModelBridge({ webllmCfg: siteConfig.webllm });
+      }
+    } catch (err) {
+      console.warn('本机模型桥接启动失败：', err);
+    }
+  }
   // 生图按钮与事件需要在配置加载之后绑定
   initImageMode();
   refreshTools();
