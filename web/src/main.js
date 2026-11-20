@@ -156,6 +156,7 @@ const els = {
   loginBtn: $('#loginBtn'),
   accessDocsLink: $('#accessDocsLink'),
   apiAccessBtn: $('#apiAccessBtn'),
+  adminPanelBtn: $('#adminPanelBtn'),
   apiAccessDialog: $('#apiAccessDialog'),
   apiAccessClose: $('#apiAccessClose'),
   apiAdminLoginSection: $('#apiAdminLoginSection'),
@@ -2297,7 +2298,7 @@ async function refreshModelCacheStatus() {
 /** 导出、导入、删除新建 AI 都需要管理员权限。 */
 function requireAdmin(action) {
   if (isAdmin()) return true;
-  showStatus(`${action}需要管理员权限。请点击右上角“更改权限”，输入管理员密钥。`, { error: true });
+  showStatus(`${action}需要管理员权限。请点击右上角“管理员面板”，输入管理员密钥。`, { error: true });
   return false;
 }
 
@@ -2653,13 +2654,21 @@ function renderApiAccessInfo() {
   updateApiCurlExample();
   const enabled = !!state.appConfig.apiKeyManagerEnabled;
   if (!enabled) {
-    els.apiKeyManagerHint.textContent = state.appConfig.apiKeyAuth
-      ? '外部 API Key 已可调用；网站内的调试台、参数控制台和 Key 管理需要站点所有者在 .env 设置 API_ADMIN_PASSWORD（至少 16 位）并重启。'
-      : '管理员控制台未启用。请在服务器 .env 设置 API_ADMIN_PASSWORD（至少 16 位）并重启；普通网站口令不能代替它。';
+    els.apiKeyManagerHint.textContent = state.appConfig.localBrowserBridge
+      ? '本机管理员面板未启用：请在服务器 .env 设置 API_ADMIN_PASSWORD（至少 16 位）并重启；网站登录口令不能代替管理口令。'
+      : state.appConfig.apiKeyAuth
+        ? '外部 API Key 已可调用；网站内的调试台、参数控制台和 Key 管理需要站点所有者在 .env 设置 API_ADMIN_PASSWORD（至少 16 位）并重启。'
+        : '管理员控制台未启用。请在服务器 .env 设置 API_ADMIN_PASSWORD（至少 16 位）并重启；普通网站口令不能代替它。';
+  } else if (state.appConfig.localBrowserBridge) {
+    els.apiKeyManagerHint.textContent = '本机管理员面板已启用。管理口令是首次启动时黑色窗口显示的“管理口令”，也保存在解压文件夹的 .local-api.json 中（字段 API_ADMIN_PASSWORD；找不到时请先在文件管理器中显示隐藏文件）。它与网站登录口令不同，请勿分享该文件。验证后可打开 API 调试台、参数控制台和 API Key 管理。';
   } else {
     els.apiKeyManagerHint.textContent = '此验证会解锁网页 API 调试台、服务端参数控制台和全站 API Key 管理；普通网站访问口令不能代替 API_ADMIN_PASSWORD。';
   }
   const adminVerified = enabled && !!state.apiKeyAdminToken;
+  if (MODE === 'remote') {
+    els.roleBadge.textContent = adminVerified ? '管理员' : '访客';
+    els.roleBadge.classList.toggle('is-admin', adminVerified);
+  }
   els.apiAdminLoginSection.hidden = adminVerified;
   els.apiKeyAdminLoginForm.hidden = !enabled;
   els.apiPlaygroundSection.hidden = !adminVerified;
@@ -2918,7 +2927,7 @@ function updateShareOutputs() {
   updateIframeSnippet();
 }
 
-function openApiAccess() {
+function openApiAccess({ focusAdmin = false } = {}) {
   if (MODE !== 'remote') return;
   renderApiAccessInfo();
   refreshBridgeStatus();
@@ -2933,6 +2942,15 @@ function openApiAccess() {
   if (state.apiKeyAdminToken) {
     loadManagedApiKeys();
     loadAdminSettings();
+  }
+  if (focusAdmin) {
+    const target = state.apiKeyAdminToken ? els.apiAdminSettingsSection : els.apiAdminLoginSection;
+    requestAnimationFrame(() => {
+      target?.scrollIntoView({ block: 'start' });
+      if (!state.apiKeyAdminToken && state.appConfig.apiKeyManagerEnabled) {
+        els.apiKeyAdminPassword.focus({ preventScroll: true });
+      }
+    });
   }
 }
 
@@ -3101,7 +3119,8 @@ async function copyPlainText(value, button) {
   return ok;
 }
 
-els.apiAccessBtn.addEventListener('click', openApiAccess);
+els.apiAccessBtn.addEventListener('click', () => openApiAccess());
+els.adminPanelBtn.addEventListener('click', () => openApiAccess({ focusAdmin: true }));
 els.apiAccessClose.addEventListener('click', () => els.apiAccessDialog.close());
 els.apiSelfApplyBtn?.addEventListener('click', async () => {
   els.apiSelfApplyError.textContent = '';
@@ -3175,6 +3194,7 @@ els.apiKeyAdminLoginForm.addEventListener('submit', async (e) => {
     state.apiKeyAdminToken = data.token;
     els.apiKeyAdminPassword.value = '';
     renderApiAccessInfo();
+    requestAnimationFrame(() => els.apiAdminSettingsSection.scrollIntoView({ block: 'start' }));
     await Promise.all([loadManagedApiKeys(), loadAdminSettings()]);
   } catch (err) {
     if (epoch === apiKeyManagerEpoch && els.apiAccessDialog.open) {
@@ -3828,7 +3848,7 @@ function renderParamDetails(list, modelId, overrides) {
 }
 
 /**
- * 撤回参数覆盖：任何人都可以在“更改权限”面板中恢复某个参数为默认值（只影响本浏览器）。
+ * 撤回参数覆盖：任何人都可以在“管理员面板”中恢复某个参数为默认值（只影响本浏览器）。
  * 说明（notes）仍只能由管理员删除。
  */
 async function revertParam(modelId, key) {
@@ -3861,7 +3881,7 @@ function paramSummary(params) {
 }
 
 /**
- * “更改权限”面板中，所有用户都能看到当前模型的本机参数覆盖，并可撤回。
+ * “管理员面板”中，所有用户都能看到当前模型的本机参数覆盖，并可撤回。
  * 参数对同一浏览器的所有用户生效，因此这里不限定管理员。
  */
 function renderParamOverrides() {
@@ -5221,6 +5241,7 @@ async function loadAppConfig() {
 async function init() {
   if (MODE === 'remote' && els.accessDocsLink) els.accessDocsLink.hidden = false;
   if (MODE === 'remote' && els.apiAccessBtn) els.apiAccessBtn.hidden = false;
+  if (MODE === 'remote' && els.adminPanelBtn) els.adminPanelBtn.hidden = false;
   if (isEmbed) els.body.classList.add('embed');
   if (isEmbedded) els.body.classList.add('in-frame');
 
@@ -5294,7 +5315,7 @@ async function init() {
     if (getToken() && (await checkSession())) showMain();
     else showLogin();
   } else {
-    // webllm 模式：默认无需口令，直接进入聊天；管理员权限在“更改权限”中升级
+    // webllm 模式：默认无需口令，直接进入聊天；管理员权限在“管理员面板”中升级
     showMain();
   }
 }

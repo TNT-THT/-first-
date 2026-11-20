@@ -73,8 +73,9 @@ Windows 可在 PowerShell 中使用 `curl.exe`，或在兼容 OpenAI 的软件�
 
 ## 管理员
 
-- 用首次启动时显示的 `API_ADMIN_PASSWORD` 在 **API 接入 → 管理员验证** 解锁控制台，可管理全站 API Key、调整服务端参数（temperature、输出上限等），并使用 API 调试台。
+- 登录本机网页后，点击顶部 **管理员面板**，用首次启动时显示的管理口令 `API_ADMIN_PASSWORD` 验证，即可管理全站 API Key、调整服务端参数（temperature、输出上限等），并使用 API 调试台。若没记下管理口令，可在解压文件夹的 `.local-api.json` 中查看 `API_ADMIN_PASSWORD` 字段（找不到时请先在文件管理器中显示隐藏文件；请勿分享这个文件）。
 - 普通网站口令（`APP_PASSWORD`）不能代替管理员口令，也不能直接调用 `/v1`。
+- GitHub Pages 的静态网页没有服务器，因此那里的“管理员面板”只能管理当前浏览器里的模型和数据，不包含本机 API 的参数控制台与全站 Key 管理；请打开本机启动后的 `http://127.0.0.1:3000` 再操作。
 
 ## 安全和限制
 
