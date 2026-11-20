@@ -118,6 +118,22 @@ export function releaseEngine() {
   });
 }
 
+/** 校验模型记录完整性：记录不存在或关键地址为空时，给出可读原因而不是让 WebLLM 抛底层错误。 */
+export function assertModelRecord(record, modelId) {
+  if (!record) {
+    throw new Error(
+      `找不到模型记录：${modelId}。该模型可能已被删除、导入登记不完整，或网页模型列表已过期；请刷新服务网页后重试，或重新导入该模型。`,
+    );
+  }
+  if (typeof record.model !== 'string' || !record.model.trim()) {
+    throw new Error(`模型记录缺少权重地址：${modelId}。请重新导入该模型，或改用模型列表中的内置模型。`);
+  }
+  if (typeof record.model_lib !== 'string' || !record.model_lib.trim()) {
+    throw new Error(`模型记录缺少运行库地址：${modelId}。请重新导入该模型，或改用模型列表中的内置模型。`);
+  }
+  return record;
+}
+
 /** 加载模型（排队执行）。 */
 export function loadWebLLMEngine(modelId, onProgress, opts = {}) {
   return enqueueLoad(() => doLoadWebLLMEngine(modelId, onProgress, opts));
@@ -159,8 +175,8 @@ async function doLoadWebLLMEngine(
       };
       // 先以 12 路并发把缺少的分片下载到缓存（WebLLM 内置下载只有 4 路）。
       // 这里不报告下载错误：分片仍缺失时，由 WebLLM 加载时报告。
-      const record = appConfig.model_list.find((r) => r.model_id === modelId);
-      const base = record && isPrefetchableRecord(record) ? textModelBaseUrl(record.model) : null;
+      const record = assertModelRecord(appConfig.model_list.find((r) => r.model_id === modelId), modelId);
+      const base = isPrefetchableRecord(record) ? textModelBaseUrl(record.model) : null;
       if (base) {
         try {
           await prefetchTextModelShards({ modelUrl: base, signal, onProgress: progress });
@@ -230,8 +246,9 @@ export async function loadVerifiedWebLLMEngine(modelId, onProgress, opts = {}) {
     check = await runHealthCheck();
   } catch (err) {
     if (isGpuResetError(err)) throw err; // GPU 资源已重置：交给上层提示重新发送
-    // 自检本身出错：不切换，只标记为未完成
-    return { variant: 'default', healthy: null, note: '输出自检未能完成' };
+    // 自检本身出错：不切换，只标记为未完成；保留原始原因，后续生成再失败时能一并定位
+    const detail = String(err?.message || err || '').replace(/\s+/g, ' ').trim().slice(0, 240);
+    return { variant: 'default', healthy: null, note: detail ? `输出自检未能完成（${detail}）` : '输出自检未能完成' };
   }
   const variantOf = (id) => (id.endsWith('q4f16_1-MLC') ? 'fp16' : id.endsWith('q4f32_1-MLC') ? 'fp32' : 'default');
   if (!check.reason) return { variant: variantOf(modelId), healthy: true, note: '' };

@@ -14,18 +14,21 @@ const PASSWORD = 'correct-horse-battery';
 
 let lastFakeBridge = null;
 
-function fakeBridge({ connected = true, models = [{ id: 'test-model', label: 'Test Model' }] } = {}) {
+function fakeBridge({ connected = true, models = [{ id: 'test-model', label: 'Test Model' }], silent = false } = {}) {
   const bridge = {
     models,
     connected,
+    silent,
     lastPayload: null,
     status() {
       return { connected: this.connected, models: this.models, queued: 0 };
     },
     async run(payload, { onDelta } = {}) {
       this.lastPayload = payload;
-      onDelta?.('你好');
-      onDelta?.('，世界');
+      if (!this.silent) {
+        onDelta?.('你好');
+        onDelta?.('，世界');
+      }
       return { finishReason: 'stop' };
     },
   };
@@ -33,7 +36,7 @@ function fakeBridge({ connected = true, models = [{ id: 'test-model', label: 'Te
   return bridge;
 }
 
-async function setup(t, { withBridge = true, bridgeConnected = true, bridgeModels } = {}) {
+async function setup(t, { withBridge = true, bridgeConnected = true, bridgeModels, bridgeSilent = false } = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), 'oj-ai-bridge-'));
   const cfg = loadConfig({
     APP_PASSWORD: PASSWORD,
@@ -42,7 +45,7 @@ async function setup(t, { withBridge = true, bridgeConnected = true, bridgeModel
     API_KEYS_FILE: path.join(dir, 'keys.json'),
     API_SETTINGS_FILE: path.join(dir, 'settings.json'),
   });
-  const app = createApp(cfg, { browserBridge: withBridge ? fakeBridge({ connected: bridgeConnected, models: bridgeModels }) : null });
+  const app = createApp(cfg, { browserBridge: withBridge ? fakeBridge({ connected: bridgeConnected, models: bridgeModels, silent: bridgeSilent }) : null });
   const server = await new Promise((resolve) => {
     const srv = app.listen(0, '127.0.0.1', () => resolve(srv));
   });
@@ -510,7 +513,10 @@ async function setupRealBridge(t) {
     await new Promise((r) => server.close(r));
     await rm(dir, { recursive: true, force: true });
   });
-  const connect = async () => {
+  let connectCount = 0;
+  const connect = async ({ protocolVersion = 0, models = [{ id: 'ws-model', label: 'WS Model' }] } = {}) => {
+    connectCount += 1;
+    const tabId = `tab-${protocolVersion}-${connectCount}`;
     const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/api/local-model-bridge`, {
       headers: { origin: base },
     });
@@ -520,7 +526,11 @@ async function setupRealBridge(t) {
       ws.once('open', resolve);
       ws.once('error', reject);
     });
-    ws.send(JSON.stringify({ type: 'ready', models: [{ id: 'ws-model', label: 'WS Model' }] }));
+    ws.send(JSON.stringify({
+      type: 'ready',
+      ...(protocolVersion ? { protocolVersion, clientVersion: `bridge-v${protocolVersion}`, tabId } : {}),
+      models,
+    }));
     await new Promise((resolve) => setTimeout(resolve, 50));
     return ws;
   };
@@ -583,7 +593,7 @@ test('真实 WebSocket 桥接：连接被新网页接管时，在途请求立即
   assert.equal(outcome.status, 503);
 });
 
-test('真实 WebSocket 桥接：旧版网页只回通用文案时，服务端补上模型与排查指引', async (t) => {
+test('真实 WebSocket 桥接：旧版网页只回通用文案时，服务端明说它是旧版网页并给出处理办法', async (t) => {
   const { bridge, connect } = await setupRealBridge(t);
   const ws = await connect();
   t.after(() => ws.close());
@@ -595,8 +605,10 @@ test('真实 WebSocket 桥接：旧版网页只回通用文案时，服务端补
   });
   await assert.rejects(
     bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {}),
-    /本机模型生成失败（模型 ws-model）：网页未提供具体原因/,
+    /未上报诊断信息的旧版模型网页.*关闭所有旧的服务网页标签页/,
   );
+  assert.equal(bridge.status().clientProtocolVersion, 0);
+  assert.match(bridge.status().lastError.message, /旧版模型网页/);
   ws.close();
 });
 
@@ -619,4 +631,123 @@ test('桥接模式绑定非回环地址时服务拒绝启动（除非显式 OJ_A
   });
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /只能绑定本机回环地址/);
+});
+
+test('桥接模式：模型零输出不能算成功（/v1 非流式返回 502）', async (t) => {
+  const base = await setup(t, { bridgeSilent: true });
+  const key = await applyKey(base);
+  const res = await fetch(`${base}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'test-model', messages: [{ role: 'user', content: '你好' }] }),
+  });
+  assert.equal(res.status, 502);
+  assert.match((await res.json()).error.message, /没有输出任何内容/);
+});
+
+test('真实 WebSocket 桥接：v2 网页的结构化错误原样保留，并进入 status.lastError', async (t) => {
+  const { bridge, connect } = await setupRealBridge(t);
+  const ws = await connect({ protocolVersion: 2 });
+  t.after(() => ws.close());
+  ws.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'request') {
+      ws.send(JSON.stringify({
+        type: 'error',
+        id: msg.id,
+        message: '本机模型生成失败（模型 ws-model，阶段 加载模型）：Error: VRAM allocation failed；原因：OOM',
+        error: {
+          message: '本机模型生成失败（模型 ws-model，阶段 加载模型）：Error: VRAM allocation failed；原因：OOM',
+          model: 'ws-model',
+          phase: 'load-model',
+          phaseLabel: '加载模型',
+          name: 'Error',
+          code: 'OOM',
+          detail: 'VRAM allocation failed',
+          protocolVersion: 2,
+        },
+      }));
+    }
+  });
+  await assert.rejects(
+    bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {}),
+    (err) => {
+      assert.equal(err.status, 503);
+      assert.equal(err.bridgeReport.phase, 'load-model');
+      assert.equal(err.bridgeReport.code, 'OOM');
+      return true;
+    },
+  );
+  const status = bridge.status();
+  assert.equal(status.clientProtocolVersion, 2);
+  assert.equal(status.lastError.phase, 'load-model');
+  assert.equal(status.lastError.code, 'OOM');
+  ws.close();
+});
+
+test('真实 WebSocket 桥接：新标签接管不关旧标签，旧标签可在新标签关闭后自动恢复提供', async (t) => {
+  const { bridge, connect } = await setupRealBridge(t);
+  const ws1 = await connect({ protocolVersion: 2 });
+  t.after(() => { try { ws1.close(); } catch {} });
+  let respondOnWs1 = false;
+  const firstRequestSeen = new Promise((resolve) => {
+    ws1.on('message', (raw) => {
+      const msg = JSON.parse(String(raw));
+      if (msg.type !== 'request') return;
+      resolve(msg.id);
+      if (respondOnWs1) ws1.send(JSON.stringify({ type: 'complete', id: msg.id, finishReason: 'stop' }));
+    });
+  });
+  const pending = bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {});
+  const settled = pending.then(() => 'resolved', (err) => err);
+  await firstRequestSeen;
+
+  const ws2 = await connect({ protocolVersion: 2 });
+  t.after(() => { try { ws2.close(); } catch {} });
+  const outcome = await Promise.race([
+    settled,
+    new Promise((resolve) => setTimeout(() => resolve('still-pending'), 2000)),
+  ]);
+  assert.notEqual(outcome, 'still-pending');
+  assert.match(outcome.message, /接管/);
+  assert.equal(ws1.readyState, WebSocket.OPEN, '被接管的旧标签不应被关掉，否则它会重连抢占');
+
+  ws2.close();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  respondOnWs1 = true;
+  const result = await bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'again' }] }, {});
+  assert.equal(result.finishReason, 'stop');
+});
+
+test('真实 WebSocket 桥接：旧版标签页不能抢走新版标签页，新版关闭后才由旧版兜底', async (t) => {
+  const { bridge, connect } = await setupRealBridge(t);
+  const wsNew = await connect({ protocolVersion: 2 });
+  t.after(() => { try { wsNew.close(); } catch {} });
+  let newHits = 0;
+  wsNew.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'request') {
+      newHits += 1;
+      wsNew.send(JSON.stringify({ type: 'complete', id: msg.id, finishReason: 'stop' }));
+    }
+  });
+  const wsOld = await connect();
+  t.after(() => { try { wsOld.close(); } catch {} });
+  let oldHits = 0;
+  wsOld.on('message', (raw) => {
+    const msg = JSON.parse(String(raw));
+    if (msg.type === 'request') {
+      oldHits += 1;
+      wsOld.send(JSON.stringify({ type: 'complete', id: msg.id, finishReason: 'stop' }));
+    }
+  });
+
+  await bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'hi' }] }, {});
+  assert.equal(newHits, 1);
+  assert.equal(oldHits, 0, '旧版标签页后连上也不能成为提供方');
+
+  wsNew.close();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  await bridge.run({ model: 'ws-model', messages: [{ role: 'user', content: 'fallback' }] }, {});
+  assert.equal(oldHits, 1, '新版关闭后旧版才兜底提供');
 });

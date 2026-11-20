@@ -50,5 +50,7 @@ export function removeLocalModel(id, storage = globalThis.localStorage) {
 
 /** 供推理与缓存检查使用的模型记录（WebLLM 的 extraRecords 格式）。 */
 export function localRecords(list) {
-  return list.map((e) => e.record);
+  // 登记条目的 id 是对外唯一标识；强制 record.model_id 与之对齐，
+  // 避免历史/损坏登记里两者不一致时，桥接报得出模型、引擎却找不到记录。
+  return list.map((e) => ({ ...e.record, model_id: e.id }));
 }
