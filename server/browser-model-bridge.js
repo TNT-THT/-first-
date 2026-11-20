@@ -16,13 +16,48 @@ export const BRIDGE_SUPPORTED_GENERATION_PARAMS = [
 ];
 
 /** Routes OpenAI-compatible requests to the WebGPU engine running in the local browser tab. */
+function cleanBridgeText(value, max = 1000) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+function sanitizeModels(models) {
+  return Array.isArray(models)
+    ? models.filter((m) => m && typeof m.id === 'string').slice(0, 256).map((m) => ({
+        id: m.id.slice(0, 256),
+        label: String(m.label || m.id).slice(0, 256),
+      }))
+    : [];
+}
+
+function sanitizeBridgeErrorReport(input, fallbackModel = '') {
+  if (!input || typeof input !== 'object') return null;
+  const report = {
+    message: cleanBridgeText(input.message, 1000),
+    model: cleanBridgeText(input.model, 256) || fallbackModel,
+    phase: cleanBridgeText(input.phase, 80),
+    phaseLabel: cleanBridgeText(input.phaseLabel, 80),
+    name: cleanBridgeText(input.name, 120),
+    code: cleanBridgeText(input.code, 120),
+    detail: cleanBridgeText(input.detail, 700),
+    stack: cleanBridgeText(input.stack, 1200),
+    deltaCount: Number.isFinite(input.deltaCount) ? input.deltaCount : 0,
+    elapsedMs: Number.isFinite(input.elapsedMs) ? input.elapsedMs : null,
+    readyNote: cleanBridgeText(input.readyNote, 300),
+    protocolVersion: Number.isFinite(input.protocolVersion) ? input.protocolVersion : 0,
+  };
+  return report.message || report.detail ? report : null;
+}
+
 export class BrowserModelBridge {
   constructor() {
     this.client = null;
+    this.clients = new Map();
+    this.clientSequence = 0;
     this.models = [];
     this.pending = new Map();
     this.queue = Promise.resolve();
     this.waiting = 0;
+    this.lastError = null;
     this.wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
   }
 
@@ -52,38 +87,72 @@ export class BrowserModelBridge {
       this.wss.handleUpgrade(req, socket, head, (ws) => this.wss.emit('connection', ws, req));
     });
     this.wss.on('connection', (ws) => {
-      const replaced = this.client;
-      if (replaced && replaced !== ws && replaced.readyState === WebSocket.OPEN) {
-        // 新连接接管前，先让旧连接名下未完成的请求立即失败，
-        // 否则它们会无人应答、一直挂到 10 分钟超时。
-        for (const job of this.pending.values()) {
-          if (job.client === replaced) job.fail('本机网页连接已被新的网页接管，请重试。');
-        }
-        replaced.close(1012, 'replaced');
-      }
-      this.client = ws;
-      this.models = [];
+      // 先登记为候选连接，不立刻顶替当前提供方；等它发来 ready（带协议版本）后再决定。
+      // 旧版标签页不会上报协议版本，不能抢走新版标签页的提供方位置；
+      // 被顶替的连接也不关闭（保留为备用），否则旧页会自动重连、与新页无限互相顶替。
+      const info = {
+        order: ++this.clientSequence,
+        ready: false,
+        readyCount: 0,
+        protocolVersion: 0,
+        clientVersion: '',
+        tabId: '',
+        pageOrigin: '',
+        models: [],
+      };
+      this.clients.set(ws, info);
       ws.on('message', (raw) => this.#message(ws, raw));
       ws.on('close', () => {
-        if (this.client === ws) {
+        this.clients.delete(ws);
+        const wasActive = this.client === ws;
+        if (wasActive) {
           this.client = null;
           this.models = [];
         }
-        // 该连接名下若还有未完成请求（无论它是否仍是当前连接），立即失败，不要挂到超时
+        // 该连接名下若还有未完成请求，立即失败，不要挂到超时
         for (const job of this.pending.values()) {
           if (job.client === ws) job.fail('本机网页与 API 桥接已断开，请保持网页打开。');
         }
+        if (wasActive) this.#promoteBestStandby();
       });
       ws.on('error', () => {});
     });
     return this;
   }
 
+  #promote(ws, { failPrevious = true } = {}) {
+    const info = this.clients.get(ws);
+    if (!info?.ready || ws.readyState !== WebSocket.OPEN) return false;
+    const previous = this.client;
+    if (previous && previous !== ws && failPrevious) {
+      for (const job of this.pending.values()) {
+        if (job.client === previous) job.fail('本机网页连接已被新的网页接管，请重试。');
+      }
+    }
+    this.client = ws;
+    this.models = [...info.models];
+    return true;
+  }
+
+  #promoteBestStandby() {
+    const candidates = [...this.clients.entries()]
+      .filter(([ws, info]) => ws.readyState === WebSocket.OPEN && info.ready)
+      .sort((a, b) => (b[1].protocolVersion - a[1].protocolVersion) || (b[1].order - a[1].order));
+    if (candidates.length) this.#promote(candidates[0][0], { failPrevious: false });
+  }
+
   status() {
+    const info = this.client ? this.clients.get(this.client) : null;
     return {
       connected: !!this.client && this.client.readyState === WebSocket.OPEN,
       models: [...this.models],
       queued: this.waiting,
+      clientCount: [...this.clients.keys()].filter((ws) => ws.readyState === WebSocket.OPEN).length,
+      clientProtocolVersion: info?.protocolVersion || 0,
+      clientVersion: info?.clientVersion || '',
+      activeTabId: info?.tabId || '',
+      activePageOrigin: info?.pageOrigin || '',
+      lastError: this.lastError ? { ...this.lastError } : null,
     };
   }
 
@@ -148,7 +217,11 @@ export class BrowserModelBridge {
         model: payload?.model || '',
         delta: (content) => onDelta?.(content),
         complete: (value) => finish(null, value),
-        fail: (message) => finish(Object.assign(new Error(message), { status: 503 })),
+        fail: (message, report = null) => {
+          const error = Object.assign(new Error(message), { status: 503 });
+          if (report) error.bridgeReport = report;
+          finish(error);
+        },
       });
       try {
         client.send(JSON.stringify({ type: 'request', id, payload }));
@@ -159,20 +232,35 @@ export class BrowserModelBridge {
   }
 
   #message(ws, raw) {
-    if (ws !== this.client) return;
+    const info = this.clients.get(ws);
+    if (!info) return;
     let message;
     try { message = JSON.parse(String(raw)); } catch { return; }
     // 畸形帧（如字面量 null）直接忽略，绝不能让一条坏消息打崩整个服务进程
     if (!message || typeof message !== 'object') return;
     if (message.type === 'ready') {
-      this.models = Array.isArray(message.models)
-        ? message.models.filter((m) => m && typeof m.id === 'string').slice(0, 256).map((m) => ({
-            id: m.id.slice(0, 256),
-            label: String(m.label || m.id).slice(0, 256),
-          }))
-        : [];
+      info.ready = true;
+      info.readyCount += 1;
+      info.protocolVersion = Number.isFinite(message.protocolVersion) ? message.protocolVersion : 0;
+      info.clientVersion = cleanBridgeText(message.clientVersion, 80);
+      info.tabId = cleanBridgeText(message.tabId, 120);
+      info.pageOrigin = cleanBridgeText(message.pageOrigin, 256);
+      info.models = sanitizeModels(message.models);
+      if (ws === this.client) {
+        this.models = [...info.models];
+      } else if (!this.client) {
+        this.#promote(ws, { failPrevious: false });
+      } else {
+        const activeInfo = this.clients.get(this.client);
+        const firstReady = info.readyCount === 1;
+        // 新版优先；同版本只在候选连接第一次上报时按“新打开的标签页优先”接管，
+        // 后续仅刷新模型列表的 ready 不能反复抢占，避免多标签页互相顶替。
+        if (info.protocolVersion > (activeInfo?.protocolVersion || 0)) this.#promote(ws);
+        else if (firstReady && info.protocolVersion === (activeInfo?.protocolVersion || 0)) this.#promote(ws);
+      }
       return;
     }
+    if (ws !== this.client) return;
     const job = this.pending.get(message.id);
     if (!job) return;
     if (message.type === 'delta' && typeof message.content === 'string') {
@@ -180,13 +268,38 @@ export class BrowserModelBridge {
     } else if (message.type === 'complete') {
       job.complete({ finishReason: String(message.finishReason || 'stop').slice(0, 40) });
     } else if (message.type === 'error') {
-      const raw = String(message.message || '').trim();
-      // 旧版网页只会回一句通用文案：补上模型与排查指引，避免真实原因被兜底吞掉
-      job.fail(
-        raw && raw !== '本机模型生成失败'
-          ? raw.slice(0, 1000)
-          : `本机模型生成失败（模型 ${job.model || '未指定'}）：网页未提供具体原因，请按 F12 查看浏览器控制台中的 [local-model-bridge] 日志，并确认使用的是最新版网站包。`,
-      );
+      const activeInfo = this.clients.get(ws);
+      const report = sanitizeBridgeErrorReport(message.error, job.model);
+      const rawText = cleanBridgeText(message.message, 1000);
+      let text = report?.message || rawText;
+      if (!text || text === '本机模型生成失败') {
+        text = (activeInfo?.protocolVersion || 0) >= 2
+          ? `本机模型生成失败（模型 ${job.model || '未指定'}）：新版模型网页没有提供结构化诊断，原始回传为“${rawText || '空'}”。请刷新服务网页后重试；若仍复现，请把 API 面板中的最近错误反馈给维护者。`
+          : `本机模型生成失败（模型 ${job.model || '未指定'}）：当前提供 API 的是未上报诊断信息的旧版模型网页，它只回传了通用失败文案。请关闭所有旧的服务网页标签页，只保留从最新版网站包打开的服务网页，并按 Ctrl+F5 刷新后再试。`;
+      }
+      const lastError = {
+        at: new Date().toISOString(),
+        requestId: String(message.id || '').slice(0, 80),
+        model: job.model || report?.model || '',
+        phase: report?.phase || '',
+        phaseLabel: report?.phaseLabel || '',
+        name: report?.name || '',
+        code: report?.code || '',
+        message: text,
+        detail: report?.detail || '',
+        readyNote: report?.readyNote || '',
+        deltaCount: report?.deltaCount || 0,
+        elapsedMs: report?.elapsedMs ?? null,
+        modelDiagnostics: message.error?.modelDiagnostics && typeof message.error.modelDiagnostics === 'object'
+          ? message.error.modelDiagnostics
+          : null,
+        clientProtocolVersion: activeInfo?.protocolVersion || 0,
+        clientVersion: activeInfo?.clientVersion || '',
+        tabId: activeInfo?.tabId || '',
+        pageOrigin: activeInfo?.pageOrigin || '',
+      };
+      this.lastError = lastError;
+      job.fail(text, { ...report, message: text, model: lastError.model, protocolVersion: lastError.clientProtocolVersion });
     }
   }
 }

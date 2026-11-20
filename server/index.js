@@ -393,6 +393,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         const created = Math.floor(Date.now() / 1000);
         const emit = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
         emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
+        let bridgeOutput = '';
         await browserBridge.run(
           // 不传 temperature/maxTokens：让浏览器按该模型的本机参数（管理员面板/预设）决定，
           // 服务端只给输出硬上限，避免服务端默认值把本机面板的温度与最大输出“压住”。
@@ -400,13 +401,18 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
           {
             signal: ac.signal,
             onDelta(delta) {
+              bridgeOutput += delta;
               emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: delta }, finish_reason: null }] });
             },
           },
         );
         if (!ac.signal.aborted && !res.destroyed) {
-          emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
-          res.write('data: [DONE]\n\n');
+          if (!bridgeOutput.trim()) {
+            emit({ error: { message: `模型生成结束但没有输出任何内容（模型 ${model}）。请先在网页聊天里用同一模型发一句“你好”验证；若网页也无输出，请重新导入模型或更换模型。`, type: 'server_error', code: null } });
+          } else {
+            emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+            res.write('data: [DONE]\n\n');
+          }
           res.end();
         }
         return;
@@ -417,8 +423,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         ? err.status
         : (Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500);
       if (!(err instanceof HttpError)) {
-        if (Number.isInteger(err?.status)) console.warn(`[chat] 请求失败（${status}）：${err.message || '未知错误'}`);
-        else console.error('[chat] unexpected:', err);
+        if (Number.isInteger(err?.status)) {
+          const report = err.bridgeReport;
+          const suffix = report ? `（阶段：${report.phaseLabel || report.phase || '未知'}${report.name ? `；错误：${report.name}` : ''}）` : '';
+          console.warn(`[chat] 请求失败（${status}）：${err.message || '未知错误'}${suffix}`);
+        } else console.error('[chat] unexpected:', err);
       }
       if (res.headersSent) {
         res.end();
@@ -512,8 +521,12 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
             },
           });
           if (!ac.signal.aborted && !res.destroyed) {
-            emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
-            res.write('data: [DONE]\n\n');
+            if (!content.trim()) {
+              emit({ error: { message: `模型生成结束但没有输出任何内容（模型 ${model}）。请先在网页聊天里用同一模型发一句“你好”验证；若网页也无输出，请重新导入模型或更换模型。`, type: 'server_error', code: null } });
+            } else {
+              emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
+              res.write('data: [DONE]\n\n');
+            }
             res.end();
           }
           return;
@@ -531,6 +544,9 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
           onDelta(delta) { content += delta; },
         });
         if (ac.signal.aborted || res.destroyed) return;
+        if (!content.trim()) {
+          return openAiError(res, 502, `模型生成结束但没有输出任何内容（模型 ${model}）。请先在网页聊天里用同一模型发一句“你好”验证；若网页也无输出，请重新导入模型或更换模型。`, 'server_error');
+        }
         const promptTokens = messages.reduce((n, m) => n + Math.ceil(m.content.length / 4), 0);
         const completionTokens = Math.ceil(content.length / 4);
         return res.json({
@@ -572,8 +588,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
       if (!(err instanceof HttpError)) {
         // 带 status 的是可预期的运行失败（本机网页未连接、模型生成失败、超时等）：
         // 只记一行真实原因，不打印误导性的包装堆栈；其余才是未预期异常。
-        if (Number.isInteger(err?.status)) console.warn(`[v1/chat] 请求失败（${status}）：${err.message || '未知错误'}`);
-        else console.error('[v1/chat] unexpected:', err);
+        if (Number.isInteger(err?.status)) {
+          const report = err.bridgeReport;
+          const suffix = report ? `（阶段：${report.phaseLabel || report.phase || '未知'}${report.name ? `；错误：${report.name}` : ''}）` : '';
+          console.warn(`[v1/chat] 请求失败（${status}）：${err.message || '未知错误'}${suffix}`);
+        } else console.error('[v1/chat] unexpected:', err);
       }
       if (res.headersSent) {
         // 流式响应已经发头：把失败原因作为 SSE error 事件发出去再结束，

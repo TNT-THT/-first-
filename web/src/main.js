@@ -2788,7 +2788,15 @@ async function refreshBridgeStatus() {
     apiBridgeModels = Array.isArray(data.models) ? data.models.filter((m) => m && typeof m.id === 'string') : [];
     if (data.connected) {
       bridgeStatusRetries = 0;
-      els.apiBridgeStatus.textContent = `本机模型已连接：可用模型 ${apiBridgeModels.length} 个（保持本网页打开即可供 API 调用）。`;
+      let text = `本机模型已连接：可用模型 ${apiBridgeModels.length} 个（保持本网页打开即可供 API 调用）。`;
+      const protocol = Number(data.clientProtocolVersion || 0);
+      if (protocol < 2) {
+        text += ' 注意：当前提供 API 的模型网页未上报诊断信息，可能是旧标签页或旧版网页；生成失败时只能显示通用原因。请关闭其他服务网页标签，只保留本页并按 Ctrl+F5 刷新。';
+      }
+      if (data.lastError?.message) {
+        text += ` 最近一次 API 生成失败：${data.lastError.message}`;
+      }
+      els.apiBridgeStatus.textContent = text;
     } else {
       els.apiBridgeStatus.textContent = '本机模型尚未连接：请保持本网页打开，API 会自动重连。';
       // 面板还开着时自动重试几次，免得用户刚打开面板、桥接还没连上就以为用不了。
