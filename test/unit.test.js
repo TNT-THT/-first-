@@ -4,7 +4,9 @@ import { renderMarkdown } from '../web/src/markdown.js';
 import { isAllowedOrigin } from '../web/src/origin.js';
 import { attributeContent, buildContext } from '../web/src/store.js';
 import { validateMessages } from '../server/chat.js';
-import { createToken, verifyToken, checkPassword } from '../server/auth.js';
+import { loadConfig, validateConfig } from '../server/config.js';
+import { createToken, verifyToken, checkPassword, checkApiKey } from '../server/auth.js';
+import { getToken, setToken } from '../web/src/api.js';
 import { createHash } from 'node:crypto';
 import { sha256TextHex } from '../web/src/sha256.js';
 import { stripThinking, hasThinking } from '../web/src/think.js';
@@ -104,6 +106,46 @@ test('密码比较', () => {
   assert.equal(checkPassword('abcdefgh', 'abcdefg'), false);
   assert.equal(checkPassword('', ''), false);
   assert.equal(checkPassword('abcdefgh', undefined), false);
+});
+
+test('API Key 比较支持多个密钥且空白配置一律拒绝', () => {
+  assert.equal(checkApiKey(['first-key', 'second-key'], 'second-key'), true);
+  assert.equal(checkApiKey(['first-key', 'second-key'], 'wrong-key'), false);
+  assert.equal(checkApiKey([], 'first-key'), false);
+  assert.equal(checkApiKey(['first-key'], ''), false);
+});
+
+test('API 管理员口令必须足够长且与网站口令不同', () => {
+  const base = { APP_PASSWORD: 'correct-horse-battery' };
+  const same = loadConfig({ ...base, API_ADMIN_PASSWORD: 'correct-horse-battery' });
+  assert.ok(validateConfig(same).some((error) => error.includes('必须与 APP_PASSWORD 不同')));
+
+  const weak = loadConfig({ ...base, API_ADMIN_PASSWORD: 'short' });
+  assert.ok(validateConfig(weak).some((error) => error.includes('至少 16 位')));
+
+  const valid = loadConfig({ ...base, API_ADMIN_PASSWORD: 'another-long-secret-123' });
+  assert.deepEqual(validateConfig(valid), []);
+});
+
+test('嵌入环境禁用 localStorage 时，会话令牌仍在当前页面内存中可用', () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem() { throw new Error('storage blocked'); },
+      setItem() { throw new Error('storage blocked'); },
+      removeItem() { throw new Error('storage blocked'); },
+    },
+  });
+  try {
+    setToken('v1.memory-only-token');
+    assert.equal(getToken(), 'v1.memory-only-token');
+    setToken('');
+    assert.equal(getToken(), '');
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original);
+    else delete globalThis.localStorage;
+  }
 });
 
 test('SHA-256 纯 JavaScript 回退实现与标准结果一致（含填充边界与中文）', () => {

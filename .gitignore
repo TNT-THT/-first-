@@ -1,5 +1,7 @@
 node_modules/
 web/dist/
+# 网站端生成的 API Key 哈希存储（绝不可提交）
+data/
 .env
 .env.*
 !.env.example

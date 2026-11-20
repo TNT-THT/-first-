@@ -18,6 +18,7 @@
           <p class="muted">请输入站点访问口令</p>
           <input id="password" type="password" autocomplete="current-password" placeholder="访问口令" required />
           <button id="loginBtn" type="submit" class="btn primary block">登录</button>
+          <a id="accessDocsLink" class="muted small" href="/api/docs" target="_blank" rel="noopener noreferrer" hidden>API 与网页接入文档</a>
           <p id="loginError" class="error" role="alert"></p>
         </form>
       </section>
@@ -47,6 +48,7 @@
             <button id="imageModeBtn" type="button" class="btn ghost small" aria-pressed="false" title="切换到生图模式：会先释放聊天模型的显存" hidden>生图</button>
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
             <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
+            <button id="apiAccessBtn" type="button" class="btn ghost small" title="网页体验 API、生成分享链接和管理 API Key" hidden>API 接入</button>
             <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
             <button id="roleBtn" type="button" class="btn ghost small" aria-expanded="false">更改权限</button>
             <div id="historyPanel" class="history-panel" hidden>
@@ -227,6 +229,156 @@
           <button id="correctionSubmit" type="submit" class="btn primary small">验证并发送</button>
         </div>
       </form>
+    </dialog>
+    <dialog id="apiAccessDialog" class="api-access-dialog" aria-labelledby="apiAccessTitle">
+      <div class="api-access-card">
+        <header class="api-access-head">
+          <div>
+            <h2 id="apiAccessTitle">远程接入</h2>
+            <p class="muted small">API 调用、网页分享链接与 iframe 嵌入都从这里获取。</p>
+          </div>
+          <button id="apiAccessClose" type="button" class="btn ghost small" aria-label="关闭">关闭</button>
+        </header>
+        <section class="api-access-section">
+          <h3>自建服务器 API</h3>
+          <p class="muted small">OpenAI 兼容接口。可填入 OpenAI SDK / 自己的后端服务。</p>
+          <dl class="api-access-meta">
+            <div><dt>API 地址</dt><dd><code id="apiAccessEndpoint"></code></dd></div>
+            <div><dt>模型名称</dt><dd><code id="apiAccessModel"></code></dd></div>
+          </dl>
+          <a href="/api/docs" target="_blank" rel="noopener noreferrer">查看 Python / JavaScript 示例和完整 API 文档 →</a>
+          <pre id="apiCurlExample" class="api-curl-example"></pre>
+          <button id="apiCurlCopy" type="button" class="btn ghost small">复制 curl 测试命令</button>
+          <p class="warning small">不要将 API Key 放进公开网页代码、浏览器 JS 或手机 App。网页端的 Key 管理口令仅供站点所有者使用。</p>
+        </section>
+        <section class="api-access-section">
+          <h3>生成网页分享链接</h3>
+          <label class="api-access-label" for="sharePromptInput">可选：预填的问题</label>
+          <textarea id="sharePromptInput" rows="2" maxlength="20000" placeholder="例如：请解释这道题的解题思路"></textarea>
+          <label class="api-access-checkbox"><input id="shareAutoSend" type="checkbox" /> 打开链接后自动发送（仅对可信用户分享）</label>
+          <p class="warning small">问题会放在链接参数中，可能出现在浏览器历史或服务器日志；不要分享含有隐私或账号信息的题目。</p>
+          <div class="api-access-actions">
+            <button id="shareLinkGenerate" type="button" class="btn primary small">生成链接</button>
+            <button id="shareLinkCopy" type="button" class="btn ghost small">复制链接</button>
+          </div>
+          <input id="shareLinkOutput" type="text" readonly aria-label="生成的分享链接" placeholder="点击“生成链接”" />
+          <details>
+            <summary>获取 iframe 嵌入代码</summary>
+            <p class="muted small">iframe 会沿用上方预填问题与自动发送选项；嵌入站点还需要服务器的 <code>FRAME_ANCESTORS</code> 允许父页面来源。</p>
+            <textarea id="shareIframeOutput" rows="3" readonly aria-label="iframe 嵌入代码"></textarea>
+            <button id="shareIframeCopy" type="button" class="btn ghost small">复制 iframe 代码</button>
+          </details>
+        </section>
+        <section id="apiAdminLoginSection" class="api-access-section" aria-labelledby="apiAdminLoginTitle">
+          <h3 id="apiAdminLoginTitle">管理员验证</h3>
+          <p id="apiKeyManagerHint" class="muted small"></p>
+          <form id="apiKeyAdminLoginForm" class="api-key-login">
+            <label class="api-access-label" for="apiKeyAdminPassword">API 管理员口令（API_ADMIN_PASSWORD）</label>
+            <div class="api-access-actions">
+              <input id="apiKeyAdminPassword" type="password" autocomplete="current-password" placeholder="API 管理员口令" required />
+              <button id="apiKeyAdminLoginBtn" type="submit" class="btn primary small">验证并解锁控制台</button>
+            </div>
+            <p id="apiKeyAdminError" class="error small" role="alert"></p>
+          </form>
+        </section>
+        <section id="apiPlaygroundSection" class="api-access-section api-playground-section" aria-labelledby="apiPlaygroundTitle" hidden>
+          <h3 id="apiPlaygroundTitle">管理员 API 调试台</h3>
+          <p class="muted small">仅通过 API 管理员口令验证后可用。请求使用短期管理员令牌，不使用普通网站登录会话；关闭面板或锁定管理台后会清除令牌。</p>
+          <form id="apiPlaygroundForm">
+            <label class="api-access-label" for="apiPlaygroundSystem">可选：本次请求的 system 提示</label>
+            <textarea id="apiPlaygroundSystem" rows="2" maxlength="12000" placeholder="留空则只使用服务器配置的系统提示词"></textarea>
+            <label class="api-access-label" for="apiPlaygroundPrompt">用户消息</label>
+            <textarea id="apiPlaygroundPrompt" rows="3" maxlength="20000" placeholder="输入一个问题，在网页里直接测试 OpenAI 兼容 API" required></textarea>
+            <div class="api-playground-controls">
+              <label class="api-playground-field">
+                <span class="api-access-label">temperature（0–2）</span>
+                <input id="apiPlaygroundTemperature" type="number" min="0" max="2" step="any" aria-label="temperature" />
+              </label>
+              <label class="api-playground-field">
+                <span class="api-access-label">max_tokens（可选）</span>
+                <input id="apiPlaygroundMaxTokens" type="number" min="1" step="1" placeholder="服务器默认值" aria-label="max_tokens" />
+              </label>
+            </div>
+            <label class="api-access-checkbox"><input id="apiPlaygroundStream" type="checkbox" checked /> 流式显示回答（取消后等待完整 JSON 响应）</label>
+            <details class="api-playground-request-details">
+              <summary>查看本次请求 JSON（不含站点登录令牌）</summary>
+              <pre id="apiPlaygroundRequest" class="api-playground-output"></pre>
+              <button id="apiPlaygroundRequestCopy" type="button" class="btn ghost small">复制请求 JSON</button>
+            </details>
+            <div class="api-access-actions">
+              <button id="apiPlaygroundSend" type="submit" class="btn primary small">发送 API 请求</button>
+              <button id="apiPlaygroundStop" type="button" class="btn danger small" hidden>停止</button>
+              <button id="apiPlaygroundClear" type="button" class="btn ghost small">清空</button>
+              <button id="apiPlaygroundAnswerCopy" type="button" class="btn ghost small" disabled>复制回答</button>
+            </div>
+          </form>
+          <p id="apiPlaygroundStatus" class="muted small" role="status" aria-live="polite"></p>
+          <pre id="apiPlaygroundAnswer" class="api-playground-output" aria-live="polite"></pre>
+          <details class="api-playground-request-details">
+            <summary>查看原始 API 响应（JSON 或 SSE）</summary>
+            <pre id="apiPlaygroundRaw" class="api-playground-output"></pre>
+          </details>
+        </section>
+        <section id="apiAdminSettingsSection" class="api-access-section" aria-labelledby="apiAdminSettingsTitle" hidden>
+          <h3 id="apiAdminSettingsTitle">管理员参数控制台</h3>
+          <p class="muted small">这些是全站服务端设置，保存后立即生效并写入服务器的受限权限文件。上游 API Key 不会回显；额外生成参数会传给兼容服务商，是否支持取决于上游模型。</p>
+          <form id="apiAdminSettingsForm" class="api-admin-settings-form">
+            <label class="api-access-label" for="apiAdminBaseUrl">OpenAI 兼容 API 地址（LLM_BASE_URL）</label>
+            <input id="apiAdminBaseUrl" type="url" maxlength="2048" placeholder="https://api.example.com/v1" />
+            <label class="api-access-label" for="apiAdminModel">模型名称（LLM_MODEL）</label>
+            <input id="apiAdminModel" type="text" maxlength="256" placeholder="例如：deepseek-chat" />
+            <label class="api-access-label" for="apiAdminApiKey">上游 API Key（LLM_API_KEY）</label>
+            <input id="apiAdminApiKey" type="password" maxlength="4096" autocomplete="new-password" placeholder="留空表示不更改现有密钥" />
+            <label class="api-access-checkbox"><input id="apiAdminClearApiKey" type="checkbox" /> 清除服务器上已保存的上游 API Key</label>
+            <p id="apiAdminApiKeyStatus" class="muted small"></p>
+            <label class="api-access-label" for="apiAdminSystemPrompt">服务端系统提示词（SYSTEM_PROMPT）</label>
+            <textarea id="apiAdminSystemPrompt" rows="4" maxlength="50000"></textarea>
+            <div class="api-playground-controls">
+              <label class="api-playground-field">
+                <span class="api-access-label">默认 temperature（0–2）</span>
+                <input id="apiAdminTemperature" type="number" min="0" max="2" step="any" required />
+              </label>
+              <label class="api-playground-field">
+                <span class="api-access-label">最大输出上限 API_MAX_TOKENS</span>
+                <input id="apiAdminMaxTokens" type="number" min="1" max="1000000" step="1" required />
+              </label>
+            </div>
+            <label class="api-access-label" for="apiAdminGenerationParams">额外生成参数默认值（JSON 对象）</label>
+            <textarea id="apiAdminGenerationParams" rows="5" spellcheck="false" placeholder='例如：{"top_p":0.9,"frequency_penalty":0.2,"stop":["\n###"]}'></textarea>
+            <p class="muted small">支持 OpenAI 兼容标准参数和上游自定义 JSON 参数。模型、消息、temperature、输出 token 上限和流式模式由单独字段控制；API_MAX_TOKENS 始终是硬上限。API 调用方可按请求覆盖额外默认值。</p>
+            <div class="api-access-actions">
+              <button id="apiAdminSettingsSave" type="submit" class="btn primary small">保存并立即应用</button>
+              <button id="apiAdminSettingsReset" type="button" class="btn ghost small">恢复服务器 .env 配置</button>
+            </div>
+          </form>
+          <p id="apiAdminSettingsStatus" class="muted small" role="status" aria-live="polite"></p>
+          <p id="apiAdminSettingsError" class="error small" role="alert"></p>
+        </section>
+        <section id="apiKeyManagerSection" class="api-access-section" aria-labelledby="apiKeyManagerTitle" hidden>
+          <h3 id="apiKeyManagerTitle">API Key 管理</h3>
+          <p class="muted small">为每位用户或应用单独创建一把 Key 并安全分发；可随时单独撤销。本站没有个人账号体系，也不会自动记录 Key 的真实使用者。</p>
+          <div id="apiKeyManagerPanel" hidden>
+            <p class="muted small">已创建的密钥只显示名称、创建时间和末四位。网站不保存明文；创建后请立即复制，并只放在你控制的后端或受信任的 API 客户端中。</p>
+            <form id="apiKeyCreateForm" class="api-key-create">
+              <label class="api-access-label" for="apiKeyLabelInput">新密钥名称（例如：OJ 后端）</label>
+              <div class="api-access-actions">
+                <input id="apiKeyLabelInput" type="text" maxlength="80" placeholder="我的应用" />
+                <button id="apiKeyCreateBtn" type="submit" class="btn primary small">创建 API Key</button>
+              </div>
+            </form>
+            <div id="apiKeyNewPanel" class="api-key-new" hidden>
+              <p class="warning small">完整 Key 仅显示这一次；创建下一把 Key 或关闭窗口后无法再次找回，请先复制保存。</p>
+              <div class="api-access-actions">
+                <input id="apiKeyNewValue" type="text" readonly aria-label="新 API Key" />
+                <button id="apiKeyNewCopy" type="button" class="btn ghost small">复制 Key</button>
+              </div>
+            </div>
+            <p id="apiKeyManagerError" class="error small" role="alert"></p>
+            <div id="apiKeyList" class="api-key-list"></div>
+            <button id="apiKeyAdminLogout" type="button" class="btn ghost small">锁定管理面板</button>
+          </div>
+        </section>
+      </div>
     </dialog>
     <script type="module" src="/src/main.js"></script>
   </body>

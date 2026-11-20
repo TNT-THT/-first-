@@ -1,4 +1,6 @@
 const TOKEN_KEY = 'oj-ai.token';
+// 第三方 iframe 中浏览器可能禁用 localStorage；保留页面生命周期内的内存令牌作为回退。
+let memoryToken = '';
 
 export class ApiError extends Error {
   constructor(status, message) {
@@ -9,18 +11,24 @@ export class ApiError extends Error {
 
 export function getToken() {
   try {
-    return localStorage.getItem(TOKEN_KEY) || '';
+    const stored = localStorage.getItem(TOKEN_KEY) || '';
+    if (stored) {
+      memoryToken = stored;
+      return stored;
+    }
   } catch {
-    return '';
+    /* 某些第三方 iframe 环境会禁用 localStorage，回退到页面内存令牌 */
   }
+  return memoryToken;
 }
 
 export function setToken(token) {
+  memoryToken = typeof token === 'string' ? token : '';
   try {
-    if (token) localStorage.setItem(TOKEN_KEY, token);
+    if (memoryToken) localStorage.setItem(TOKEN_KEY, memoryToken);
     else localStorage.removeItem(TOKEN_KEY);
   } catch {
-    /* 某些嵌入环境禁用了存储，此时只能保持当前会话内有效 */
+    /* 某些嵌入环境禁用了存储；内存令牌只在当前页面生命周期内有效 */
   }
 }
 

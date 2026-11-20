@@ -617,6 +617,73 @@ body.embed .role-section { display: none !important; }
 .correction-dialog input { width: 100%; box-sizing: border-box; margin-top: 10px; }
 .correction-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
+/* 网站端远程接入 / API Key 管理 */
+.api-access-dialog {
+  width: min(720px, calc(100vw - 24px));
+  max-height: min(90vh, 900px);
+  overflow: auto;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--text);
+}
+.api-access-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+.api-access-card { padding: 18px; }
+.api-access-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.api-access-head h2 { margin: 0 0 4px; font-size: 19px; }
+.api-access-head p { margin: 0; }
+.api-access-section { padding: 14px 0; border-top: 1px solid var(--border); }
+.api-access-section h3 { margin: 0 0 6px; font-size: 15px; }
+.api-access-section > p { margin: 6px 0; }
+.api-access-section a { color: var(--accent); }
+.api-access-meta { margin: 10px 0; }
+.api-curl-example { margin: 10px 0 6px; padding: 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.api-playground-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.api-playground-field { min-width: 0; }
+.api-playground-field .api-access-label { margin-top: 6px; }
+.api-playground-output { max-height: 280px; margin: 8px 0; padding: 10px; overflow: auto; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.api-playground-request-details { margin-top: 10px; }
+.api-playground-section form { margin-top: 8px; }
+.api-playground-section button:disabled { opacity: 0.55; cursor: not-allowed; }
+.api-access-meta > div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 8px; margin: 5px 0; }
+.api-access-meta dt { color: var(--muted); font-size: 12px; }
+.api-access-meta dd { margin: 0; overflow-wrap: anywhere; }
+.api-access-label { display: block; margin: 8px 0 4px; color: var(--muted); font-size: 12px; }
+.api-access-dialog input:not([type="checkbox"]),
+.api-access-dialog textarea {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+}
+.api-access-dialog textarea { resize: vertical; }
+.api-access-dialog input[readonly], .api-access-dialog textarea[readonly] { opacity: 0.9; }
+.api-access-checkbox { display: flex; align-items: center; gap: 7px; margin: 8px 0; font-size: 12px; color: var(--muted); }
+.api-access-checkbox input { margin: 0; }
+.api-access-actions { display: flex; align-items: center; gap: 8px; margin: 7px 0; }
+.api-access-actions > input { flex: 1; }
+.api-access-dialog details { margin-top: 8px; }
+.api-access-dialog summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+.api-access-dialog .warning { color: #b45309; }
+.api-key-login { margin-top: 8px; }
+.api-admin-settings-form { margin-top: 8px; }
+.api-admin-settings-form textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.api-admin-settings-form .api-access-actions { flex-wrap: wrap; }
+.api-key-list { display: grid; gap: 7px; margin: 10px 0; }
+.api-key-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px; border: 1px solid var(--border); border-radius: 7px; }
+.api-key-row-main { min-width: 0; }
+.api-key-row-label { font-weight: 600; overflow-wrap: anywhere; }
+.api-key-row-meta { color: var(--muted); font-size: 11px; }
+.api-key-row .btn { flex: 0 0 auto; }
+@media (max-width: 480px) { .api-playground-controls { grid-template-columns: 1fr; } }
+
 /* 标记错误说法（管理员） */
 .mark-dialog label { display: block; margin-top: 10px; }
 .mark-dialog textarea {
