@@ -112,6 +112,19 @@ test('启动后两个模型下拉框内容一致，窄屏下拉框可用', () =>
   assert.equal($$('#modelSelectCompact option')[0].dataset.label, config.webllm.models[0].label);
 });
 
+test('管理员面板入口：静态版名称明确，点击打开本机管理员面板', () => {
+  assert.equal($('#roleBtn').textContent.trim(), '管理员面板');
+  assert.equal($('#roleBtn').hidden, false);
+  assert.equal($('#adminPanelBtn').hidden, true, '纯静态版没有服务端管理员面板入口');
+  assert.equal($('#rolePanel').hidden, true);
+  $('#roleBtn').click();
+  assert.equal($('#rolePanel').hidden, false, '点击管理员面板应打开本机管理员面板');
+  assert.match($('#rolePanel').textContent, /本机管理员面板/);
+  assert.match($('#rolePanel').textContent, /只管理当前浏览器里的模型和数据/);
+  $('#roleBtn').click();
+  assert.equal($('#rolePanel').hidden, true);
+});
+
 test('工具面板：三行工具、可展开卡片、开关写入本机偏好', async () => {
   assert.equal($('#toolList').children.length, 3, '应有思考模式、滑动窗口、联网资料检索三项');
   assert.equal($('#toolsPanel').hidden, true);

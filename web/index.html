@@ -48,13 +48,16 @@
             <button id="imageModeBtn" type="button" class="btn ghost small" aria-pressed="false" title="切换到生图模式：会先释放聊天模型的显存" hidden>生图</button>
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
             <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
-            <button id="apiAccessBtn" type="button" class="btn ghost small" title="网页体验 API、生成分享链接和管理 API Key" hidden>API 接入</button>
+            <button id="apiAccessBtn" type="button" class="btn ghost small" title="查看 API 地址、申请 Key 和生成分享链接" hidden>API 接入</button>
+            <button id="adminPanelBtn" type="button" class="btn ghost small" title="打开管理员控制面板（需要 API 管理员口令）" hidden>管理员面板</button>
             <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
-            <button id="roleBtn" type="button" class="btn ghost small" aria-expanded="false">更改权限</button>
+            <button id="roleBtn" type="button" class="btn ghost small" title="打开本机管理员面板" aria-expanded="false">管理员面板</button>
             <div id="historyPanel" class="history-panel" hidden>
               <div class="history-list" data-session-list></div>
             </div>
             <div id="rolePanel" class="history-panel role-panel" hidden>
+              <p class="role-panel-title">本机管理员面板</p>
+              <p class="muted small">这里只管理当前浏览器里的模型和数据。API 参数与全站 Key 请在本机包启动的 127.0.0.1 网页中，点顶部“管理员面板”管理。</p>
               <p id="roleStatus" class="role-status"></p>
               <form id="roleForm" class="role-form">
                 <input id="adminKey" type="password" autocomplete="off" placeholder="管理员密钥" aria-label="管理员密钥" />
@@ -78,7 +81,7 @@
                 </label>
                 <div id="localModelList" class="local-list"></div>
                 <div class="site-tools">
-                  <p class="muted small">下载网站包到自己电脑上（含本机 API，解压双击即可用；不包含任何 AI 模型）。按你的电脑系统只下对应一个：</p>
+                  <p class="muted small">下载网站包到自己电脑上（含本机 API，解压双击即可用；不包含任何 AI 模型）。下面四个版本四选一：点击与你电脑对应的那一个，只会下载那一个文件，不会四个一起下载。</p>
                   <div class="site-package-btns">
                     <button type="button" class="btn ghost small" data-site-package="site-win-x64.zip">Windows 版</button>
                     <button type="button" class="btn ghost small" data-site-package="site-darwin-arm64.zip">Mac（Apple 芯片）版</button>
@@ -241,8 +244,8 @@
       <div class="api-access-card">
         <header class="api-access-head">
           <div>
-            <h2 id="apiAccessTitle">远程接入</h2>
-            <p class="muted small">API 调用、网页分享链接与 iframe 嵌入都从这里获取。</p>
+            <h2 id="apiAccessTitle">远程接入与管理员面板</h2>
+            <p class="muted small">API 调用、网页分享链接与 iframe 嵌入都从这里获取；管理员验证后可管理参数与 API Key。</p>
           </div>
           <button id="apiAccessClose" type="button" class="btn ghost small" aria-label="关闭">关闭</button>
         </header>
@@ -293,7 +296,7 @@
           </details>
         </section>
         <section id="apiAdminLoginSection" class="api-access-section" aria-labelledby="apiAdminLoginTitle">
-          <h3 id="apiAdminLoginTitle">管理员验证</h3>
+          <h3 id="apiAdminLoginTitle">管理员控制面板</h3>
           <p id="apiKeyManagerHint" class="muted small"></p>
           <form id="apiKeyAdminLoginForm" class="api-key-login">
             <label class="api-access-label" for="apiKeyAdminPassword">API 管理员口令（API_ADMIN_PASSWORD）</label>
