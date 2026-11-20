@@ -88,6 +88,11 @@ Windows 可在 PowerShell 中使用 `curl.exe`，或在兼容 OpenAI 的软件�
 - 它也会出现在 API 的 `GET /v1/models` 列表中，在请求里填它的模型 ID 即可用它生成，与内置模型用法完全相同；
 - 删除导入的 AI 后，它会同时从网页模型栏和 API 模型列表中消失。
 
+## 常见问题
+
+- **获取模型列表报 `Cannot GET /v1/chat/completions/models`（404）：** 软件里的 Base URL 填成了完整对话接口。这类软件会自己在 Base URL 后面拼 `/models` 和 `/chat/completions`，所以 Base URL 应只填 `http://127.0.0.1:3000/v1`（到 `/v1` 为止）。服务端已兼容这种误填（拼错的路径也能取到模型列表并对话），但建议改成正确地址。
+- **软件里模型名称一直没变：** 多半是模型列表没获取成功，软件保留了旧名字。先按上一条改对 Base URL，再在软件里重新获取/刷新模型列表并选用返回的模型 ID；也可以直接把模型 ID 手填为 `GET /v1/models` 返回的值（例如 `Qwen2.5-3B-Instruct-q4f16_1-MLC`）。
+
 ## 安全和限制
 
 - 此本机模式**不会**让其他电脑通过 LAN、GitHub Pages 或互联网访问 API；`127.0.0.1` 只指向本机。

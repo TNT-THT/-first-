@@ -59,7 +59,7 @@
               <p class="role-panel-title">本机管理员面板</p>
               <p class="muted small">这里管理当前浏览器里的模型（导入“新建AI”）、参数与数据；API 的参数与 Key 请点顶部“API 管理”。</p>
               <div id="localApiInfo" class="role-section" hidden>
-                <p class="muted small">本机 API 地址（同一台电脑上的软件用这个地址 + API Key 调用）：</p>
+                <p class="muted small">本机 API 地址（填到软件的 Base URL 里，不要再加 /chat/completions；再配上 API Key 即可调用）：</p>
                 <div class="api-access-actions">
                   <code id="localApiEndpoint"></code>
                   <button id="localApiCopy" type="button" class="btn ghost small">复制地址</button>
@@ -261,9 +261,11 @@
           <h3>自建服务器 API</h3>
           <p class="muted small">OpenAI 兼容接口。可填入 OpenAI SDK / 自己的后端服务。</p>
           <dl class="api-access-meta">
-            <div><dt>API 地址</dt><dd><code id="apiAccessEndpoint"></code></dd></div>
+            <div><dt>基础地址（Base URL）</dt><dd><code id="apiAccessBase"></code></dd></div>
+            <div><dt>对话接口</dt><dd><code id="apiAccessEndpoint"></code></dd></div>
             <div><dt>模型名称</dt><dd><code id="apiAccessModel"></code></dd></div>
           </dl>
+          <p class="warning small">在软件里填写时，请把上面的“基础地址”（以 /v1 结尾）填为 Base URL，不要填完整对话接口；否则软件获取模型列表时会报 404（Cannot GET …/chat/completions/models）。</p>
           <a href="/api/docs" target="_blank" rel="noopener noreferrer">查看 Python / JavaScript 示例和完整 API 文档 →</a>
           <pre id="apiCurlExample" class="api-curl-example"></pre>
           <button id="apiCurlCopy" type="button" class="btn ghost small">复制 curl 测试命令</button>
