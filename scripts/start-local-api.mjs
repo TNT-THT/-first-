@@ -50,6 +50,32 @@ function run(command, args, options = {}) {
   });
 }
 
+function runServer(env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['server/index.js'], {
+      cwd: root,
+      env,
+      stdio: 'inherit',
+    });
+    const stop = (signal) => {
+      if (child.exitCode === null) child.kill(signal);
+    };
+    const onInterrupt = () => stop('SIGINT');
+    const onTerminate = () => stop('SIGTERM');
+    process.on('SIGINT', onInterrupt);
+    process.on('SIGTERM', onTerminate);
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      process.off('SIGINT', onInterrupt);
+      process.off('SIGTERM', onTerminate);
+      if (signal === 'SIGINT' || signal === 'SIGTERM') return resolve();
+      if (signal) return reject(new Error(`本机服务已被信号 ${signal} 停止。`));
+      if (code !== 0) return reject(new Error(`本机服务退出码为 ${code ?? 1}。`));
+      return resolve();
+    });
+  });
+}
+
 async function saveLocalConfig(values) {
   await writeFile(localEnvPath, serializeLocalConfig(values), { encoding: 'utf8', mode: 0o600 });
   await chmod(localEnvPath, 0o600).catch(() => {});
@@ -100,7 +126,7 @@ async function main() {
     console.log('\n已有凭据未更改。若忘记本机口令，请在 .env 或 .local-api.json 中查看。');
   }
 
-  await run(process.execPath, ['server/index.js'], { env: local.env });
+  await runServer(local.env);
 }
 
 main().catch((error) => {

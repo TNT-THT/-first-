@@ -7,7 +7,7 @@
 ## 准备
 
 1. 安装 Node.js 18.18 或更高版本。
-2. 若不打算使用云模型 API，在同一台电脑安装并启动 [Ollama](https://ollama.com/)；没有自定义 `.env` 模型配置时，本机启动器默认使用 `qwen2.5:3b`。首次下载该示例模型：
+2. 若不打算使用云模型 API，在同一台电脑安装并启动 [Ollama](https://ollama.com/)。本机启动器会在终端显示实际配置的模型名和对应的 `ollama pull <模型名>` 命令；没有自定义 `.env` 模型配置时，示例默认模型是 `qwen2.5:3b`。例如：
 
    ```bash
    ollama pull qwen2.5:3b
