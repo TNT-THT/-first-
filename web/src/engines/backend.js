@@ -70,6 +70,29 @@ function createRemoteBackend() {
 }
 
 /**
+ * 把对话中夹杂的 system 消息折叠进开头唯一的 system，返回 { systemContent, rest }。
+ *
+ * OpenAI 调用方（第三方软件）通常自带 system 提示词，甚至不止一条或不在第一条；
+ * 而本引擎前面还会再加本站的 system。WebLLM 的对话模板要求 system 只能是
+ * 第一条且只能有一条，否则直接抛 SystemMessageOrderError、生成根本起不来
+ * （Phi 等模板尤其严格）。合并顺序：本站（含管理员信息）在前，调用方的随后，
+ * 内容已包含的片段不重复添加；rest 为去掉 system 后的其余消息，顺序不变。
+ */
+export function foldSystemMessages(systemContent, messages) {
+  let merged = String(systemContent || '');
+  const rest = [];
+  for (const m of Array.isArray(messages) ? messages : []) {
+    if (m?.role === 'system') {
+      const text = String(m.content || '').trim();
+      if (text && !merged.includes(text)) merged = merged ? `${merged}\n\n${text}` : text;
+    } else if (m && typeof m === 'object') {
+      rest.push(m);
+    }
+  }
+  return { systemContent: merged, rest };
+}
+
+/**
  * 某个模型生效的数值覆盖：预设（按浏览器）< 管理员参数（本机，优先）。
  * 没有覆盖的项沿用 config.json 的默认值。
  */
@@ -187,7 +210,9 @@ function createWebLLMBackend(cfg) {
       if (extraSystem && !systemContent.includes(extraSystem)) {
         systemContent = `${systemContent}\n\n${extraSystem}`;
       }
-      const system = { role: 'system', content: systemContent };
+      // 调用方自带的 system 折叠进开头这一条，避免第二条 system 触发模板的 SystemMessageOrderError
+      const folded = foldSystemMessages(systemContent, messages);
+      const system = { role: 'system', content: folded.systemContent };
       const params = layeredOverrides(modelId);
       const repetitionPenalty = generation.repetitionPenalty ?? params.repetitionPenalty ?? cfg.repetitionPenalty ?? null;
       const thinkingOn = getThinkingPref();
@@ -206,7 +231,7 @@ function createWebLLMBackend(cfg) {
           `管理员信息（更正、知识库、反馈）与系统提示已超出${w.sliding ? '滑动' : '上下文'}窗口，为避免截断，本次未发送。请精简这些内容，或在参数中调大${w.sliding ? '滑动窗口（参数 slidingWindow，最大 20000）' : '上下文窗口（参数 contextWindow，最大 20000）'}。`,
         );
       }
-      const all = fitHistory([system, ...messages], w.contextWindow - ANSWER_MIN_TOKENS - reserve, {
+      const all = fitHistory([system, ...folded.rest], w.contextWindow - ANSWER_MIN_TOKENS - reserve, {
         chunk: cfg.historyDropChunk ?? 1,
       });
       // 提示词估计 + 思考预算 + 回答长度，保证不超过引擎窗口

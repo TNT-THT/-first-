@@ -430,6 +430,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         } else console.error('[chat] unexpected:', err);
       }
       if (res.headersSent) {
+        // 流式响应已经发头：把失败原因作为 SSE error 事件发出去再结束，
+        // 否则网页只会看到回答流莫名中断，拿不到真实原因（日志里有，界面没有）。
+        try {
+          res.write(`data: ${JSON.stringify({ error: { message: err.message || '服务器内部错误', type: 'server_error', code: null } })}\n\n`);
+        } catch { /* 连接已断开 */ }
         res.end();
       } else {
         res.status(status).json({ error: err.message || '服务器内部错误' });
@@ -481,8 +486,14 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         if (!model || !available.some((entry) => entry.id === model)) {
           return openAiError(res, 404, `模型不存在或本机网页未提供该模型：${model || '(未指定)'}`, 'model_not_found');
         }
+        // 不影响生成结果的元数据字段直接忽略，不让常见客户端因为带了它们就整单被拒：
+        // user（调用方标记）、stream_options（如 include_usage）、metadata（客户端自定义标记）
+        // n 只有等于 1 时与默认行为一致，可忽略；大于 1 本机引擎确实做不到，仍按不支持处理。
+        const benignParams = { ...(cfg.defaultGenerationParams || {}), ...params };
+        for (const key of ['user', 'stream_options', 'metadata']) delete benignParams[key];
+        if (benignParams.n === 1) delete benignParams.n;
         // 本机引擎只支持一部分生成参数：不支持的提前明确拒绝（400），不静默丢弃假装生效
-        const bridgeParams = { ...(cfg.defaultGenerationParams || {}), ...params };
+        const bridgeParams = benignParams;
         const unsupportedParams = Object.keys(bridgeParams).filter(
           (key) => !BRIDGE_SUPPORTED_GENERATION_PARAMS.includes(key),
         );

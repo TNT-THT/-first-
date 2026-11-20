@@ -2790,7 +2790,8 @@ async function refreshBridgeStatus() {
       bridgeStatusRetries = 0;
       let text = `本机模型已连接：可用模型 ${apiBridgeModels.length} 个（保持本网页打开即可供 API 调用）。`;
       const protocol = Number(data.clientProtocolVersion || 0);
-      if (protocol < 2) {
+      const latestProtocol = Number(data.latestProtocolVersion || 2);
+      if (protocol < latestProtocol) {
         text += ' 注意：当前提供 API 的模型网页未上报诊断信息，可能是旧标签页或旧版网页；生成失败时只能显示通用原因。请关闭其他服务网页标签，只保留本页并按 Ctrl+F5 刷新。';
       }
       if (data.lastError?.message) {

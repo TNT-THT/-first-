@@ -3,6 +3,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 
 const MAX_QUEUE = 8;
 const REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+/** 当前网站包的桥接协议版本；上报版本低于它的网页属于旧版页面（生成失败只回通用文案）。 */
+export const LATEST_BRIDGE_PROTOCOL_VERSION = 2;
 
 /** 本机 WebLLM 引擎真正支持的 OpenAI 生成参数；其余参数在服务端提前拒绝并说明，不静默丢弃。 */
 export const BRIDGE_SUPPORTED_GENERATION_PARAMS = [
@@ -141,6 +143,37 @@ export class BrowserModelBridge {
     if (candidates.length) this.#promote(candidates[0][0], { failPrevious: false });
   }
 
+  /**
+   * 若某个备用连接的协议比当前提供方更新，立即改由它提供。
+   * 正常情况下新版页面的 ready 会当场接管；这里是每次请求前的兜底，
+   * 防止任何时序下请求仍被发给旧版页面（它的失败只有一句通用文案）。
+   */
+  #promoteNewerStandby() {
+    const activeInfo = this.client ? this.clients.get(this.client) : null;
+    if (!activeInfo) return;
+    const newer = [...this.clients.entries()]
+      .filter(([ws, info]) => ws !== this.client && ws.readyState === WebSocket.OPEN && info.ready && info.protocolVersion > activeInfo.protocolVersion)
+      .sort((a, b) => b[1].order - a[1].order);
+    if (newer.length) this.#promote(newer[0][0]);
+  }
+
+  /**
+   * 新版页面在场时，把旧版备用连接停放（1012 关闭）：旧版页面继续挂着只会
+   * 在新版页面关闭后顶上来，并以一句通用文案吞掉真实失败原因。旧版页面会
+   * 按它自己的退避自动重连；只要新版还在，它每次都会被停放，不再当提供方。
+   * 同协议的备用连接保留，用于新版页面关闭时立即顶上。
+   */
+  #parkOutdatedStandbys() {
+    const activeInfo = this.client ? this.clients.get(this.client) : null;
+    if (!activeInfo || activeInfo.protocolVersion < LATEST_BRIDGE_PROTOCOL_VERSION) return;
+    for (const [ws, info] of this.clients) {
+      if (ws === this.client || !info.ready) continue;
+      if (info.protocolVersion < activeInfo.protocolVersion && ws.readyState === WebSocket.OPEN) {
+        try { ws.close(1012, 'superseded by newer bridge protocol'); } catch { /* 已断开则忽略 */ }
+      }
+    }
+  }
+
   status() {
     const info = this.client ? this.clients.get(this.client) : null;
     return {
@@ -149,6 +182,7 @@ export class BrowserModelBridge {
       queued: this.waiting,
       clientCount: [...this.clients.keys()].filter((ws) => ws.readyState === WebSocket.OPEN).length,
       clientProtocolVersion: info?.protocolVersion || 0,
+      latestProtocolVersion: LATEST_BRIDGE_PROTOCOL_VERSION,
       clientVersion: info?.clientVersion || '',
       activeTabId: info?.tabId || '',
       activePageOrigin: info?.pageOrigin || '',
@@ -157,6 +191,7 @@ export class BrowserModelBridge {
   }
 
   async run(payload, { signal, onDelta } = {}) {
+    this.#promoteNewerStandby();
     if (!this.client || this.client.readyState !== WebSocket.OPEN) {
       const error = new Error('本机模型网页尚未连接。请在这台电脑打开服务网页，并保持网页打开。');
       error.status = 503;
@@ -258,6 +293,7 @@ export class BrowserModelBridge {
         if (info.protocolVersion > (activeInfo?.protocolVersion || 0)) this.#promote(ws);
         else if (firstReady && info.protocolVersion === (activeInfo?.protocolVersion || 0)) this.#promote(ws);
       }
+      this.#parkOutdatedStandbys();
       return;
     }
     if (ws !== this.client) return;

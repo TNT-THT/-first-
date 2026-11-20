@@ -68,6 +68,15 @@ test('第三方模型的 model_id 与官方预编译记录不冲突，且互不�
   assert.equal(new Set(THIRD_PARTY.map((t) => t.id)).size, THIRD_PARTY.length);
 });
 
+test('下拉框中的每个模型都能在构建后的模型列表中找到（可被加载），且不重复', () => {
+  const list = buildModelList(prebuiltAppConfig.model_list, webllm.extraRecords, '');
+  const ids = webllm.models.map((m) => m.id);
+  assert.equal(new Set(ids).size, ids.length, '下拉框模型 id 不能重复');
+  for (const id of ids) {
+    assert.equal(list.some((r) => r.model_id === id), true, `下拉框模型 ${id} 没有可加载的模型记录`);
+  }
+});
+
 test('第三方模型进入模型列表（可被加载），待转换列表中没有残留条目', () => {
   const list = buildModelList(prebuiltAppConfig.model_list, webllm.extraRecords, '');
   for (const t of THIRD_PARTY) assert.equal(list.some((r) => r.model_id === t.id), true, t.id);
