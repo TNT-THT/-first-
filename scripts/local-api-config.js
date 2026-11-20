@@ -58,11 +58,14 @@ export function resolveLocalApiConfig({ baseEnv = {}, localEnv = {}, processEnv 
   const llmModel = pick(processEnv.LLM_MODEL, baseEnv.LLM_MODEL, localEnv.LLM_MODEL) || '';
 
   // The local launcher must never expose the API to a LAN or public interface.
+  // 跨域白名单：本站 + 默认放行的可信网页应用（纸上谈兵游戏站，用户可在「API 管理」中增删）。
+  // 注意这只放行浏览器跨域读取，调用仍必须携带有效 API Key。
+  const corsOrigins = `http://127.0.0.1:${port},https://pd.geneluo.fun`;
   overlay.HOST = '127.0.0.1';
   overlay.PORT = String(port);
   overlay.TRUST_PROXY = '0';
   overlay.PUBLIC_BASE_URL = `http://127.0.0.1:${port}`;
-  overlay.CORS_ORIGINS = `http://127.0.0.1:${port}`;
+  overlay.CORS_ORIGINS = corsOrigins;
   overlay.LOCAL_BROWSER_BRIDGE = '1';
 
   const env = {
@@ -76,7 +79,7 @@ export function resolveLocalApiConfig({ baseEnv = {}, localEnv = {}, processEnv 
     PORT: String(port),
     TRUST_PROXY: '0',
     PUBLIC_BASE_URL: `http://127.0.0.1:${port}`,
-    CORS_ORIGINS: `http://127.0.0.1:${port}`,
+    CORS_ORIGINS: corsOrigins,
     LOCAL_BROWSER_BRIDGE: '1',
     LLM_BASE_URL: llmBaseUrl,
     LLM_MODEL: llmModel,

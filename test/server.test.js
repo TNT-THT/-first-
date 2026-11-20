@@ -319,6 +319,7 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
     assert.equal(initial.status, 200);
     const initialData = await initial.json();
     assert.equal(initialData.llmApiKeyConfigured, true);
+    assert.deepEqual(initialData.corsOrigins, ['*']);
     assert.ok(!JSON.stringify(initialData).includes('sk-settings-env'));
     assert.match(initial.headers.get('cache-control'), /no-store/);
 
@@ -330,6 +331,10 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
       method: 'PUT', token: adminToken, body: { defaultGenerationParams: { upstream_api_key: 'not-a-setting' } },
     });
     assert.equal(secretParam.status, 400, '额外参数不允许包含 API Key 字段');
+    const badOrigin = await settingsReq('/api/admin/settings', {
+      method: 'PUT', token: adminToken, body: { corsOrigins: ['https://example.com/some/path'] },
+    });
+    assert.equal(badOrigin.status, 400, '跨域白名单只能填写网站来源，不能带路径');
 
     const writtenKey = 'sk-settings-console-new-secret';
     const update = await settingsReq('/api/admin/settings', {
@@ -342,13 +347,27 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
         systemPrompt: '管理员参数控制台提示词',
         apiMaxTokens: 64,
         defaultGenerationParams: { top_p: 0.7, stop: ['<end>'], vendor_option: { quality: 'high' } },
+        corsOrigins: ['https://pd.geneluo.fun/', 'https://*.client.example.test'],
       },
     });
     assert.equal(update.status, 200);
     const updated = await update.json();
     assert.equal(updated.llmModel, 'qwen-settings');
     assert.equal(updated.apiMaxTokens, 64);
+    assert.deepEqual(updated.corsOrigins, ['https://pd.geneluo.fun', 'https://*.client.example.test'], '白名单应规范化并保存');
     assert.equal(updated.llmApiKeyConfigured, true);
+
+    // 白名单保存后立即生效：名单内来源拿到跨域与本机网络许可，名单外来源拿不到
+    const preflight = (origin, extra = {}) => fetch(`${settingsBase}/v1/models`, {
+      method: 'OPTIONS',
+      headers: { origin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization', ...extra },
+    });
+    const allowedPre = await preflight('https://pd.geneluo.fun', { 'access-control-request-private-network': 'true' });
+    assert.equal(allowedPre.headers.get('access-control-allow-origin'), 'https://pd.geneluo.fun');
+    assert.equal(allowedPre.headers.get('access-control-allow-private-network'), 'true', '白名单来源的本机网络预检应获得许可');
+    const deniedPre = await preflight('https://evil.example.test', { 'access-control-request-private-network': 'true' });
+    assert.equal(deniedPre.headers.get('access-control-allow-origin'), null);
+    assert.equal(deniedPre.headers.get('access-control-allow-private-network'), null, '名单外来源不得获得本机网络许可');
     assert.ok(!JSON.stringify(updated).includes(writtenKey), 'API 管理响应不能回显上游 Key');
 
     const settingsFile = await readFile(settingsPath, 'utf8');
@@ -387,6 +406,11 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
     });
     assert.equal(persisted.status, 200);
     assert.deepEqual((await persisted.json()).data.map((model) => model.id), ['qwen-settings']);
+    const persistedPre = await fetch(`${restartedBase}/v1/models`, {
+      method: 'OPTIONS',
+      headers: { origin: 'https://pd.geneluo.fun', 'access-control-request-method': 'GET' },
+    });
+    assert.equal(persistedPre.headers.get('access-control-allow-origin'), 'https://pd.geneluo.fun', '白名单应在重启后继续生效');
     await new Promise((resolve) => restartedServer.close(resolve));
 
     const reset = await settingsReq('/api/admin/settings', { method: 'DELETE', token: adminToken });
@@ -394,6 +418,7 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
     const resetData = await reset.json();
     assert.equal(resetData.llmModel, 'qwen-test');
     assert.equal(resetData.apiMaxTokens, 128);
+    assert.deepEqual(resetData.corsOrigins, ['*'], '恢复 .env 配置时白名单也应回到启动值');
     assert.equal(resetData.llmApiKeyConfigured, true);
   } finally {
     await new Promise((resolve) => settingsServer.close(resolve));

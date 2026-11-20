@@ -92,6 +92,7 @@ Windows 可在 PowerShell 中使用 `curl.exe`，或在兼容 OpenAI 的软件�
 
 - **获取模型列表报 `Cannot GET /v1/chat/completions/models`（404）：** 软件里的 Base URL 填成了完整对话接口。这类软件会自己在 Base URL 后面拼 `/models` 和 `/chat/completions`，所以 Base URL 应只填 `http://127.0.0.1:3000/v1`（到 `/v1` 为止）。服务端已兼容这种误填（拼错的路径也能取到模型列表并对话），但建议改成正确地址。
 - **软件里模型名称一直没变：** 多半是模型列表没获取成功，软件保留了旧名字。先按上一条改对 Base URL，再在软件里重新获取/刷新模型列表并选用返回的模型 ID；也可以直接把模型 ID 手填为 `GET /v1/models` 返回的值（例如 `Qwen2.5-3B-Instruct-q4f16_1-MLC`）。
+- **在网页应用里调用（如纸上谈兵 https://pd.geneluo.fun ）：** 这类网页由浏览器直接发请求，受跨域（CORS）与浏览器本地网络权限限制。本机版默认已把本站和 `https://pd.geneluo.fun` 放入白名单：在该站选择 OpenAI / Compatible、填 Base URL `http://127.0.0.1:3000/v1` 与你的 Key 即可；浏览器若弹出本地网络访问询问请点允许（不同浏览器支持程度不同，Chromium 系支持最好）。其他网站需在 **API 管理 → 管理员参数控制台 →「允许调用 API 的网站白名单」** 中每行添加一个来源后保存（立即生效、重启保留）。注意：只添加你信任的网站——在该网站中输入的 Key 会被它的网页代码接触到。
 
 ## 安全和限制
 

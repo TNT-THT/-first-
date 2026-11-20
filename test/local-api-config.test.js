@@ -18,7 +18,7 @@ test('local API defaults bind to loopback and generate distinct setup credential
   assert.equal(config.env.HOST, '127.0.0.1');
   assert.equal(config.env.PORT, '3000');
   assert.equal(config.env.PUBLIC_BASE_URL, 'http://127.0.0.1:3000');
-  assert.equal(config.env.CORS_ORIGINS, 'http://127.0.0.1:3000');
+  assert.equal(config.env.CORS_ORIGINS, 'http://127.0.0.1:3000,https://pd.geneluo.fun');
   assert.equal(config.env.TRUST_PROXY, '0');
   assert.equal(config.env.LOCAL_BROWSER_BRIDGE, '1');
   assert.equal(config.llmBaseUrl, '');

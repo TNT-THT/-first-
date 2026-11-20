@@ -13,6 +13,7 @@ const SETTING_KEYS = new Set([
   'systemPrompt',
   'apiMaxTokens',
   'defaultGenerationParams',
+  'corsOrigins',
 ]);
 
 /**
@@ -55,6 +56,7 @@ export class ApiSettingsStore {
       systemPrompt: cfg.systemPrompt || '',
       apiMaxTokens: cfg.apiMaxTokens,
       defaultGenerationParams: cfg.defaultGenerationParams || {},
+      corsOrigins: [...(cfg.corsOrigins || [])],
       llmApiKeyConfigured: !!cfg.llmApiKey,
     };
   }
@@ -178,6 +180,66 @@ function validateSettings(input) {
   if (Object.hasOwn(input, 'defaultGenerationParams')) {
     result.defaultGenerationParams = validateGenerationParams(input.defaultGenerationParams, { maxBytes: 16 * 1024 });
   }
+
+  if (Object.hasOwn(input, 'corsOrigins')) {
+    result.corsOrigins = validateCorsOrigins(input.corsOrigins);
+  }
+  return result;
+}
+
+/**
+ * 校验浏览器跨域白名单：只接受完整来源（scheme + host + 可选端口）、
+ * `https://*.example.com` 形式的通配子域，或表示全部放行的 `*`。
+ * 路径、查询参数、账号密码一律拒绝，避免管理员误把完整接口地址粘进来。
+ */
+function validateCorsOrigins(input) {
+  if (!Array.isArray(input) || input.length > 50) {
+    throw new HttpError(400, '跨域白名单必须是最多 50 项的来源数组');
+  }
+  const result = [];
+  for (const raw of input) {
+    if (typeof raw !== 'string' || raw.length > 512) {
+      throw new HttpError(400, '跨域白名单的每一项都必须是不超过 512 字符的来源地址');
+    }
+    const value = raw.trim();
+    if (!value) continue;
+    if (value === '*') {
+      if (!result.includes('*')) result.push('*');
+      continue;
+    }
+    const wildcard = value.match(/^(https?):\/\/\*\.(.+)$/i);
+    if (wildcard) {
+      let base;
+      try {
+        base = new URL(`${wildcard[1]}://${wildcard[2]}`);
+      } catch {
+        throw new HttpError(400, `跨域白名单来源无效：${value}`);
+      }
+      if (base.username || base.password || base.search || base.hash || (base.pathname && base.pathname !== '/')) {
+        throw new HttpError(400, `跨域白名单只能填写网站来源，不能带路径或账号信息：${value}`);
+      }
+      const normalized = `${base.protocol}//*.${base.hostname}${base.port ? `:${base.port}` : ''}`;
+      if (!result.includes(normalized)) result.push(normalized);
+      continue;
+    }
+    let url;
+    try {
+      url = new URL(value);
+    } catch {
+      throw new HttpError(400, `跨域白名单来源无效：${value}`);
+    }
+    if (
+      !['http:', 'https:'].includes(url.protocol) ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash ||
+      (url.pathname && url.pathname !== '/')
+    ) {
+      throw new HttpError(400, `跨域白名单只能填写网站来源（如 https://example.com），不能带路径：${value}`);
+    }
+    if (!result.includes(url.origin)) result.push(url.origin);
+  }
   return result;
 }
 
@@ -190,6 +252,7 @@ function pickRuntimeValues(cfg) {
     systemPrompt: cfg.systemPrompt || '',
     apiMaxTokens: cfg.apiMaxTokens,
     defaultGenerationParams: cfg.defaultGenerationParams || {},
+    corsOrigins: [...(cfg.corsOrigins || [])],
   };
 }
 

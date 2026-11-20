@@ -132,7 +132,7 @@ ${pre(curl)}
 
 ${section('网页 API 调试台与管理员参数控制台', `
 <p>只有输入独立的 <code>API_ADMIN_PASSWORD</code> 并完成服务端验证后，才能在聊天页顶部的「API 管理」中使用网页调试台、服务端参数控制台和 API Key 管理。调试台使用短期管理员令牌；普通网站 <code>APP_PASSWORD</code> 会话不能调用 <code>/v1/*</code>。</p>
-<p>参数控制台可以即时修改上游 OpenAI 兼容地址、模型、服务端 API Key、系统提示、默认 temperature、token 上限与供应商支持的 JSON 生成参数。设置写入权限受限的 <code>API_SETTINGS_FILE</code>（默认 <code>data/api-settings.json</code>）；Key 不会从管理 API 回传。普通网站登录口令、管理员口令与 CORS 等安全参数仍由服务器环境变量管理。</p>
+<p>参数控制台可以即时修改上游 OpenAI 兼容地址、模型、服务端 API Key、系统提示、默认 temperature、token 上限、供应商支持的 JSON 生成参数，以及允许浏览器跨域调用 API 的网站白名单（CORS_ORIGINS，每行一个来源，保存后立即生效）。设置写入权限受限的 <code>API_SETTINGS_FILE</code>（默认 <code>data/api-settings.json</code>）；Key 不会从管理 API 回传。普通网站登录口令与管理员口令仍由服务器环境变量管理。</p>
 <p>管理员可以按用户或应用创建、命名和撤销独立 API Key，再安全地分发给非管理员使用者。本站没有个人账号、账号级配额或用量账单；普通用户拿到自己的 Key 后可在其他网站后端或软件中调用本接口，不必使用网站登录令牌。</p>
 `)}
 
