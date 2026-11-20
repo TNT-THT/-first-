@@ -116,11 +116,13 @@ test('管理员面板入口：静态版名称明确，点击打开本机管理�
   assert.equal($('#roleBtn').textContent.trim(), '管理员面板');
   assert.equal($('#roleBtn').hidden, false);
   assert.equal($('#adminPanelBtn').hidden, true, '纯静态版没有服务端管理员面板入口');
+  assert.equal($('#adminPanelBtn').textContent.trim(), 'API 管理', '服务端控制台入口应与本机管理员面板区分名称');
+  assert.equal($('#localApiInfo').hidden, true, '静态版管理员面板不显示本机 API 地址（没有本机服务）');
   assert.equal($('#rolePanel').hidden, true);
   $('#roleBtn').click();
   assert.equal($('#rolePanel').hidden, false, '点击管理员面板应打开本机管理员面板');
   assert.match($('#rolePanel').textContent, /本机管理员面板/);
-  assert.match($('#rolePanel').textContent, /只管理当前浏览器里的模型和数据/);
+  assert.match($('#rolePanel').textContent, /这里管理当前浏览器里的模型/);
   $('#roleBtn').click();
   assert.equal($('#rolePanel').hidden, true);
 });

@@ -268,6 +268,9 @@ const els = {
   importTrainBtn: $('#importTrainBtn'),
   importTrainInput: $('#importTrainInput'),
   roleBtn: $('#roleBtn'),
+  localApiInfo: $('#localApiInfo'),
+  localApiEndpoint: $('#localApiEndpoint'),
+  localApiCopy: $('#localApiCopy'),
   roleBadge: $('#roleBadge'),
   rolePanel: $('#rolePanel'),
   roleStatus: $('#roleStatus'),
@@ -1022,7 +1025,7 @@ function questionBefore(session, target) {
 
 /** 某模型当前生效的参数：本机覆盖优先，否则使用配置默认值。 */
 function effectiveParams(modelId) {
-  const d = state.appConfig.webllm;
+  const d = state.appConfig.webllm || {};
   return layerParams(
     {
       temperature: d.temperature,
@@ -2300,9 +2303,23 @@ async function refreshModelCacheStatus() {
   }
 }
 
+/** 是否为本机版（网站包）网页：服务端与网页在同一台电脑上，网页还负责用显卡提供模型。 */
+function bridgePanelMode() {
+  return MODE === 'remote' && !!state.appConfig.localBrowserBridge;
+}
+
+/**
+ * 本机管理员面板的操作权限：静态版沿用管理员密钥（软门禁）；
+ * 本机版网页只有登录后才能打开主界面，且面板管理的就是这台电脑浏览器里的模型与参数，
+ * 因此登录后即可使用（API 的参数/Key 仍由“API 管理”的独立管理口令保护）。
+ */
+function panelAdmin() {
+  return MODE === 'webllm' ? isAdmin() : bridgePanelMode();
+}
+
 /** 导出、导入、删除新建 AI 都需要管理员权限。 */
 function requireAdmin(action) {
-  if (isAdmin()) return true;
+  if (panelAdmin()) return true;
   showStatus(`${action}需要管理员权限。请点击右上角“管理员面板”，输入管理员密钥。`, { error: true });
   return false;
 }
@@ -2471,17 +2488,26 @@ async function importModelFromFile(file, kind = 'import') {
       createdAt: new Date().toISOString(),
       record,
     });
+    const carriedNote = carried ? `，并带入自定义参数（${paramSummary(carried)}）` : '';
+    if (bridgePanelMode()) {
+      // 本机版：登记已通过 local-models 的变更事件同步给桥接，这里再刷新网页模型栏与 API 模型列表
+      renderBridgeModelOptions();
+      renderLocalList();
+      refreshBridgeStatus();
+      setTimeout(() => refreshBridgeStatus(), 800);
+      showStatus(`导入完成：${label} 已加入“新建AI”。网页顶部模型栏可以选用它；API 也可以用它生成（请求中填 model="${record.model_id}"，或先 GET /v1/models 查看）${carriedNote}。`);
+      return;
+    }
     renderModelOptions(record.model_id);
     state.backend.setModel(record.model_id);
     refreshTools();
     await refreshModelCacheStatus();
     renderLocalList();
-    const carriedNote = carried ? `，并带入自定义参数（${paramSummary(carried)}）` : '';
     showStatus(`导入完成：${label} 已加入“新建AI”，可离线使用${carriedNote}。发送消息时将直接从本机加载。`);
   } catch (err) {
     showStatus(`${action}失败：${err.message}`, { error: true });
   } finally {
-    setImportButtons(isAdmin());
+    setImportButtons(panelAdmin());
     els.importModelInput.value = '';
     els.importTrainInput.value = '';
   }
@@ -2544,6 +2570,17 @@ async function deleteLocalModel(id) {
     const removed = await removeLocalModelFiles(entry.record);
     removeLocalModel(id);
     clearModelAdaptation(id);
+    if (bridgePanelMode()) {
+      if (localChatModelId === id) {
+        localChatModelId = apiBridgeModels.find((m) => m.id !== id)?.id || '';
+        saveLocalChatModel(localChatModelId);
+      }
+      renderBridgeModelOptions();
+      renderLocalList();
+      refreshBridgeStatus();
+      showStatus(`已删除 ${entry.label}（清除 ${removed} 个缓存文件）。`);
+      return;
+    }
     if (state.backend.modelId === id) state.backend.setModel(state.appConfig.webllm.defaultModel);
     if (getSavedDefaultModel() === id) saveDefaultModel(null);
     renderModelOptions(state.backend.modelId);
@@ -2706,6 +2743,11 @@ function renderApiAccessInfo() {
     els.apiAccessModel.textContent = state.appConfig.model || '服务端尚未配置模型';
   }
   renderPlaygroundModelOptions();
+  if (els.localApiInfo) {
+    // 本机版：把 API 地址也显示在“管理员面板”里（不用打开 API 接入弹窗就能看到并复制）
+    els.localApiInfo.hidden = !bridgePanelMode();
+    if (bridgePanelMode()) els.localApiEndpoint.textContent = apiBase;
+  }
   updateApiCurlExample();
   const enabled = !!state.appConfig.apiKeyManagerEnabled;
   if (!enabled) {
@@ -3432,6 +3474,7 @@ els.apiKeyCreateForm.addEventListener('submit', async (e) => {
 });
 els.apiKeyNewCopy.addEventListener('click', () => copyPlainText(els.apiKeyNewValue.value, els.apiKeyNewCopy));
 els.apiCurlCopy.addEventListener('click', () => copyPlainText(els.apiCurlExample.textContent, els.apiCurlCopy));
+els.localApiCopy?.addEventListener('click', () => copyPlainText(els.localApiEndpoint.textContent, els.localApiCopy));
 els.apiKeyAdminLogout.addEventListener('click', lockApiKeyManager);
 els.apiKeyList.addEventListener('click', async (e) => {
   const button = e.target.closest('[data-api-key-revoke]');
@@ -3469,21 +3512,27 @@ function toggleRolePanel(force) {
 }
 
 function refreshRoleUI() {
-  const admin = isAdmin();
+  const bridgeMode = bridgePanelMode();
+  const admin = panelAdmin();
   const exp = adminExpiry();
   const hasKey = hasAccessGate(state.appConfig.access);
-  els.roleBadge.textContent = admin ? '管理员' : '访客';
-  els.roleBadge.classList.toggle('is-admin', admin);
-  els.roleForm.hidden = admin || !hasKey;
-  els.roleLogoutBtn.hidden = !admin;
-  if (admin) {
+  if (MODE === 'webllm') {
+    els.roleBadge.textContent = admin ? '管理员' : '访客';
+    els.roleBadge.classList.toggle('is-admin', admin);
+  }
+  els.roleForm.hidden = bridgeMode || admin || !hasKey;
+  els.roleLogoutBtn.hidden = !admin || bridgeMode;
+  if (bridgeMode) {
+    els.roleStatus.textContent = '本机版已登录：可在这里导入“新建AI”、直接改参数（仅保存在本机浏览器）。导入的 AI 会自动加入网页模型栏与 API 的可用模型。';
+  } else if (admin) {
     els.roleStatus.textContent = `当前为管理员（有效至 ${exp.toLocaleDateString('zh-CN')}）。可导出和导入模型。`;
   } else if (hasKey) {
     els.roleStatus.textContent = '当前为访客。输入管理员密钥可升级，以导出和导入模型；聊天功能不受影响。';
   } else {
     els.roleStatus.textContent = '未配置管理员密钥，无法升级权限。';
   }
-  els.exportModelBtn.disabled = !admin;
+  // 本机版的模型由桥接引擎持有，暂不支持导出为 .ojmodel 文件；导入与删除可用
+  els.exportModelBtn.disabled = !admin || bridgeMode;
   for (const btn of els.sitePackageBtns) btn.disabled = !admin;
   els.exportDataBtn.disabled = !admin;
   // 网站包与本机数据导出只用于静态版（远程模式的数据在服务端）
@@ -3491,9 +3540,11 @@ function refreshRoleUI() {
   if (els.sitePackageBtns[0]) els.sitePackageBtns[0].closest('.site-tools').hidden = MODE !== 'webllm';
   renderSitePackageHint();
   setImportButtons(admin);
-  els.modelAdminHint.textContent = admin
-    ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
-    : '导出与导入模型仅限管理员。';
+  els.modelAdminHint.textContent = bridgeMode
+    ? '导入的“新建AI”会加入网页顶部模型栏，也可通过 API 调用（在请求中填它的模型 ID，或先 GET /v1/models 查看）。'
+    : admin
+      ? 'AI 训练：请使用仓库中的 training/ 训练运行时（需要 GPU），训练结果用“导入训练结果”加入新建AI。'
+      : '导出与导入模型仅限管理员。';
   renderLocalList();
   renderAdaptList();
   renderParamOverrides();
@@ -3814,7 +3865,11 @@ function renderAdaptList() {
   if (!list) return;
   list.replaceChildren();
   if (MODE !== 'webllm' || !admin) {
-    els.adaptHint.textContent = MODE !== 'webllm' ? '服务端模式下不记录 AI 适应反馈。' : 'AI 适应记录仅管理员可见。';
+    els.adaptHint.textContent = bridgePanelMode()
+      ? '本机版请在上方“直接修改参数”中调整参数；通过对话记录的 AI 适应反馈不在本机版网页中提供。'
+      : MODE !== 'webllm'
+        ? '服务端模式下不记录 AI 适应反馈。'
+        : 'AI 适应记录仅管理员可见。';
     return;
   }
   els.adaptHint.textContent =
@@ -4022,9 +4077,19 @@ function renderParamOverrides() {
   box.replaceChildren();
   // 普通用户看不到任何参数改动（参数仍会生效，但界面不显示）
   box.hidden = true;
-  if (MODE !== 'webllm' || !state.backend || !isAdmin()) return;
+  if (!state.backend || !panelAdmin()) return;
+  const bridgeMode = bridgePanelMode();
+  if (MODE !== 'webllm' && !bridgeMode) return;
   box.hidden = false;
-  const modelId = state.backend.modelId;
+  // 静态版针对当前引擎模型；本机版针对网页模型栏选中的模型（桥接生成时同样会应用这些参数）
+  const modelId = bridgeMode ? localChatModelId : state.backend.modelId;
+  if (!modelId) {
+    const wait = document.createElement('p');
+    wait.className = 'muted small';
+    wait.textContent = '等待本机模型连接后，可在这里直接修改参数。';
+    box.append(wait);
+    return;
+  }
   const overrides = sanitizeParams(listAdaptation(modelId).params) || {};
   const eff = effectiveParams(modelId);
   const head = document.createElement('p');
@@ -4156,7 +4221,7 @@ function renderExportParamsOption() {
 /** 新建AI 列表：显示导入地址（本地缓存标识），管理员可删除。 */
 function renderLocalList() {
   const list = loadLocalModels();
-  const admin = isAdmin();
+  const admin = panelAdmin();
   els.localModelList.replaceChildren();
   if (!list.length) {
     const p = document.createElement('p');
@@ -5473,6 +5538,8 @@ async function init() {
       const res = await fetch('config.json', { cache: 'no-store' });
       const siteConfig = res.ok ? await res.json() : null;
       if (siteConfig?.webllm) {
+        // 保存网页模型配置：管理员面板的参数表单需要用它计算各参数的默认值与生效值
+        state.appConfig.webllm = siteConfig.webllm;
         const { startLocalModelBridge } = await import('./local-model-bridge.js');
         startLocalModelBridge({ webllmCfg: siteConfig.webllm });
       }
@@ -5513,7 +5580,8 @@ async function init() {
     refreshRoleUI();
   } else {
     els.modelLabel.textContent = state.appConfig.model ? `模型：${state.appConfig.model}` : '';
-    els.roleBtn.hidden = true;
+    // 本机版保留“管理员面板”（导入新建AI、直接改参数等本机功能）；纯服务端模式没有这些本机数据，隐藏
+    els.roleBtn.hidden = !state.appConfig.localBrowserBridge;
     els.presetSelect.hidden = true; // 预设只作用于本机模型
   }
 
