@@ -4,6 +4,8 @@
 
 网页端不会调用这里的任何代码，也不会上传数据。
 
+本目录也随 GitHub Release 的 `oj-training.zip` 一起分发（网页“管理员面板 → 一站式训练包”可直接下载）：解压后会得到一个 `training/` 文件夹，在它的上一级目录执行下文命令即可（路径与在仓库中完全一致）。
+
 ```
 models → init → setup → doctor → import-model / import-data → run（fetch → data → train → convert → pack）→ 网页“导入训练结果”
 ```
@@ -14,13 +16,13 @@ models → init → setup → doctor → import-model / import-data → run（fe
 
 | 类别 | 怎么选 | 运行库 | 备注 |
 | --- | --- | --- | --- |
-| 网页下拉框中的 32 个模型 | `init --model <id>` | 沿用官方运行库，**不需要编译** | 清单见 `catalog.json`，`ojtrain.py models` 查看 |
+| 网页下拉框中的 39 个模型 | `init --model <id>` | 沿用官方运行库，**不需要编译** | 清单见 `catalog.json`，`ojtrain.py models` 查看 |
 | 仅训练目录的超大模型（Qwen2.5 32B、Yi 1.5 34B） | `init --hf-repo <仓库> --conv-template <模板名> --context-window-size 4096` | 在本机用 `mlc_llm compile` 编译 | 不在网页下拉框中；`init --model` 会拒绝并给出上述命令；显存约 19–20 GB（估算），训练显存需 70 GB 以上 |
 | 其他 Hugging Face 模型 | `init --hf-repo 组织/模型 --conv-template <模板名>` | 在本机用 `mlc_llm compile` 编译 | 需要 MLC-LLM 支持该架构，且 transformers 能加载 |
 
-**“所有模型”的含义**：下拉框中的 32 个模型都使用同一套流程，因为训练后的权重与官方模型的架构、量化、形状完全相同，所以可以复用同一个 wasm 运行库。清单之外的模型取决于两件事：MLC-LLM 是否支持该架构，以及 transformers 能否加载它。并不是每个 Hugging Face 模型都能用。
+**“所有模型”的含义**：下拉框中的 39 个模型都使用同一套流程，因为训练后的权重与官方模型的架构、量化、形状完全相同，所以可以复用同一个 wasm 运行库。清单之外的模型取决于两件事：MLC-LLM 是否支持该架构，以及 transformers 能否加载它。并不是每个 Hugging Face 模型都能用。
 
-**验证范围**：流程对下拉框中的 32 个模型都已接好，但沙箱中只用极小随机模型验证了代码路径（多种架构的训练与合并、打包与导入），**没有在任何真实模型上跑通**。仅训练目录的 Qwen2.5 32B 与 Yi 1.5 34B 只有估算的显存数值，没有 WebLLM 记录可核对，也需要本机编译。训练 70B 模型需要远超消费级显卡的显存，本流程不适用于它们。第一次使用某个模型时，请先按第 5 节“需要核对的部分”检查。
+**验证范围**：流程对下拉框中的 39 个模型都已接好，但沙箱中只用极小随机模型验证了代码路径（多种架构的训练与合并、打包与导入），**没有在任何真实模型上跑通**。仅训练目录的 Qwen2.5 32B 与 Yi 1.5 34B 只有估算的显存数值，没有 WebLLM 记录可核对，也需要本机编译。训练 70B 模型需要远超消费级显卡的显存，本流程不适用于它们。第一次使用某个模型时，请先按第 5 节“需要核对的部分”检查。
 
 运行库只与架构和量化有关，与权重无关。例如 Qwen2.5-7B 与 Qwen2.5-Coder-7B 共用一个 wasm（均使用 Qwen2-7B 的库）。
 
@@ -262,7 +264,7 @@ node training/build_catalog.mjs --check  # 只检查是否同步
 | 文件 | 作用 |
 | --- | --- |
 | `ojtrain.py` | 一站式命令行入口 |
-| `catalog.json` / `build_catalog.mjs` | 网页下拉框中 32 个模型（含 3 个第三方去审查模型），加上仅训练目录的 2 个超大模型的训练信息；生成脚本从 web-llm 记录读取事实字段 |
+| `catalog.json` / `build_catalog.mjs` | 网页下拉框中 39 个模型（第三方去审查模型见网页标签注记），加上仅训练目录的 2 个超大模型的训练信息；生成脚本从 web-llm 记录读取事实字段 |
 | `catalog.py` | 把清单模型或自定义模型写入配置 |
 | `config.py` / `config.example.json` | 配置的读取、校验、路径解析与模板 |
 | `doctor.py` | 环境检查 |

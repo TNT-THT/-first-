@@ -20,6 +20,7 @@ import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './
 import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './engines/webllm.js';
 import { formatGB, imageModelsOf, isSelectable, sourceSizes, sourceUrls, totalBytes } from './image/catalog.js';
 import { createImageClient } from './image/client.js';
+import { TRAINING_PACKAGE_ASSET, isReleaseAsset, releaseAssetUrl, releasePageUrl } from './release-downloads.js';
 import {
   addImageCorrection,
   addImageHint,
@@ -2331,35 +2332,54 @@ function requireAdmin(action) {
  * 仅管理员。不包含任何 AI 模型。
  */
 async function downloadSitePackage(file, btn) {
-  if (!requireAdmin('下载网站包')) return;
+  const isTraining = file === TRAINING_PACKAGE_ASSET;
+  const kind = isTraining ? '一站式训练包' : '网站包';
+  if (!requireAdmin(`下载${kind}`)) return;
   const label = btn.textContent;
   btn.disabled = true;
   btn.textContent = '正在开始下载…';
-  showStatus(`正在开始下载网站包 ${file}，请留意浏览器右上角（下载按钮处）的进度。`);
+  showStatus(`正在开始下载${kind} ${file}，请留意浏览器右上角（下载按钮处）的进度。`);
   try {
+    // 网站包与训练包发布在 GitHub Release 中（config.json 的 release 配置）；其余文件仍按相对路径从本站下载。
+    const fromRelease = isReleaseAsset(file);
+    const url = fromRelease ? releaseAssetUrl(state.appConfig?.release, file) : file;
     // 先用 HEAD 轻量确认文件存在（只取响应头，不下载包体）；HEAD 本身失败时不阻断，交给浏览器下载去处理。
+    // Release 直达链接会跨域重定向，浏览器通常不允许 fetch 读取响应，这种失败同样不阻断。
     let missingStatus = 0;
     try {
-      const head = await fetch(file, { method: 'HEAD', cache: 'no-store' });
+      const head = await fetch(url, { method: 'HEAD', cache: 'no-store' });
       if (!head.ok) missingStatus = head.status;
     } catch {
-      /* 静态服务器不支持 HEAD 等情况：继续走浏览器原生下载 */
+      /* 静态服务器不支持 HEAD / 跨域重定向等情况：继续走浏览器原生下载 */
     }
     if (missingStatus) {
-      throw new Error(`找不到网站包 ${file}（HTTP ${missingStatus}）。请先运行 npm run build 生成。`);
+      throw new Error(
+        fromRelease
+          ? `找不到${kind} ${file}（HTTP ${missingStatus}）。可能尚未发布 Release，请到“查看全部下载”确认。`
+          : `找不到${kind} ${file}（HTTP ${missingStatus}）。请先运行 npm run build 生成。`,
+      );
     }
     // 用浏览器原生下载（<a download>）：浏览器下载栏会立刻显示真实进度。
     // 不要再先用 fetch 把整个包读进内存再落盘——那段时间页面毫无反应，最后却“突然”下载完成。
+    // 跨域的 Release 链接 download 属性会被浏览器忽略，改用新标签页承载跳转，文件名由服务端响应决定（与资产名一致）。
     const a = document.createElement('a');
-    a.href = file;
+    a.href = url;
     a.download = file;
+    if (fromRelease) {
+      a.target = '_blank';
+      a.rel = 'noopener';
+    }
     document.body.appendChild(a);
     a.click();
     a.remove();
     btn.textContent = '已开始下载 ✓';
-    showStatus(`已开始下载网站包 ${file}：请看浏览器右上角的下载进度；下载完成后解压，双击里面的启动文件即可。网站包不包含任何 AI 模型。`);
+    showStatus(
+      isTraining
+        ? `已开始下载一站式训练包 ${file}：请看浏览器右上角的下载进度；下载完成后解压，按里面 training/README.md 的说明安装依赖并运行（需要 GPU）。`
+        : `已开始下载网站包 ${file}：请看浏览器右上角的下载进度；下载完成后解压，双击里面的启动文件即可。网站包不包含任何 AI 模型。`,
+    );
   } catch (err) {
-    showStatus(`下载网站包失败：${err.message}`, { error: true });
+    showStatus(`下载${kind}失败：${err.message}`, { error: true });
   } finally {
     btn.disabled = !isAdmin();
     setTimeout(() => {
@@ -5545,6 +5565,7 @@ async function init() {
     console.error(err);
   }
   const appName = state.appConfig.appName || 'OJ 刷题助手';
+  if (els.releasePageLink) els.releasePageLink.href = releasePageUrl(state.appConfig?.release);
   els.brandName.textContent = appName;
   els.loginTitle.textContent = appName;
   document.title = appName;
