@@ -400,3 +400,46 @@ test('部分来源无结果 / 失败时：卡片列出各来源情况，回答�
     window.fetch = realFetch;
   }
 });
+
+test('用量统计面板：点击打开，含网页用量卡片与静态版 API 提示', async () => {
+  const btn = $('#usageBtn');
+  assert.ok(btn, '顶部应有用量统计入口');
+  btn.click();
+  const dlg = $('#usageDialog');
+  assert.equal(dlg.open, true, '点击应打开用量统计面板');
+  assert.match(dlg.textContent, /网页模型用量/);
+  assert.match(dlg.textContent, /API 调用用量/);
+  assert.equal($('#usageWebCards').children.length, 4, '应有总调用/提示/生成/总 Token 四张汇总卡');
+  assert.equal($('#usageWebDays').children.length, 7, '应有最近 7 天趋势条');
+  assert.match($('#usageApiHint').textContent, /静态版/, '静态版应说明没有 API 统计');
+  $('#usageClose').click();
+  assert.equal(dlg.open, false, '关闭按钮应收起面板');
+});
+
+test('一站式训练包按钮：点击后走 Release 下载并立即反馈', async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    const u = String(url);
+    if (/oj-training\.zip$/.test(u)) {
+      assert.equal(options.method, 'HEAD');
+      assert.match(u, /releases\/latest\/download\/oj-training\.zip$/, '训练包应走 GitHub Release 直达链接');
+      return { ok: true, status: 200 };
+    }
+    return realFetch(url, options);
+  };
+  window.fetch = globalThis.fetch;
+  localStorage.setItem('oj-ai.admin', JSON.stringify({ exp: Date.now() + 60_000 }));
+  try {
+    $('#roleBtn').click();
+    const btn = $('#trainingPackageBtn');
+    assert.equal(btn.disabled, false, '管理员应可点击训练包按钮');
+    btn.click();
+    const status = await waitFor(() => /已开始下载一站式训练包 oj-training\.zip/.test($('#statusText').textContent) && $('#statusText').textContent);
+    assert.ok(status, '点击训练包后应立即提示已开始下载');
+  } finally {
+    localStorage.removeItem('oj-ai.admin');
+    if (!$('#rolePanel').hidden) $('#roleBtn').click();
+    globalThis.fetch = realFetch;
+    window.fetch = realFetch;
+  }
+});

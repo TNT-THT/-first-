@@ -48,6 +48,7 @@
             <button id="imageModeBtn" type="button" class="btn ghost small" aria-pressed="false" title="切换到生图模式：会先释放聊天模型的显存" hidden>生图</button>
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
             <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
+            <button id="usageBtn" type="button" class="btn ghost small" title="查看各模型的调用次数与 Token 用量（只保存在本机）">用量统计</button>
             <button id="apiAccessBtn" type="button" class="btn ghost small" title="查看 API 地址、申请 Key 和生成分享链接" hidden>API 接入</button>
             <button id="adminPanelBtn" type="button" class="btn ghost small" title="API 管理员控制台：参数、API Key 与调试台（需要管理口令）" hidden>API 管理</button>
             <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
@@ -220,6 +221,45 @@
         </section>
       </div>
     </div>
+    <dialog id="usageDialog" class="usage-dialog" aria-labelledby="usageTitle">
+      <div class="usage-card">
+        <header class="usage-head">
+          <div>
+            <h2 id="usageTitle">用量统计</h2>
+            <p class="muted small">按模型统计调用次数与 Token 用量，并保留最近的使用日志。统计只汇总数字，不记录对话内容。</p>
+          </div>
+          <button id="usageClose" type="button" class="btn ghost small" aria-label="关闭">关闭</button>
+        </header>
+
+        <section class="usage-section" aria-labelledby="usageWebTitle">
+          <div class="usage-section-head">
+            <h3 id="usageWebTitle">网页模型用量</h3>
+            <button id="usageWebClear" type="button" class="btn ghost small">清空网页统计</button>
+          </div>
+          <p class="muted small">本浏览器里网页聊天的用量（按文本长度估算），只保存在本机浏览器，不上传。</p>
+          <div id="usageWebCards" class="usage-cards"></div>
+          <div id="usageWebDays" class="usage-days" role="img" aria-label="最近 7 天用量趋势"></div>
+          <div id="usageWebModels" class="usage-models"></div>
+          <h4 class="usage-subtitle">近期使用日志</h4>
+          <div id="usageWebRecent" class="usage-recent"></div>
+        </section>
+
+        <section class="usage-section" id="usageApiSection" aria-labelledby="usageApiTitle" hidden>
+          <div class="usage-section-head">
+            <h3 id="usageApiTitle">API 调用用量</h3>
+            <button id="usageApiClear" type="button" class="btn ghost small" hidden>清空 API 统计</button>
+          </div>
+          <p id="usageApiHint" class="muted small"></p>
+          <div id="usageApiBody" hidden>
+            <div id="usageApiCards" class="usage-cards"></div>
+            <div id="usageApiDays" class="usage-days" role="img" aria-label="最近 7 天 API 用量趋势"></div>
+            <div id="usageApiModels" class="usage-models"></div>
+            <h4 class="usage-subtitle">近期调用日志</h4>
+            <div id="usageApiRecent" class="usage-recent"></div>
+          </div>
+        </section>
+      </div>
+    </dialog>
     <dialog id="markDialog" class="correction-dialog mark-dialog" aria-labelledby="markTitle">
       <form id="markForm" class="correction-form">
         <h3 id="markTitle">标记错误说法</h3>

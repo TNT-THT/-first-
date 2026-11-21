@@ -303,8 +303,9 @@ function newCompletionId() {
  * 将请求转发到 OpenAI 兼容的 /chat/completions（stream=true），并把上游 SSE 流式写回客户端。
  * 客户端断开时会取消上游请求，避免浪费 token。
  * normalize=true 时会给每个 chunk 补齐 id/created/model（供 /v1 外部调用方）。
+ * onText 可选：每段输出文本回调一次（仅 normalize 路径解析得到），供用量统计累计。
  */
-export async function proxyChatStream({ cfg, messages, res, signal, temperature, maxTokens, params, normalize = false }) {
+export async function proxyChatStream({ cfg, messages, res, signal, temperature, maxTokens, params, normalize = false, onText = null }) {
   const fetched = await fetchUpstream({ cfg, messages, temperature, maxTokens, params, signal });
   if (fetched.aborted) return;
   const { upstream, controller, onClientGone } = fetched;
@@ -344,6 +345,13 @@ export async function proxyChatStream({ cfg, messages, res, signal, temperature,
     }
     try {
       const json = normalizeChunk(JSON.parse(data), { id, created, model: cfg.llmModel });
+      // 用量统计钩子：仅统计输出文本长度，不改变转发内容；回调异常不影响转发。
+      if (onText) {
+        const delta = json.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string' && delta) {
+          try { onText(delta); } catch { /* 统计失败不影响转发 */ }
+        }
+      }
       res.write(`data: ${JSON.stringify(json)}\n`);
     } catch {
       res.write(`${line}\n`);
