@@ -30,10 +30,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm test
-      - run: npm run test:training
+      # 先构建再测试：部分用例需要 web/dist 存在（与 Pages 工作流顺序一致）
       # 构建静态版网页，并按平台打包网站包（每个包只含对应平台的一个内置 Node 运行时）
       - run: npm run build
+      - run: npm test
+      - run: npm run test:training
       # 一站式训练包（training/ 的脚本、模型清单与示例）
       - run: node scripts/pack-training.mjs
       # 校验模型下载清单与当前模型记录一致（清单已提交在 docs/model-downloads.md）
