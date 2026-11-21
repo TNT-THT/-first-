@@ -60,6 +60,8 @@ export function loadConfig(env = process.env) {
     apiKeysFile: path.resolve(env.API_KEYS_FILE || path.join(process.cwd(), 'data', 'api-keys.json')),
     // 管理员控制台修改的服务端模型参数持久化文件（API Key 以 0600 权限保存，不会由管理 API 回传）。
     apiSettingsFile: path.resolve(env.API_SETTINGS_FILE || path.join(process.cwd(), 'data', 'api-settings.json')),
+    // API 用量统计持久化文件（只存按模型聚合的计数与定长近期日志，不含请求内容）。
+    usageStatsFile: path.resolve(env.USAGE_STATS_FILE || path.join(process.cwd(), 'data', 'usage-stats.json')),
     // 供应商特定生成参数默认值，可由 API 管理员控制台修改。
     defaultGenerationParams: {},
 

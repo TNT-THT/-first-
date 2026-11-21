@@ -21,6 +21,16 @@ import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './e
 import { formatGB, imageModelsOf, isSelectable, sourceSizes, sourceUrls, totalBytes } from './image/catalog.js';
 import { createImageClient } from './image/client.js';
 import { TRAINING_PACKAGE_ASSET, isReleaseAsset, releaseAssetUrl, releasePageUrl } from './release-downloads.js';
+import { estimatePromptTokens, estimateTokens } from './budget.js';
+import {
+  USAGE_STORAGE_KEY,
+  clearUsageStats,
+  formatTokens,
+  loadUsageStats,
+  recordUsage,
+  saveUsageStats,
+  summarizeUsage,
+} from './usage-stats.js';
 import {
   addImageCorrection,
   addImageHint,
@@ -264,6 +274,24 @@ const els = {
   exportModelBtn: $('#exportModelBtn'),
   sitePackageBtns: [...document.querySelectorAll('[data-site-package]')],
   sitePackageHint: $('#sitePackageHint'),
+  trainingPackageBtn: $('#trainingPackageBtn'),
+  releasePageLink: $('#releasePageLink'),
+  usageBtn: $('#usageBtn'),
+  usageDialog: $('#usageDialog'),
+  usageClose: $('#usageClose'),
+  usageWebCards: $('#usageWebCards'),
+  usageWebDays: $('#usageWebDays'),
+  usageWebModels: $('#usageWebModels'),
+  usageWebRecent: $('#usageWebRecent'),
+  usageWebClear: $('#usageWebClear'),
+  usageApiSection: $('#usageApiSection'),
+  usageApiHint: $('#usageApiHint'),
+  usageApiBody: $('#usageApiBody'),
+  usageApiCards: $('#usageApiCards'),
+  usageApiDays: $('#usageApiDays'),
+  usageApiModels: $('#usageApiModels'),
+  usageApiRecent: $('#usageApiRecent'),
+  usageApiClear: $('#usageApiClear'),
   exportDataBtn: $('#exportDataBtn'),
   dataSectionList: $('#dataSectionList'),
   importModelBtn: $('#importModelBtn'),
@@ -1231,6 +1259,26 @@ async function send(rawText) {
   // 上下文：不包含本次刚添加的空占位回复
   const context = buildContext(session.messages.slice(0, -1), { ...state.backend.limits, currentModel: modelId });
 
+  // 用量统计：本次回答所用模型（远程模式下 backend.modelId 为空，按网页聊天选择/服务端模型计）。
+  // 只记聚合计数（模型、估算 Token、状态），不记对话内容；统计失败绝不影响聊天。
+  const usageModelId = modelId || (MODE === 'remote' ? localChatModelId || apiBridgeModels[0]?.id || state.appConfig.model || '' : '');
+  let sentMessages = context;
+  let usageNoted = false;
+  const noteUsageOnce = (status) => {
+    if (usageNoted) return;
+    usageNoted = true;
+    try {
+      recordUsage(getWebUsageStats(), {
+        model: usageModelId || 'unknown',
+        source: 'web',
+        promptTokens: estimatePromptTokens(sentMessages),
+        completionTokens: estimateTokens(assistantMsg.content),
+        status,
+      });
+      saveUsageStats(getWebUsageStats(), localStorage, USAGE_STORAGE_KEY);
+    } catch { /* 统计失败绝不影响聊天 */ }
+  };
+
   const controller = new AbortController();
   state.streaming = { controller, session, assistant: assistantMsg };
   setBusy(true);
@@ -1414,8 +1462,9 @@ async function send(rawText) {
     }
 
     let loopDetected = false;
+    sentMessages = searchBlock ? withSearchContext(context, searchBlock) : context;
     for await (const delta of state.backend.stream({
-      messages: searchBlock ? withSearchContext(context, searchBlock) : context,
+      messages: sentMessages,
       signal: controller.signal,
       // 本机版网页：带上聊天模型选择栏选中的模型（仅本条请求生效，API 的模型选择互不影响）
       model: MODE === 'remote' && state.appConfig.localBrowserBridge ? localChatModelId || undefined : undefined,
@@ -1427,6 +1476,7 @@ async function send(rawText) {
       scheduleRender();
     }
     if (frame) cancelAnimationFrame(frame);
+    noteUsageOnce(controller.signal.aborted ? 'stopped' : 'ok');
     if (controller.signal.aborted) assistantMsg.stopped = true;
     if (loopDetected) {
       // 检测到重复输出：只保留第一份内容保存到历史（之后几轮不会被模型复制重复的部分）
@@ -1446,6 +1496,7 @@ async function send(rawText) {
     if (frame) cancelAnimationFrame(frame);
     if (err.name === 'AbortError' || controller.signal.aborted) {
       assistantMsg.stopped = true;
+      noteUsageOnce('stopped');
       paintAssistant(bubble, assistantMsg);
     } else if (err instanceof ApiError && err.status === 401 && state.backend.mode === 'remote') {
       // 服务端令牌失效：回到登录页。本次问题退回输入框，登录后可直接重新发送。
@@ -1458,6 +1509,7 @@ async function send(rawText) {
       showLogin('登录已过期，请重新输入密码');
       return;
     } else {
+      noteUsageOnce('error');
       assistantMsg.content = friendlyError(err, progressText);
       assistantMsg.thinking = '';
       assistantMsg.error = true;
@@ -2414,6 +2466,179 @@ function renderSitePackageHint() {
   }
 }
 
+// ---------- 用量统计面板 ----------
+// 网页用量保存在本浏览器（聚合计数 + 定长近期日志，见 usage-stats.js）；
+// API 用量由本机服务聚合，管理员登录 API 管理后经 /api/admin/usage-stats 读取。
+
+let webUsageStats = null;
+function getWebUsageStats() {
+  if (!webUsageStats) webUsageStats = loadUsageStats(localStorage, USAGE_STORAGE_KEY);
+  return webUsageStats;
+}
+
+function makeEl(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+/** 模型 ID → 展示名：网页下拉标签 > 本机“新建AI” > 桥接模型名 > 原 ID。 */
+function usageModelLabel(id) {
+  if (!id || id === 'unknown') return '未知模型';
+  const known = state.appConfig.webllm?.models?.find((m) => m.id === id);
+  if (known?.label) return known.label;
+  try {
+    const local = loadLocalModels().find((m) => m.id === id);
+    if (local?.label) return local.label;
+  } catch { /* 本机清单读取失败时回退到 ID */ }
+  const bridged = apiBridgeModels.find((m) => m.id === id);
+  if (bridged?.label || bridged?.name) return bridged.label || bridged.name;
+  return id;
+}
+
+function renderUsageCards(container, summary) {
+  container.replaceChildren();
+  const cards = [
+    { label: '总调用', value: formatTokens(summary.totalCalls), sub: summary.totalErrors ? `其中失败 ${formatTokens(summary.totalErrors)} 次` : '暂无失败' },
+    { label: '提示 Token', value: formatTokens(summary.promptTokens), sub: '发送给模型的输入' },
+    { label: '生成 Token', value: formatTokens(summary.completionTokens), sub: '模型输出' },
+    { label: '总 Token', value: formatTokens(summary.totalTokens), sub: '提示 + 生成', accent: true },
+  ];
+  for (const c of cards) {
+    const box = makeEl('div', `usage-stat${c.accent ? ' is-accent' : ''}`);
+    box.append(makeEl('div', 'usage-stat-value', c.value), makeEl('div', 'usage-stat-label', `${c.label} · ${c.sub}`));
+    container.appendChild(box);
+  }
+}
+
+function renderUsageDays(container, summary) {
+  container.replaceChildren();
+  const max = Math.max(1, ...summary.lastDays.map((d) => d.totalTokens));
+  for (const d of summary.lastDays) {
+    const wrap = makeEl('div', `usage-day${d.totalTokens ? '' : ' is-empty'}`);
+    const bar = makeEl('div', 'usage-day-bar');
+    bar.style.height = `${d.totalTokens ? Math.max(10, Math.round((d.totalTokens / max) * 100)) : 4}%`;
+    bar.title = `${d.day}：调用 ${d.calls} 次，总 Token ${formatTokens(d.totalTokens)}`;
+    wrap.append(bar, makeEl('div', 'usage-day-label', d.day.slice(5)));
+    container.appendChild(wrap);
+  }
+  container.setAttribute('aria-label', `最近 7 天用量：${summary.lastDays.map((d) => `${d.day.slice(5)} ${formatTokens(d.totalTokens)}`).join('，')}`);
+}
+
+function renderUsageModels(container, summary) {
+  container.replaceChildren();
+  if (!summary.models.length) {
+    container.appendChild(makeEl('div', 'usage-empty', '暂无记录。先在网页里和模型聊一句，这里就会出现统计。'));
+    return;
+  }
+  const max = Math.max(1, ...summary.models.map((m) => m.totalTokens));
+  for (const m of summary.models) {
+    const row = makeEl('div', 'usage-model-row');
+    const name = makeEl('div', 'usage-model-name', usageModelLabel(m.id));
+    name.title = m.id;
+    const total = makeEl('div', 'usage-model-total', `${formatTokens(m.totalTokens)} Token`);
+    const meta = makeEl(
+      'div',
+      'usage-model-meta',
+      `调用 ${formatTokens(m.calls)} 次${m.errors ? `（失败 ${formatTokens(m.errors)}）` : ''} · 提示 ${formatTokens(m.promptTokens)} · 生成 ${formatTokens(m.completionTokens)} · 今日 ${formatTokens(m.today.totalTokens)}`,
+    );
+    const bar = makeEl('div', 'usage-model-bar');
+    const fill = document.createElement('i');
+    fill.style.width = `${Math.max(2, Math.round((m.totalTokens / max) * 100))}%`;
+    bar.appendChild(fill);
+    row.append(name, total, meta, bar);
+    container.appendChild(row);
+  }
+}
+
+function renderUsageRecent(container, summary) {
+  container.replaceChildren();
+  if (!summary.recent.length) {
+    container.appendChild(makeEl('div', 'usage-empty', '暂无使用日志。'));
+    return;
+  }
+  const STATUS = { ok: ['成功', 'is-ok'], error: ['失败', 'is-error'], stopped: ['已停止', ''] };
+  for (const e of summary.recent.slice(0, 15)) {
+    const row = makeEl('div', 'usage-recent-row');
+    const time = makeEl('span', 'usage-recent-time', new Date(e.t).toLocaleString('zh-CN', { hour12: false }));
+    const model = makeEl('span', 'usage-recent-model', usageModelLabel(e.model));
+    model.title = e.model;
+    const [label, cls] = STATUS[e.status] || STATUS.ok;
+    const chip = makeEl('span', `usage-chip ${cls}`.trim(), label);
+    const tokens = makeEl(
+      'span',
+      'usage-recent-tokens',
+      e.status === 'error' ? '未计 Token' : `提示 ${formatTokens(e.promptTokens)} → 生成 ${formatTokens(e.completionTokens)}`,
+    );
+    row.append(time, model, chip, tokens);
+    container.appendChild(row);
+  }
+}
+
+function renderUsageSummary(targets, summary) {
+  renderUsageCards(targets.cards, summary);
+  renderUsageDays(targets.days, summary);
+  renderUsageModels(targets.models, summary);
+  renderUsageRecent(targets.recent, summary);
+}
+
+const webUsageTargets = () => ({ cards: els.usageWebCards, days: els.usageWebDays, models: els.usageWebModels, recent: els.usageWebRecent });
+const apiUsageTargets = () => ({ cards: els.usageApiCards, days: els.usageApiDays, models: els.usageApiModels, recent: els.usageApiRecent });
+
+function renderWebUsage() {
+  renderUsageSummary(webUsageTargets(), summarizeUsage(getWebUsageStats()));
+}
+
+async function loadApiUsage() {
+  const token = state.apiKeyAdminToken;
+  els.usageApiHint.textContent = '正在加载 API 用量…';
+  els.usageApiBody.hidden = true;
+  els.usageApiClear.hidden = true;
+  try {
+    const res = await fetch('/api/admin/usage-stats', {
+      headers: { authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (state.apiKeyAdminToken !== token) return; // 加载期间管理员已退出/切换，丢弃旧结果
+    els.usageApiHint.textContent = '由本机服务统计的全部 API 调用（含其他软件用 Key 发起的请求），口径与接口返回的 usage 一致（按文本长度估算）。';
+    renderUsageSummary(apiUsageTargets(), data);
+    els.usageApiBody.hidden = false;
+    els.usageApiClear.hidden = false;
+  } catch (err) {
+    els.usageApiHint.textContent = `API 用量加载失败：${err.message}。请确认本机服务在运行、管理员登录未过期后重开本面板。`;
+  }
+}
+
+function openUsagePanel() {
+  renderWebUsage();
+  if (els.usageApiSection) {
+    els.usageApiSection.hidden = false;
+    if (MODE !== 'remote') {
+      els.usageApiHint.textContent = '当前是静态版（没有本机 API 服务），暂无 API 调用统计。在本机网站包启动的网页中，用管理员口令登录后可在这里查看。';
+      els.usageApiBody.hidden = true;
+      els.usageApiClear.hidden = true;
+    } else if (state.apiKeyAdminToken) {
+      loadApiUsage();
+    } else {
+      els.usageApiHint.textContent = state.appConfig.apiKeyManagerEnabled
+        ? 'API 用量仅管理员可见：请先点顶部“API 管理”验证管理员口令，再回到本面板查看。'
+        : '服务端未配置 API_ADMIN_PASSWORD，API 用量不可见（管理员功能未启用）。';
+      els.usageApiBody.hidden = true;
+      els.usageApiClear.hidden = true;
+    }
+  }
+  if (typeof els.usageDialog.showModal === 'function') els.usageDialog.showModal();
+  else els.usageDialog.setAttribute('open', '');
+}
+
+function closeUsagePanel() {
+  if (typeof els.usageDialog.close === 'function') els.usageDialog.close();
+  else els.usageDialog.removeAttribute('open');
+}
+
 /** 选择性导出本机数据（会话、管理员说明/参数/更正、知识库、新建AI清单）。仅管理员。 */
 function exportLocalData() {
   if (!requireAdmin('导出本机数据')) return;
@@ -2618,7 +2843,31 @@ els.exportModelBtn.addEventListener('click', exportCurrentModel);
 for (const btn of els.sitePackageBtns) {
   btn.addEventListener('click', () => downloadSitePackage(btn.dataset.sitePackage, btn));
 }
+els.trainingPackageBtn?.addEventListener('click', () => downloadSitePackage(TRAINING_PACKAGE_ASSET, els.trainingPackageBtn));
 els.exportDataBtn.addEventListener('click', exportLocalData);
+els.usageBtn?.addEventListener('click', openUsagePanel);
+els.usageClose?.addEventListener('click', closeUsagePanel);
+els.usageWebClear?.addEventListener('click', () => {
+  if (!confirm('确定要清空本浏览器保存的网页用量统计吗？此操作不可恢复。')) return;
+  webUsageStats = clearUsageStats();
+  saveUsageStats(webUsageStats, localStorage, USAGE_STORAGE_KEY);
+  renderWebUsage();
+});
+els.usageApiClear?.addEventListener('click', async () => {
+  if (!state.apiKeyAdminToken) return;
+  if (!confirm('确定要清空服务端保存的 API 用量统计吗？此操作不可恢复。')) return;
+  try {
+    const res = await fetch('/api/admin/usage-stats', {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${state.apiKeyAdminToken}` },
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    renderUsageSummary(apiUsageTargets(), await res.json());
+    els.usageApiHint.textContent = 'API 用量统计已清空。';
+  } catch (err) {
+    els.usageApiHint.textContent = `清空 API 统计失败：${err.message}`;
+  }
+});
 // 数据分区的复选框（默认全部勾选，管理员可取消）
 els.dataSectionList.replaceChildren(
   ...DATA_SECTIONS.map((sec) => {
@@ -3577,6 +3826,7 @@ function refreshRoleUI() {
   // 本机版的模型由桥接引擎持有，暂不支持导出为 .ojmodel 文件；导入与删除可用
   els.exportModelBtn.disabled = !admin || bridgeMode;
   for (const btn of els.sitePackageBtns) btn.disabled = !admin;
+  if (els.trainingPackageBtn) els.trainingPackageBtn.disabled = !admin;
   els.exportDataBtn.disabled = !admin;
   // 网站包与本机数据导出只用于静态版（远程模式的数据在服务端）
   els.dataSectionList.closest('.data-export').hidden = MODE !== 'webllm';

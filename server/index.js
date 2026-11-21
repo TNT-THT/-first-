@@ -18,6 +18,7 @@ import {
 import { buildApiInfo, buildDocsHtml, API_VERSION } from './docs.js';
 import { ApiKeyStore } from './api-key-store.js';
 import { ApiSettingsStore } from './settings-store.js';
+import { UsageStatsStore } from './usage-stats.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 网站包里静态版与服务版网页共存（web/dist 与 web/dist-api），可用 OJ_WEB_DIST 指定服务版目录。
@@ -87,7 +88,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
   app.disable('x-powered-by');
   app.set('trust proxy', cfg.trustProxy);
   app.use(express.json({ limit: '256kb' }));
-  app.use(['/api/admin/api-keys', '/api/admin/settings'], (_req, res, next) => {
+  app.use(['/api/admin/api-keys', '/api/admin/settings', '/api/admin/usage-stats'], (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
     next();
   });
@@ -157,6 +158,8 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
   const apiKeyStore = new ApiKeyStore(cfg.apiKeysFile);
   const apiSettingsStore = new ApiSettingsStore(cfg.apiSettingsFile);
   apiSettingsStore.apply(cfg);
+  // API 用量统计（按模型聚合；仅管理员接口可读，见 /api/admin/usage-stats）
+  const usageStats = new UsageStatsStore(cfg.usageStatsFile);
   // 使用独立签名密钥空间；普通网页登录令牌不能冒充 API Key 管理员会话。
   const apiKeyAdminSecret = `${cfg.sessionSecret}:api-key-admin-v1`;
 
@@ -336,6 +339,15 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     }
   });
 
+  // API 用量统计：仅 API 管理员可查看/清空。只含按模型聚合的计数，不含请求内容。
+  app.get('/api/admin/usage-stats', requireApiKeysAdmin, (_req, res) => {
+    return res.json(usageStats.snapshot());
+  });
+
+  app.delete('/api/admin/usage-stats', requireApiKeysAdmin, (_req, res) => {
+    return res.json(usageStats.clear());
+  });
+
   // 机器可读接入信息 + 人类可读文档页（模式一 API / 模式二链接）
   app.get('/api/info', (_req, res) => res.json(buildApiInfo(cfg, browserBridge?.status())));
   app.get('/api/docs', (_req, res) => {
@@ -472,11 +484,22 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     res.on('close', () => {
       if (!res.writableFinished) ac.abort();
     });
+    // API 用量统计状态（声明在 try 外，catch 补记失败时需要读到）。
+    let usageModel = '';
+    let usageRecorded = false;
     try {
       const requestCfg = browserBridge ? { ...cfg, llmModel: '' } : cfg;
       const { messages, stream, temperature, maxTokens, params, model: requestedModel } = validateChatCompletionBody(req.body, requestCfg);
       // 即使调用方未提交 max_tokens，也应用服务端上限，避免无限制生成消耗服务器额度。
       const outputLimit = maxTokens ?? cfg.apiMaxTokens ?? 8192;
+      // 用量统计辅助：模型确定后赋值 usageModel；成功路径记 Token，
+      // 生成失败在 catch 中统一补记一次（只记状态，不记 Token）。口径与响应中的 usage 一致。
+      const promptTokensOf = () => messages.reduce((n, m) => n + Math.ceil(String(m.content || '').length / 4), 0);
+      const noteApiUsage = (completionTokens, status = 'ok') => {
+        if (!usageModel || usageRecorded) return;
+        usageRecorded = true;
+        usageStats.record({ model: usageModel, promptTokens: promptTokensOf(), completionTokens, status });
+      };
       if (browserBridge) {
         if (!browserBridge.status().connected) {
           return openAiError(res, 503, '本机模型网页尚未连接。请在这台电脑打开服务网页，并保持网页打开。', 'service_unavailable');
@@ -504,6 +527,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
             `本机模型不支持生成参数：${unsupportedParams.join('、')}。支持的参数：${BRIDGE_SUPPORTED_GENERATION_PARAMS.join('、')}。`,
           );
         }
+        usageModel = model;
         const id = `chatcmpl-${randomUUID().replaceAll('-', '')}`;
         const created = Math.floor(Date.now() / 1000);
         let content = '';
@@ -533,8 +557,10 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
           });
           if (!ac.signal.aborted && !res.destroyed) {
             if (!content.trim()) {
+              noteApiUsage(0, 'error');
               emit({ error: { message: `模型生成结束但没有输出任何内容（模型 ${model}）。请先在网页聊天里用同一模型发一句“你好”验证；若网页也无输出，请重新导入模型或更换模型。`, type: 'server_error', code: null } });
             } else {
+              noteApiUsage(Math.ceil(content.length / 4));
               emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] });
               res.write('data: [DONE]\n\n');
             }
@@ -556,24 +582,33 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         });
         if (ac.signal.aborted || res.destroyed) return;
         if (!content.trim()) {
+          noteApiUsage(0, 'error');
           return openAiError(res, 502, `模型生成结束但没有输出任何内容（模型 ${model}）。请先在网页聊天里用同一模型发一句“你好”验证；若网页也无输出，请重新导入模型或更换模型。`, 'server_error');
         }
         const promptTokens = messages.reduce((n, m) => n + Math.ceil(m.content.length / 4), 0);
         const completionTokens = Math.ceil(content.length / 4);
+        noteApiUsage(completionTokens);
         return res.json({
           id, object: 'chat.completion', created, model,
           choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: result.finishReason || 'stop' }],
           usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
         });
       }
+      usageModel = requestedModel || cfg.llmModel || '';
       if (stream) {
-        await proxyChatStream({ cfg, messages, res, signal: ac.signal, temperature, maxTokens: outputLimit, params, normalize: true });
+        let streamedChars = 0;
+        await proxyChatStream({
+          cfg, messages, res, signal: ac.signal, temperature, maxTokens: outputLimit, params, normalize: true,
+          onText: (delta) => { streamedChars += delta.length; },
+        });
+        noteApiUsage(Math.ceil(streamedChars / 4));
         return;
       }
       const result = await collectChatCompletion({ cfg, messages, temperature, maxTokens: outputLimit, params, signal: ac.signal });
       if (!result) return;
       const promptTokens = messages.reduce((n, m) => n + Math.ceil(m.content.length / 4), 0);
       const completionTokens = Math.ceil(result.content.length / 4);
+      noteApiUsage(completionTokens);
       res.json({
         id: result.id,
         object: 'chat.completion',
@@ -593,6 +628,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         },
       });
     } catch (err) {
+      // 生成已开始但失败：补记一次失败用量（参数校验等模型未确定的失败不计）。
+      if (usageModel && !usageRecorded) {
+        usageRecorded = true;
+        usageStats.record({ model: usageModel, promptTokens: 0, completionTokens: 0, status: 'error' });
+      }
       const status = err instanceof HttpError
         ? err.status
         : (Number.isInteger(err?.status) && err.status >= 400 && err.status <= 599 ? err.status : 500);
