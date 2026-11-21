@@ -1,0 +1,68 @@
+# 在可联网环境构建带内置 Node 运行时的四平台网站包与一站式训练包，并发布到 GitHub Release。
+# 本地与沙箱环境拿不到各平台的官方 Node 二进制，因此正式发布统一走这里：
+# 给仓库打 v* 标签（如 v1.0.0）推送，或在 Actions 页面手动运行并填写版本号。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的版本号（如 v1.0.0）'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:training
+      # 构建静态版网页，并按平台打包网站包（每个包只含对应平台的一个内置 Node 运行时）
+      - run: npm run build
+      # 一站式训练包（training/ 的脚本、模型清单与示例）
+      - run: node scripts/pack-training.mjs
+      # 校验模型下载清单与当前模型记录一致（清单已提交在 docs/model-downloads.md）
+      - run: node scripts/model-links.mjs
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag || github.ref_name }}
+          body: |
+            ## 网站包（按你的电脑四选一，不要全部下载）
+
+            - Windows：`site-win-x64.zip`
+            - Mac（Apple 芯片）：`site-darwin-arm64.zip`
+            - Mac（Intel 芯片）：`site-darwin-x64.zip`
+            - Linux：`site-linux-x64.zip`
+
+            每个包都包含网页与本机 API 服务（含对应平台的内置 Node 运行时），解压后双击里面的启动文件即可使用，不需要预装 Node.js，也不用敲命令。
+            网站包不包含任何 AI 模型：模型在网页首次选用时自动下载并缓存，全部 39 个模型的权重与运行库下载地址见仓库的 `docs/model-downloads.md`。
+
+            ## 一站式训练包
+
+            - `oj-training.zip`：在有显卡的电脑上自己微调模型。解压后按包内 `training/README.md` 操作：`pip install -r training/requirements.txt`，再运行 `python3 training/ojtrain.py models` 查看可训练模型。
+
+            网页上的下载按钮默认指向最新版 Release；如需锁定版本，可在 `web/public/config.json` 的 `release.tag` 中填写本版本号。
+          files: |
+            web/dist/site-win-x64.zip
+            web/dist/site-darwin-arm64.zip
+            web/dist/site-darwin-x64.zip
+            web/dist/site-linux-x64.zip
+            release-assets/oj-training.zip
+          fail_on_unmatched_files: true
+          make_latest: true

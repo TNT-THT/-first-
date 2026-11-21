@@ -71,9 +71,19 @@ The first repository of me,and first of "炸药工厂"
 
 **安全说明**：管理员校验在浏览器中完成，口令的盐和哈希都公开在 `config.json` 里。它只能阻止普通访客误操作，不能阻止有意绕过的人，也不是服务端鉴权。
 
+## 下载发布（GitHub Release）
+
+网站包与一站式训练包统一发布在仓库的 [GitHub Release](https://github.com/TNT-THT/-first-/releases/latest) 中，不再随 GitHub Pages 一起分发：
+
+- **网站包（四选一）**：`site-win-x64.zip`（Windows）、`site-darwin-arm64.zip`（Mac Apple 芯片）、`site-darwin-x64.zip`（Mac Intel 芯片）、`site-linux-x64.zip`（Linux）。每个包只含对应平台的内置 Node 运行时，下载一个即可。
+- **一站式训练包**：`oj-training.zip`，包含 `training/` 的训练脚本、模型清单（41 个可训练模型）、示例与说明。在有显卡的电脑上解压后，按包内 `training/README.md` 安装依赖并运行 `python3 training/ojtrain.py models`。
+- **模型下载链接**：网页会自动下载所选模型，平时不需要手动下载；需要手动下载、校验或镜像时，见 [docs/model-downloads.md](docs/model-downloads.md)（39 个网页模型的权重仓库与运行库地址，由 `node scripts/model-links.mjs` 生成）。训练用基座权重的下载见 `training/ojtrain.py models` 输出的 Hugging Face 地址。
+- **网页下载入口**：网页“下载网站包”与“一站式训练包”按钮按 `web/public/config.json` 的 `release` 配置生成 Release 直达链接。部署者可把 `release.repo` 改为自己的仓库、`release.tag` 改为固定版本号（如 `"v1.0.0"`）锁定版本；缺省为最新版（`latest`）。
+- **发布方式**：给仓库打 `v*` 标签推送（或在 Actions 页面手动运行 Release 工作流并填写版本号），`.github/workflows/release.yml` 会在可联网环境运行测试、构建带运行时的四平台网站包（`npm run build`）、生成训练包（`node scripts/pack-training.mjs`），并把五个文件发布到对应 Release。本地/沙箱无法下载各平台官方 Node 二进制，正式发布包请以 Release 中的为准。
+
 ## 网站包与本机数据导出（仅管理员，静态版）
 
-- **下载网站包**：管理员在“更改权限”面板按自己电脑的系统点对应的下载按钮（Windows / Mac Apple 芯片 / Mac Intel 芯片 / Linux，只下对应一个），得到 `site-win-x64.zip`、`site-darwin-arm64.zip`、`site-darwin-x64.zip` 或 `site-linux-x64.zip`。每个包的内容是网站源码（`web/`）、构建产物（含服务版网页 `web/dist-api/`）、Node 服务端（`server/`，含运行依赖）、本机启动脚本（`scripts/`）、对应平台的内置 Node 运行时（`runtime/`，只需下载自己那一个平台的），以及根目录的双击启动文件。**不包含任何 AI 模型**、`.ojmodel` 文件、`training/` 目录、`.env` 或任何密钥。网站包在 `npm run build` 时自动生成。
+- **下载网站包**：管理员在“更改权限”面板按自己电脑的系统点对应的下载按钮（Windows / Mac Apple 芯片 / Mac Intel 芯片 / Linux，只下对应一个），从 GitHub Release 得到 `site-win-x64.zip`、`site-darwin-arm64.zip`、`site-darwin-x64.zip` 或 `site-linux-x64.zip`。每个包的内容是网站源码（`web/`）、构建产物（含服务版网页 `web/dist-api/`）、Node 服务端（`server/`，含运行依赖）、本机启动脚本（`scripts/`）、对应平台的内置 Node 运行时（`runtime/`，只需下载自己那一个平台的），以及根目录的双击启动文件。**不包含任何 AI 模型**、`.ojmodel` 文件、`training/` 目录、`.env` 或任何密钥。网站包在 `npm run build` 时自动生成。
   - **双击打开**：解压后，Windows 双击 `start-windows.bat`、macOS 双击 `start-mac.command`，即可启动本机网站与 API（使用包内内置 Node 运行时，无需预先安装；浏览器自动打开）。只想用静态网页聊天时可用后备启动文件（Windows 的 `start-windows-static.bat`、macOS / Linux 的 `python3 serve-site.py`）。程序只监听 127.0.0.1，关闭窗口即停止。详见包内的 `使用说明.txt`。
   - 直接双击 `index.html` 不可行：浏览器会阻止模块脚本和 Worker，必须通过本机服务器打开。
   - 启动文件的源码在 `scripts/launcher/`。

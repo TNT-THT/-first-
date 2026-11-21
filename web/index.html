@@ -89,7 +89,7 @@
                 </label>
                 <div id="localModelList" class="local-list"></div>
                 <div class="site-tools">
-                  <p class="muted small">下载网站包到自己电脑上（含本机 API，解压双击即可用；不包含任何 AI 模型）。下面四个版本四选一：点击与你电脑对应的那一个，只会下载那一个文件，不会四个一起下载。</p>
+                  <p class="muted small">下载网站包到自己电脑上（含本机 API，解压双击即可用；不包含任何 AI 模型）。下面四个版本四选一：点击与你电脑对应的那一个，只会下载那一个文件，不会四个一起下载。下载文件托管在项目的 GitHub Release 中，点击后会打开新标签页开始下载，请留意浏览器右上角的下载进度。</p>
                   <div class="site-package-btns">
                     <button type="button" class="btn ghost small" data-site-package="site-win-x64.zip">Windows 版</button>
                     <button type="button" class="btn ghost small" data-site-package="site-darwin-arm64.zip">Mac（Apple 芯片）版</button>
@@ -97,6 +97,7 @@
                     <button type="button" class="btn ghost small" data-site-package="site-linux-x64.zip">Linux 版</button>
                   </div>
                   <p id="sitePackageHint" class="muted small"></p>
+                  <p class="muted small">一站式训练功能（在有显卡的电脑上自己微调模型，含模型清单、训练脚本与说明）也发布在同一 Release 中：<button type="button" class="btn ghost small" id="trainingPackageBtn">一站式训练包</button> <a class="btn ghost small" id="releasePageLink" href="https://github.com/TNT-THT/-first-/releases/latest" target="_blank" rel="noopener">查看全部下载</a></p>
                 </div>
                 <div class="data-export">
                   <p class="muted small">导出本机数据（仅保存在你的电脑上，不上传；文件可能包含对话内容）：</p>
