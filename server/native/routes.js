@@ -296,6 +296,71 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
     }
   });
 
+  // 本地导入（浏览器用自带下载器把文件下到电脑 → 在软件里导入，全程不碰 HF 网络）：
+  // begin 登记清单 → file 按偏移收片（可续传）→ finish 自动识别格式落地登记。
+  app.post('/api/native/import/begin', requireAdmin, async (req, res) => {
+    try {
+      const out = await engine.beginImport(req.body?.importId, req.body?.files);
+      return res.json(out);
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.get('/api/native/import/:importId/status', requireAdmin, async (req, res) => {
+    try {
+      return res.json(await engine.importSessionStatus(req.params.importId));
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/import/:importId/file', requireAdmin, async (req, res) => {
+    try {
+      const relPath = decodeURIComponent(String(req.get('x-import-path') || ''));
+      const expected = Number(req.get('x-import-offset'));
+      const parts = [];
+      let total = 0;
+      for await (const chunk of req) {
+        total += chunk.length;
+        if (total > 64 * 1024 * 1024) {
+          return res.status(413).json({ error: '单片过大，请更新软件后重试。' });
+        }
+        parts.push(chunk);
+      }
+      const out = await engine.writeImportSlice(
+        req.params.importId,
+        relPath,
+        Number.isFinite(expected) ? expected : undefined,
+        Buffer.concat(parts),
+      );
+      return res.json(out);
+    } catch (err) {
+      if (Number.isFinite(err?.received)) {
+        return res.status(Number.isInteger(err.status) ? err.status : 409)
+          .json({ error: err.message, received: err.received });
+      }
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/import/:importId/finish', requireAdmin, async (req, res) => {
+    try {
+      const out = await engine.finishImport(req.params.importId, { name: req.body?.name });
+      return res.status(201).json(out);
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.delete('/api/native/import/:importId', requireAdmin, async (req, res) => {
+    try {
+      return res.json(await engine.cancelImport(req.params.importId));
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
   app.delete('/api/native/models/:id', requireAdmin, async (req, res) => {
     try {
       if (!engine.hasModel(req.params.id)) return res.status(404).json({ error: `未知模型：${req.params.id}` });

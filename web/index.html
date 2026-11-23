@@ -359,6 +359,23 @@
             <p id="apiHfSearchStatus" class="muted small" role="status"></p>
             <div id="apiHfResults" class="native-model-list"></div>
           </div>
+          <div class="hf-bridge">
+            <h4>从本机导入（浏览器下载好后导入，最稳）</h4>
+            <p class="muted small">网络不好、在线下载老断时用这条：先在 Hugging Face 仓库页面里，点文件名右边的下载图标，用浏览器自带的下载把文件存到电脑上（浏览器自己会断点续传、最稳）；下完回到这里选文件导入，软件会自动识别并登记，导入完就能在下方列表里点“加载”使用。</p>
+            <p class="muted small">全都能认：单个或多个分片 GGUF 文件、整仓库文件夹、zip 压缩包（2GB 以内）、Safetensors / ONNX 等原格式文件夹。GGUF 导入后直接加载；其它格式会按快照登记，可用下面列表里的“转换并使用”或“本地运行（Python）”。导入传一半关掉也没关系：重新选同一组文件会接着传。</p>
+            <div class="api-access-actions">
+              <input id="importNameInput" type="text" placeholder="模型显示名（可留空，自动按文件名取）" aria-label="导入模型显示名" />
+              <button id="importFilesBtn" type="button" class="btn primary small">导入文件（可多选）</button>
+              <button id="importFolderBtn" type="button" class="btn ghost small">导入文件夹</button>
+              <input id="importFilesInput" type="file" multiple hidden />
+              <input id="importFolderInput" type="file" webkitdirectory hidden />
+            </div>
+            <div id="importProgressWrap" hidden>
+              <div class="native-progress"><i id="importProgressFill"></i><b class="native-progress-pct" id="importProgressPct">0%</b></div>
+              <p id="importProgressLabel" class="native-progress-label"></p>
+            </div>
+            <p id="importStatus" class="muted small" role="status"></p>
+          </div>
           <div id="apiNativeList" class="native-model-list"></div>
           <p id="apiNativeError" class="error small" role="alert"></p>
 

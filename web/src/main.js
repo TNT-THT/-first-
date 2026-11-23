@@ -83,7 +83,7 @@ import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAcc
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
 import { pendingModels } from './pending-models.js';
 import { clearApiAdminSession, loadApiAdminSession, saveApiAdminSession } from './api-admin-auth.js';
-import { downloadModelViaBrowser, fetchModelInfoViaBrowser, fetchNativeQuants, fetchNativeStatus, fetchQuantsViaBrowser, hfModelInfo, hfSearch, nativeAdminRequest, searchHfViaBrowser, useRepoViaBrowser } from './engines/native-client.js';
+import { downloadModelViaBrowser, fetchModelInfoViaBrowser, fetchNativeQuants, fetchNativeStatus, fetchQuantsViaBrowser, hfModelInfo, hfSearch, importLocalModel, nativeAdminRequest, searchHfViaBrowser, useRepoViaBrowser } from './engines/native-client.js';
 import { DEFAULT_PRESET_ID, findPreset, getPresetId, layerParams, PRESETS, presetOverrides, setPresetId } from './presets.js';
 import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
@@ -261,6 +261,16 @@ const els = {
   apiHfSearchInput: $('#apiHfSearchInput'),
   apiHfFilter: $('#apiHfFilter'),
   apiHfSearchBtn: $('#apiHfSearchBtn'),
+  importNameInput: $('#importNameInput'),
+  importFilesBtn: $('#importFilesBtn'),
+  importFolderBtn: $('#importFolderBtn'),
+  importFilesInput: $('#importFilesInput'),
+  importFolderInput: $('#importFolderInput'),
+  importProgressWrap: $('#importProgressWrap'),
+  importProgressFill: $('#importProgressFill'),
+  importProgressPct: $('#importProgressPct'),
+  importProgressLabel: $('#importProgressLabel'),
+  importStatus: $('#importStatus'),
   apiHfTokenInput: $('#apiHfTokenInput'),
   apiHfTokenBtn: $('#apiHfTokenBtn'),
   apiHfTokenStatus: $('#apiHfTokenStatus'),
@@ -3336,7 +3346,8 @@ function buildNativeModelRow(m, admin) {
     quantStatus.className = isError ? 'error small' : 'muted small';
     quantStatus.hidden = !text;
   };
-  controls.append(mkBtn('获取量化列表', async (ev) => {
+  // 导入模型的档位都在本地清单里、已在下拉中，不需要联网取列表
+  if (m.kind !== 'import') controls.append(mkBtn('获取量化列表', async (ev) => {
     const btn = ev.currentTarget;
     btn.disabled = true;
     btn.textContent = '正在读取…';
@@ -3377,35 +3388,40 @@ function buildNativeModelRow(m, admin) {
     }
   }));
 
-  controls.append(mkBtn(isLoading ? '加载中…' : isRunning ? '运行中' : '下载所选量化', () => {
-    void nativeAction(async () => {
-      // 与普通网页版同一条网络路：浏览器负责从 Hugging Face 取数（自动走
-      // 浏览器/系统代理），软件只落盘。浏览器通道不可用时自动回退软件直连。
-      browserDlErrors.delete(m.id);
-      try {
-        await downloadModelViaBrowser({
-          id: m.id,
-          repo: m.repo,
-          quant: quantSelect.value || undefined,
-          adminToken: state.apiKeyAdminToken,
-          onStatus: (text) => setQuantStatus(text),
-        });
-      } catch (browserErr) {
-        // 原因常驻行内（browserDlErrors），状态刷新也不会冲掉；行内小字同步提示
-        browserDlErrors.set(m.id, browserErr?.message || '未知原因');
-        setQuantStatus(`浏览器通道下载失败（${browserErr?.message || '未知原因'}），已自动改用软件直连下载…`, true);
-        await nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
-          token: state.apiKeyAdminToken,
-          body: { quant: quantSelect.value || undefined },
-        });
-      }
-    });
-  // 浏览器通道的“下载中”是可接管的：再点一次就按断点续传（换页面/刷新后尤其
-  // 需要能点）；只有软件直连真在后台下载时才置灰，避免两条通道写同一文件。
-  }, { disabled: !admin || isRunning || isLoading || (!!dl && dl.via !== 'browser') }));
+  // 本机导入的模型权重已经在本地，没有任何“下载”动作，别给会注定失败的按钮
+  if (m.kind !== 'import') {
+    controls.append(mkBtn(isLoading ? '加载中…' : isRunning ? '运行中' : '下载所选量化', () => {
+      void nativeAction(async () => {
+        // 与普通网页版同一条网络路：浏览器负责从 Hugging Face 取数（自动走
+        // 浏览器/系统代理），软件只落盘。浏览器通道不可用时自动回退软件直连。
+        browserDlErrors.delete(m.id);
+        try {
+          await downloadModelViaBrowser({
+            id: m.id,
+            repo: m.repo,
+            quant: quantSelect.value || undefined,
+            adminToken: state.apiKeyAdminToken,
+            onStatus: (text) => setQuantStatus(text),
+          });
+        } catch (browserErr) {
+          // 原因常驻行内（browserDlErrors），状态刷新也不会冲掉；行内小字同步提示
+          browserDlErrors.set(m.id, browserErr?.message || '未知原因');
+          setQuantStatus(`浏览器通道下载失败（${browserErr?.message || '未知原因'}），已自动改用软件直连下载…`, true);
+          await nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
+            token: state.apiKeyAdminToken,
+            body: { quant: quantSelect.value || undefined },
+          });
+        }
+      });
+    // 浏览器通道的“下载中”是可接管的：再点一次就按断点续传（换页面/刷新后尤其
+    // 需要能点）；只有软件直连真在后台下载时才置灰，避免两条通道写同一文件。
+    }, { disabled: !admin || isRunning || isLoading || (!!dl && dl.via !== 'browser') }));
+  }
 
-  if (m.kind === 'hf' && !(m.downloaded || []).length
-    && (m.formats || []).some((f) => f === 'safetensors' || f === 'pytorch')) {
+  const hasLocalSnapshot = (m.downloaded || []).some((d) => d.quant === 'SNAPSHOT');
+  if ((m.kind === 'hf' && !(m.downloaded || []).length
+    && (m.formats || []).some((f) => f === 'safetensors' || f === 'pytorch'))
+    || (m.kind === 'import' && hasLocalSnapshot)) {
     controls.append(mkBtn(m.conversion?.state === 'running' ? '转换中…' : '转换并使用', () => {
       void nativeAction(async () => {
         try {
@@ -3422,7 +3438,8 @@ function buildNativeModelRow(m, admin) {
     }, { disabled: !admin || m.conversion?.state === 'running' }));
   }
 
-  if (m.kind === 'hf' && (m.formats || []).some((f) => ['safetensors', 'pytorch', 'onnx', 'mlx', 'coreml'].includes(f))) {
+  if ((m.kind === 'hf' && (m.formats || []).some((f) => ['safetensors', 'pytorch', 'onnx', 'mlx', 'coreml'].includes(f)))
+    || (m.kind === 'import' && hasLocalSnapshot)) {
     controls.append(mkBtn(m.pythonJob?.state === 'running' ? '本地运行启动中…' : '本地运行（Python）', () => {
       void nativeAction(async () => {
         try {
@@ -4484,6 +4501,57 @@ els.apiNativeUnloadBtn?.addEventListener('click', () => {
   void nativeAction(() => nativeAdminRequest('/api/native/unload', { token: state.apiKeyAdminToken }));
 });
 els.apiHfSearchBtn?.addEventListener('click', () => void runHfSearch());
+els.importFilesBtn?.addEventListener('click', () => els.importFilesInput?.click());
+els.importFolderBtn?.addEventListener('click', () => els.importFolderInput?.click());
+els.importFilesInput?.addEventListener('change', () => void runImport(els.importFilesInput, false));
+els.importFolderInput?.addEventListener('change', () => void runImport(els.importFolderInput, true));
+
+/** 本机导入：把浏览器下载好的文件传进软件，服务器自动识别格式并登记。 */
+async function runImport(input, fromFolder) {
+  const files = [...(input?.files || [])];
+  if (input) input.value = '';
+  if (!files.length) return;
+  if (!state.apiKeyAdminToken) {
+    if (els.importStatus) els.importStatus.textContent = '导入需要先验证管理员口令：点面板顶部的“去验证管理员口令”，验证后回来再选文件。';
+    return;
+  }
+  // 文件夹导入用相对路径（去掉第一层目录名，保留内部结构）；多选文件用文件名
+  const entries = files.map((file) => {
+    let rel = fromFolder ? (file.webkitRelativePath || file.name) : file.name;
+    if (fromFolder && rel.includes('/')) rel = rel.split('/').slice(1).join('/');
+    return { file, path: rel || file.name };
+  }).filter((e) => e.file.size >= 0 && !e.path.endsWith('.DS_Store'));
+  const setProgress = (sent, total) => {
+    const pct = total ? Math.floor((sent / total) * 100) : 0;
+    if (els.importProgressWrap) els.importProgressWrap.hidden = false;
+    if (els.importProgressFill) els.importProgressFill.style.width = `${pct}%`;
+    if (els.importProgressPct) els.importProgressPct.textContent = `${pct}%`;
+    if (els.importProgressLabel) {
+      els.importProgressLabel.textContent = `正在导入：${(sent / 1e9).toFixed(2)} / ${(total / 1e9).toFixed(2)} GB（${pct}%），全程只走本机，关掉页面下次选同一组文件可续传。`;
+    }
+  };
+  if (els.importStatus) els.importStatus.textContent = '正在导入（把文件传进软件，随后自动识别格式）…';
+  try {
+    const out = await importLocalModel({
+      entries,
+      name: els.importNameInput?.value.trim() || undefined,
+      adminToken: state.apiKeyAdminToken,
+      onProgress: setProgress,
+    });
+    if (els.importProgressFill) els.importProgressFill.style.width = '100%';
+    if (els.importProgressPct) els.importProgressPct.textContent = '100%';
+    const routeText = (out.quants || []).length
+      ? `已识别为 GGUF（${out.quants.join('、')}），在下方列表里点“加载”即可使用`
+      : out.snapshot
+        ? '已按原格式快照登记，在下方列表里点“转换并使用”或“本地运行（Python）”即可用'
+        : '已登记';
+    if (els.importStatus) els.importStatus.textContent = `导入完成：${out.name}。${routeText}。`;
+  } catch (err) {
+    if (err.status === 401 && state.apiKeyAdminToken) lockApiKeyManager();
+    if (els.importStatus) els.importStatus.textContent = `导入失败：${err.message} 已传进软件的部分保留，重新选同一组文件会接着传。`;
+  }
+  await refreshNativeStatus();
+}
 els.apiHfSearchInput?.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();

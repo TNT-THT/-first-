@@ -24,6 +24,7 @@ import {
 import { detectFormats, detectVariants, hfModelId, optionsForFormats, routeForFormats, safeDirName } from './formats.js';
 import { downloadFile, fetchModelInfo, fetchRepoFiles, freeDiskBytes, resolveFileUrl, searchModels } from './hf.js';
 import { downloadLlamaBinary, findLlamaBinary, LlamaProcess } from './llama.js';
+import { extractZip } from './archive.js';
 import { findConverter, prepareConverter, runConvert } from './convert.js';
 import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python-runner.js';
 
@@ -66,6 +67,7 @@ export class NativeEngine {
     this.execImpl = execImpl; // 转换/准备工具时注入（测试用）
     this.llama = llama || new LlamaProcess({ fetchImpl, spawnImpl, logger });
     this.downloads = new Map(); // key -> {id, quant, state, downloaded, total, error}
+    this.importSessions = new Map(); // 本地导入会话：importId -> {id, at, declared}
     this.quantCache = new Map(); // repo -> {at, grouped}
     this.binaryJob = null;
     this.conversions = new Map(); // id -> {id, state, error}
@@ -92,7 +94,8 @@ export class NativeEngine {
     try {
       const list = JSON.parse(readFileSync(this._registryPath('custom-models.json'), 'utf8'));
       for (const e of Array.isArray(list) ? list : []) {
-        if (e?.id && e?.repo) this.custom.set(e.id, e);
+        // 本地导入的条目没有 HF 仓库（repo 为空），靠 source 标记识别，别被过滤掉
+        if (e?.id && (e?.repo || e?.source === 'import')) this.custom.set(e.id, e);
       }
     } catch { /* 首次运行没有注册表 */ }
     try {
@@ -148,19 +151,20 @@ export class NativeEngine {
     if (builtin) return { ...builtin, kind: 'catalog' };
     const custom = this.custom.get(key);
     if (custom) {
+      const imported = custom.source === 'import';
       return {
         id: custom.id,
         name: custom.name || custom.repo,
-        vendor: 'Hugging Face',
+        vendor: imported ? '本地导入' : 'Hugging Face',
         paramsB: custom.paramsB || null,
         activeB: null,
         reasoning: false,
-        license: '见仓库说明',
+        license: imported ? '见原始发布说明' : '见仓库说明',
         context: custom.context || 32768,
-        note: '从 Hugging Face 添加的模型。',
-        repo: custom.repo,
+        note: imported ? '从本机文件导入的模型（浏览器下载后导入）。' : '从 Hugging Face 添加的模型。',
+        repo: custom.repo || '',
         formats: custom.formats || [],
-        kind: 'hf',
+        kind: imported ? 'import' : 'hf',
       };
     }
     return null;
@@ -643,8 +647,9 @@ export class NativeEngine {
     this.conversions.set(id, job);
     (async () => {
       try {
-        const snapshotDir = path.join(this.dataDir, 'convert', safeDirName(id), 'snapshot');
-        await this._downloadSnapshotTo(model, snapshotDir);
+        // 本地已有快照（HF 下载过的、或本机导入的）直接用，不碰网络；
+        // 导入模型没有 repo 地址，必须走这条本地短路
+        const snapshotDir = await this._ensureSnapshot(id);
         job.stage = '正在转换（大模型可能需要较久）';
         const outfile = path.join(this.modelDir(id, 'CONVERTED'), 'converted.gguf');
         await runConvert({
@@ -974,6 +979,222 @@ export class NativeEngine {
     job.downloaded = job.total;
     job.error = '';
     return { id, quant: job.quant, state: 'done' };
+  }
+
+  // ---------- 本地导入：浏览器先把文件下到电脑，再导入软件（最稳的一条路） ----------
+  // 浏览器自带下载器下大文件最稳（断点续传、重试都由浏览器管），下完把文件
+  // 交给软件：暂存区收文件（按偏移续传），收齐后自动识别类型落地登记——
+  // GGUF 按量化分档落地、其它权重按快照落地、zip 先解压再识别，用户不用懂格式。
+
+  _importDir(importId) {
+    return path.join(this.dataDir, 'import-staging', safeDirName(importId));
+  }
+
+  _importSession(importId) {
+    const session = this.importSessions?.get(String(importId || ''));
+    if (!session) throw Object.assign(new Error('导入会话不存在或已结束，请重新选择文件导入。'), { status: 404 });
+    return session;
+  }
+
+  /** 开始一次导入：登记文件清单并建暂存区；同一组文件重复开始会接着上次的进度。 */
+  async beginImport(importId, files) {
+    const id = String(importId || '');
+    if (!/^[A-Za-z0-9-]{8,64}$/.test(id)) throw Object.assign(new Error('导入编号不合法。'), { status: 400 });
+    // 顺手清掉一天前的残留会话，别让暂存区越堆越大
+    for (const [key, s] of this.importSessions) {
+      if (Date.now() - s.at > 24 * 3600 * 1000) {
+        this.importSessions.delete(key);
+        await rm(this._importDir(key), { recursive: true, force: true }).catch(() => {});
+      }
+    }
+    const clean = this._safeListFiles(Array.isArray(files) ? files.slice(0, 2000) : []);
+    if (!clean.length) throw Object.assign(new Error('没有收到要导入的文件清单。'), { status: 400 });
+    const dir = this._importDir(id);
+    await mkdir(dir, { recursive: true });
+    const session = { id, at: Date.now(), declared: new Map(clean.map((f) => [f.path, f.size])) };
+    this.importSessions.set(id, session);
+    return this.importSessionStatus(id);
+  }
+
+  /** 导入进度：每个文件已收到的字节（.part 的大小），供断点续传对齐。 */
+  async importSessionStatus(importId) {
+    const session = this._importSession(importId);
+    const dir = this._importDir(session.id);
+    const out = [];
+    for (const [rel, size] of session.declared) {
+      let received = 0;
+      try { received = (await stat(path.join(dir, `${rel}.part`))).size; } catch { received = 0; }
+      out.push({ path: rel, size, received });
+    }
+    return { importId: session.id, files: out };
+  }
+
+  /** 收一片导入数据：偏移必须与已落盘大小一致（409 带真实偏移），防错位写坏文件。 */
+  async writeImportSlice(importId, relPath, expectedOffset, buffer) {
+    const session = this._importSession(importId);
+    if (!this._isSafeRepoPath(relPath) || !session.declared.has(relPath)) {
+      throw Object.assign(new Error(`文件不在本次导入清单里：${relPath}`), { status: 400 });
+    }
+    const part = path.join(this._importDir(session.id), `${relPath}.part`);
+    await mkdir(path.dirname(part), { recursive: true });
+    let current = 0;
+    try { current = (await stat(part)).size; } catch { current = 0; }
+    if (Number.isFinite(expectedOffset) && expectedOffset !== current) {
+      const err = Object.assign(new Error(`写入位置对不上（软件已存 ${current} 字节），已自动按真实位置续传。`), { status: 409 });
+      err.received = current;
+      throw err;
+    }
+    if (buffer?.length) await appendFile(part, buffer);
+    session.at = Date.now();
+    return { received: current + (buffer?.length || 0) };
+  }
+
+  /** 取消导入：清掉暂存文件。 */
+  async cancelImport(importId) {
+    const id = String(importId || '');
+    this.importSessions?.delete(id);
+    await rm(this._importDir(id), { recursive: true, force: true });
+    return { ok: true };
+  }
+
+  /**
+   * 收尾导入：核对完整性 → zip 先解压 → 按内容自动分类落地并登记。
+   * - GGUF：按量化分档（一档一目录 + 清单），下载后可直接加载；
+   * - 其它权重（Safetensors/PyTorch/ONNX…）：整包落为快照，走转换/Python 路线；
+   * - 混合仓库两种都落，两条路线都在。
+   * 全部识别不了才报错，不会把垃圾文件登记成模型。
+   */
+  async finishImport(importId, { name } = {}) {
+    const session = this._importSession(importId);
+    const dir = this._importDir(session.id);
+    // 完整性核对 + .part 转正（清单外多出来的文件一并收编，如 zip 解压产物会再走一轮收集）
+    const landed = [];
+    for (const [rel, size] of session.declared) {
+      const part = path.join(dir, `${rel}.part`);
+      let got = -1;
+      try { got = (await stat(part)).size; } catch { got = -1; }
+      if (size === 0 && got !== 0) {
+        // 零字节文件客户端不会真的发片，直接在暂存区落一个空文件
+        await mkdir(path.dirname(part), { recursive: true });
+        await writeFile(part, '');
+        got = 0;
+      }
+      if (got !== size) {
+        throw Object.assign(new Error(`文件 ${rel} 还没传完整（已收 ${Math.max(0, got)} / ${size} 字节），重新导入同一组文件会接着传。`), { status: 409 });
+      }
+      await rename(part, path.join(dir, rel));
+      landed.push({ path: rel, size });
+    }
+    // zip 先解压再识别（浏览器下的是整包时最常见）：解到暂存根，zip 本身不进模型目录
+    const files = [];
+    for (const f of landed) {
+      if (/\.zip$/i.test(f.path)) {
+        if (f.size > 2 * 1024 * 1024 * 1024) {
+          throw Object.assign(new Error(`压缩包 ${f.path} 超过 2GB，请先在电脑上解压，再用“导入文件夹”导入。`), { status: 413 });
+        }
+        const buf = await readFile(path.join(dir, f.path));
+        await extractZip(buf, dir);
+        await rm(path.join(dir, f.path), { force: true });
+      } else {
+        files.push(f);
+      }
+    }
+    if (landed.some((f) => /\.zip$/i.test(f.path))) {
+      // 解压产物重新收集（跳过苹果系统的 __MACOSX 之类杂物）
+      const walk = async (base, prefix = '') => {
+        for (const entry of await readdir(base, { withFileTypes: true })) {
+          const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (rel.startsWith('__MACOSX/') || entry.name === '.DS_Store') continue;
+          if (entry.isDirectory()) await walk(path.join(base, entry.name), rel);
+          else if (entry.isFile()) files.push({ path: rel, size: (await stat(path.join(base, entry.name))).size });
+        }
+      };
+      const have = new Set(files.map((f) => f.path));
+      const before = files.length;
+      await walk(dir);
+      for (let i = files.length - 1; i >= before; i -= 1) {
+        if (have.has(files[i].path)) files.splice(i, 1);
+      }
+    }
+
+    const cleanFiles = this._safeListFiles(files);
+    const ggufFiles = cleanFiles.filter((f) => /\.gguf$/i.test(f.path) && !/mmproj/i.test(f.path));
+    const mmprojFiles = cleanFiles.filter((f) => /\.gguf$/i.test(f.path) && /mmproj/i.test(f.path));
+    const formats = detectFormats(cleanFiles, {});
+    // 导入的 id/名字：优先用用户填写，其次从文件名推导（去掉量化与分片后缀）
+    const stemOf = (p) => path.basename(p).replace(/\.gguf$/i, '').replace(/-\d{1,5}-of-\d{1,5}$/i, '').replace(/[-.](UD-[A-Z0-9_]+|IQ\d[A-Z0-9_]*|Q\d[A-Z0-9_]*|BF16|F16|F32)$/i, '');
+    const guessName = String(name || '').trim()
+      || (ggufFiles.length ? stemOf(ggufFiles.map((f) => f.path).sort()[0]) : '')
+      || (cleanFiles.find((f) => f.path.includes('/'))?.path.split('/')[0] || '')
+      || (cleanFiles[0] ? path.basename(cleanFiles[0].path).replace(/\.[^.]+$/, '') : '')
+      || 'imported-model';
+    const slug = guessName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'imported-model';
+    let newId = `local/${slug}`;
+    for (let n = 2; this.custom.has(newId) || nativeModelById(newId); n += 1) newId = `local/${slug}-${n}`;
+    const displayName = String(name || '').trim() || guessName;
+
+    const placedQuants = [];
+    let snapshot = false;
+    const moveInto = async (targetDir, list) => {
+      await mkdir(targetDir, { recursive: true });
+      for (const f of list) {
+        const dest = path.join(targetDir, f.path);
+        await mkdir(path.dirname(dest), { recursive: true });
+        await rename(path.join(dir, f.path), dest);
+      }
+    };
+    if (ggufFiles.length) {
+      // 按量化分组；文件名认不出量化标记的按文件名归档，保证一个不落
+      const groups = groupFilesByQuant(ggufFiles);
+      const groupedPaths = new Set(groups.flatMap((g) => g.files.map((f) => f.path)));
+      for (const f of ggufFiles) {
+        if (groupedPaths.has(f.path)) continue;
+        const stem = path.basename(f.path).replace(/\.gguf$/i, '').toUpperCase().replace(/[^A-Z0-9]+/g, '_').slice(0, 40) || 'GGUF';
+        groups.push({ quant: stem, files: [f], totalBytes: f.size });
+      }
+      for (const g of groups) {
+        const qdir = this.modelDir(newId, g.quant);
+        await moveInto(qdir, g.files);
+        await writeFile(
+          path.join(qdir, 'manifest.json'),
+          `${JSON.stringify({ id: newId, quant: g.quant, repo: '', source: 'import', files: g.files, totalBytes: g.totalBytes, downloadedAt: new Date().toISOString() }, null, 2)}\n`,
+        );
+        placedQuants.push(g.quant);
+      }
+      // 视觉投影 mmproj 不进清单（本软件只加载语言部分），但文件跟第一档走，别丢用户下好的东西
+      if (mmprojFiles.length && groups.length) {
+        await moveInto(this.modelDir(newId, groups[0].quant), mmprojFiles);
+      }
+    }
+    const restFiles = cleanFiles.filter((f) => !ggufFiles.includes(f) && !mmprojFiles.includes(f) && !/^(README|\.gitattributes)/i.test(path.basename(f.path)));
+    const weightFiles = restFiles.filter((f) => /\.(safetensors|bin|onnx|pt|pth|npz|mlmodel)$/i.test(f.path) || /\.mlpackage\//i.test(f.path));
+    if (!ggufFiles.length || weightFiles.length) {
+      // 没有 GGUF 时整包做快照；有 GGUF 又混了其它权重时也把其余落成快照（两条路线都在）
+      const snapFiles = ggufFiles.length ? restFiles : cleanFiles.filter((f) => !/^(README|\.gitattributes)/i.test(path.basename(f.path)));
+      // 必须真有非 GGUF 权重才落快照：只有 config/tokenizer 的目录不能登记成模型
+      if (snapFiles.length && weightFiles.length) {
+        const sdir = this.modelDir(newId, 'SNAPSHOT');
+        await moveInto(sdir, snapFiles);
+        const totalBytes = snapFiles.reduce((n, f) => n + f.size, 0);
+        await writeFile(
+          path.join(sdir, 'manifest.json'),
+          `${JSON.stringify({ id: newId, quant: 'SNAPSHOT', repo: '', source: 'import', files: snapFiles, totalBytes, downloadedAt: new Date().toISOString() }, null, 2)}\n`,
+        );
+        snapshot = true;
+      }
+    }
+    if (!placedQuants.length && !snapshot) {
+      throw Object.assign(new Error('在这些文件里没有找到可识别的模型权重（需要 .gguf、.safetensors、.onnx 等权重文件；只有说明文档/配置文件没法当模型用）。'), { status: 400 });
+    }
+    const finalFormats = [...new Set([...(placedQuants.length ? ['gguf'] : []), ...formats])];
+    this.custom.set(newId, {
+      id: newId, repo: '', name: displayName, formats: finalFormats,
+      context: 32768, source: 'import', addedAt: new Date().toISOString(),
+    });
+    await this._persistCustom();
+    this.importSessions.delete(session.id);
+    await rm(dir, { recursive: true, force: true });
+    return { id: newId, name: displayName, kind: 'import', formats: finalFormats, quants: placedQuants, snapshot };
   }
 
   /** 浏览器通道下载-失败标记：保留 .part，下次点下载按偏移续传。 */
