@@ -214,6 +214,54 @@ export function groupFilesByQuant(files) {
   return out;
 }
 
+/**
+ * 给量化档位做小白可读的标注：类型、每权重位宽、是否可直接使用、质量一句话。
+ *
+ * 本软件下载的量化全部是 GGUF：llama.cpp 原生格式，下载完点“加载”即可运行，
+ * 不需要任何转换（与 Safetensors 需要转 GGUF 的路线不同，这里必须说清楚）。
+ * 位宽按档位名的名义位数估算（K 量化/i-quant 的实际平均位宽会略有出入，
+ * 只用于给用户一个量级概念，不参与任何下载/加载逻辑）。
+ */
+export function describeQuant(quant) {
+  const q = String(quant || '').toUpperCase();
+  const dynamic = q.startsWith('UD-');
+  const base = dynamic ? q.slice(3) : q;
+  let bits = null;
+  if (base === 'F32') bits = 32;
+  else if (base === 'F16' || base === 'BF16') bits = 16;
+  else if (base === 'MXFP4') bits = 4;
+  else {
+    const m = base.match(/^(?:I?Q)(\d)/);
+    if (m) bits = Number(m[1]);
+  }
+  const family = dynamic
+    ? 'GGUF 动态量化（按层重要性分配位数）'
+    : base.startsWith('IQ')
+      ? 'GGUF i-quant 量化（重要性矩阵）'
+      : bits !== null && bits >= 16
+        ? 'GGUF 未压缩权重'
+        : 'GGUF K 量化';
+  let qualityNote;
+  if (bits === null) qualityNote = '特殊档位，质量以仓库说明为准。';
+  else if (bits >= 16) qualityNote = '未压缩，质量最好但体积最大、速度最慢。';
+  else if (bits >= 8) qualityNote = '质量几乎无损，体积仍较大。';
+  else if (bits >= 5) qualityNote = '质量很好，体积适中。';
+  else if (bits >= 4) qualityNote = '质量与体积最均衡，最推荐。';
+  else if (bits >= 3) qualityNote = '体积更小，质量略有损失。';
+  else qualityNote = '体积最小，质量损失明显，只适合内存非常紧张时。';
+  return {
+    // 类型：明确是 GGUF（本机引擎原生格式），不是需要再转换的原始权重
+    typeLabel: family,
+    format: 'GGUF',
+    bitsPerWeight: bits,
+    dynamic,
+    // GGUF 是 llama.cpp 原生格式：下载后直接加载运行，不需要转换
+    directUse: true,
+    useNote: '下载后可直接加载使用（GGUF 是本机引擎的原生格式，不用转换）',
+    qualityNote,
+  };
+}
+
 /** 从分组结果里挑推荐量化：偏好表命中优先，否则取体积中位的一档。 */
 export function pickDefaultQuant(grouped) {
   if (!grouped?.length) return null;

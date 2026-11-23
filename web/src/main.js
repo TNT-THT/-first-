@@ -83,7 +83,7 @@ import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAcc
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
 import { pendingModels } from './pending-models.js';
 import { clearApiAdminSession, loadApiAdminSession, saveApiAdminSession } from './api-admin-auth.js';
-import { downloadModelViaBrowser, fetchNativeQuants, fetchNativeStatus, fetchQuantsViaBrowser, hfModelInfo, hfSearch, nativeAdminRequest } from './engines/native-client.js';
+import { downloadModelViaBrowser, fetchModelInfoViaBrowser, fetchNativeQuants, fetchNativeStatus, fetchQuantsViaBrowser, hfModelInfo, hfSearch, nativeAdminRequest, searchHfViaBrowser, useRepoViaBrowser } from './engines/native-client.js';
 import { DEFAULT_PRESET_ID, findPreset, getPresetId, layerParams, PRESETS, presetOverrides, setPresetId } from './presets.js';
 import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
@@ -3258,7 +3258,7 @@ function buildNativeModelRow(m, admin) {
   for (const d of m.downloaded || []) {
     const opt = document.createElement('option');
     opt.value = d.quant;
-    opt.textContent = `${d.quant}（已下载 · ${(d.totalBytes / 1e9).toFixed(1)} GB）`;
+    opt.textContent = `${d.quant}（${d.typeLabel || 'GGUF'} · 已下载 · ${(d.totalBytes / 1e9).toFixed(1)} GB · ${d.directUse === false ? '需转换后使用' : '可直接使用'}）`;
     quantSelect.append(opt);
   }
   controls.append(quantSelect);
@@ -3301,15 +3301,16 @@ function buildNativeModelRow(m, admin) {
       quantSelect.replaceChildren(placeholder, ...(m.downloaded || []).map((d) => {
         const opt = document.createElement('option');
         opt.value = d.quant;
-        opt.textContent = `${d.quant}（已下载 · ${(d.totalBytes / 1e9).toFixed(1)} GB）`;
+        opt.textContent = `${d.quant}（${d.typeLabel || 'GGUF'} · 已下载 · ${(d.totalBytes / 1e9).toFixed(1)} GB · ${d.directUse === false ? '需转换后使用' : '可直接使用'}）`;
         return opt;
       }), ...quants.filter((q) => !(m.downloaded || []).some((d) => d.quant === q.quant)).map((q) => {
         const opt = document.createElement('option');
         opt.value = q.quant;
-        opt.textContent = `${q.quant} · ${q.sizeGB} GB · 内存约 ${q.ramGB} GB`;
+        opt.textContent = `${q.quant}（${q.typeLabel || 'GGUF 量化'}）· ${q.sizeGB} GB · 内存约 ${q.ramGB} GB · ${q.directUse === false ? '需要转换后才能用' : '下载后可直接使用'}`;
+        opt.title = `${q.qualityNote || ''}${q.useNote || ''}`;
         return opt;
       }));
-      setQuantStatus(`已读取 ${quants.length} 个量化（${viaBrowser ? '经浏览器通道读取' : '经软件直连读取'}）：在左边下拉里选一档，再点“下载所选量化”。`);
+      setQuantStatus(`已读取 ${quants.length} 个量化（${viaBrowser ? '经浏览器通道读取' : '经软件直连读取'}）：每档都标了类型、大小和是否可直接使用，在左边下拉里选一档，再点“下载所选量化”。`);
       if (els.apiNativeError) els.apiNativeError.textContent = '';
     } catch (err) {
       placeholder.textContent = (m.downloaded || []).length ? '选择量化（已下载的排在前面）' : '先获取量化列表';
@@ -3341,7 +3342,9 @@ function buildNativeModelRow(m, admin) {
         });
       }
     });
-  }, { disabled: !admin || isRunning || isLoading || !!dl }));
+  // 浏览器通道的“下载中”是可接管的：再点一次就按断点续传（换页面/刷新后尤其
+  // 需要能点）；只有软件直连真在后台下载时才置灰，避免两条通道写同一文件。
+  }, { disabled: !admin || isRunning || isLoading || (!!dl && dl.via !== 'browser') }));
 
   if (m.kind === 'hf' && !(m.downloaded || []).length
     && (m.formats || []).some((f) => f === 'safetensors' || f === 'pytorch')) {
@@ -3530,13 +3533,20 @@ function hfRouteGuess(formats = []) {
 async function runHfSearch() {
   if (!els.apiHfResults) return;
   const q = els.apiHfSearchInput?.value.trim() || '';
-  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = '正在搜索 Hugging Face…';
+  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = '正在搜索 Hugging Face（经浏览器，和网页版同一条网络路）…';
   try {
-    const data = await hfSearch(q, getToken());
+    let data;
+    let viaBrowser = true;
+    try {
+      data = await searchHfViaBrowser(q, getToken());
+    } catch {
+      viaBrowser = false;
+      data = await hfSearch(q, getToken());
+    }
     hfSearchResults = data.results || [];
     if (els.apiHfSearchStatus) {
       els.apiHfSearchStatus.textContent = hfSearchResults.length
-        ? `找到 ${hfSearchResults.length} 个模型，点“一键使用”即可（系统自动按格式处理）。`
+        ? `找到 ${hfSearchResults.length} 个模型（${viaBrowser ? '经浏览器通道' : '经软件直连'}搜索），点“一键使用”即可（系统自动按格式处理）。`
         : '没有找到相关模型，换个关键词试试（如 Qwen、Llama、Mistral）。';
     }
     renderHfResults();
@@ -3584,10 +3594,18 @@ function renderHfResults() {
       controls.append(mkBtn('云端使用', () => void hfUseRepo(r.repo, 'cloud'), !admin));
       controls.append(mkBtn('查看详情', async () => {
         detail.hidden = false;
-        detail.textContent = '正在读取仓库文件与格式…';
+        detail.textContent = '正在读取仓库文件与格式（经浏览器读取）…';
         try {
-          const info = await hfModelInfo(r.repo, getToken());
-          detail.textContent = `${info.route.label}：${info.route.detail} 格式：${info.formats.join('/') || '未知'}${info.variants?.length ? `（${info.variants.join('/')}）` : ''}；仓库共 ${info.totalGB} GB。文件示例：${info.files.slice(0, 5).map((f) => f.path).join('、')}`;
+          let info;
+          try {
+            info = await fetchModelInfoViaBrowser(r.repo, getToken());
+          } catch {
+            info = await hfModelInfo(r.repo, getToken());
+          }
+          const quantText = (info.quants || []).length
+            ? ` 可选量化：${info.quants.map((x) => `${x.quant}（${x.typeLabel}，${x.sizeGB} GB，${x.directUse ? '下载后可直接使用' : '需要转换'}）`).join('；')}。`
+            : '';
+          detail.textContent = `${info.route.label}：${info.route.detail} 格式：${info.formats.join('/') || '未知'}${info.variants?.length ? `（${info.variants.join('/')}）` : ''}；仓库共 ${info.totalGB} GB。${quantText}文件示例：${info.files.slice(0, 5).map((f) => f.path).join('、')}`;
         } catch (err) {
           detail.textContent = `读取失败：${err.message}`;
         }
@@ -3606,11 +3624,31 @@ function renderHfResults() {
 
 /** 使用 HF 模型：mode = auto（一键）| local（下载到本地）| cloud（云端，不下载）。 */
 async function hfUseRepo(repo, mode = 'auto') {
-  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `正在处理 ${repo}…`;
+  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `正在处理 ${repo}（优先经浏览器，和网页版同一条网络路）…`;
   try {
-    const out = await nativeAdminRequest('/api/native/hf/use', { token: state.apiKeyAdminToken, body: { repo, mode } });
+    let out;
+    let downloadState = 'none';
+    try {
+      const via = await useRepoViaBrowser({
+        repo,
+        mode,
+        adminToken: state.apiKeyAdminToken,
+        onStatus: (text) => { if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = text; },
+      });
+      out = via.out;
+      downloadState = via.downloadState;
+    } catch {
+      // 浏览器通道不可用才回退软件直连（直连不通时错误会如实显示在下方）
+      out = await nativeAdminRequest('/api/native/hf/use', { token: state.apiKeyAdminToken, body: { repo, mode } });
+    }
     if (out.action === 'download') {
-      els.apiHfSearchStatus.textContent = `已开始下载 ${repo}（${out.quant || '推荐量化'}），进度在下方模型列表里看；下载完成并加载后，就能在聊天页模型选择里用它。`;
+      if (downloadState === 'browser') {
+        els.apiHfSearchStatus.textContent = `${repo}（${out.quant || '推荐量化'}）已通过浏览器通道下载完成，下方模型列表里点“加载”即可使用；之后在聊天页模型选择里也能选它。`;
+      } else if (downloadState === 'fallback') {
+        els.apiHfSearchStatus.textContent = `浏览器通道不可用，已改用软件直连下载 ${repo}（${out.quant || '推荐量化'}），进度在下方模型列表里看。`;
+      } else {
+        els.apiHfSearchStatus.textContent = `已开始下载 ${repo}（${out.quant || '推荐量化'}），进度在下方模型列表里看；下载完成并加载后，就能在聊天页模型选择里用它。`;
+      }
     } else if (out.action === 'convert') {
       if (out.converterReady) {
         await nativeAdminRequest('/api/native/hf/convert', { token: state.apiKeyAdminToken, body: { id: out.id } });

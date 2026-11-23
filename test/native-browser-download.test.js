@@ -159,3 +159,78 @@ test('浏览器通道：清单分组、全链下载、续传、错位保护、�
   // 恶意文件没有落到任何地方
   await assert.rejects(() => stat(path.join(engine.modelDir(MODEL_ID), 'evil-Q8_0.gguf')));
 });
+
+test('浏览器通道：大仓库文件树不再被 256KB 上限拒绝，量化带类型与可直接使用标注', { timeout: 60000 }, async (t) => {
+  const { base } = await setup(t);
+  const session = await login(base, '/api/login', PASSWORD);
+  // 2500 个文件的仓库（请求体 > 300KB）：历史上这里被 express 256KB 上限直接 413，
+  // 用户只能回退到连不通的软件直连，表现为“量化列表/下载都用不了”。
+  const bigTree = [];
+  for (let i = 0; i < 2500; i += 1) {
+    bigTree.push({ path: `some/very/long/directory/name/file-${i}-Q4_K_M.gguf`, size: 100 + i, sha256: 'a'.repeat(64) });
+  }
+  const body = JSON.stringify({ files: bigTree });
+  assert.ok(body.length > 256 * 1024, `测试前提：请求体确已超过 256KB（${body.length}）`);
+  const preview = await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/quants-preview`, {
+    method: 'POST', headers: auth(session), body,
+  });
+  assert.equal(preview.status, 200);
+  const data = await preview.json();
+  assert.equal(data.quants.length, 1);
+  assert.equal(data.quants[0].quant, 'Q4_K_M');
+  assert.match(data.quants[0].typeLabel, /GGUF/);
+  assert.equal(data.quants[0].bitsPerWeight, 4);
+  assert.equal(data.quants[0].directUse, true);
+  assert.match(data.quants[0].useNote, /直接加载/);
+});
+
+test('浏览器通道：页面关掉后任务不再假装下载中，直连不返回假任务', { timeout: 60000 }, async (t) => {
+  const { base, engine } = await setup(t);
+  const admin = await login(base, '/api/admin/api-keys/login', ADMIN);
+  const files = [{ path: 'Qwen3-32B-Q4_K_M.gguf', size: 10, sha256: '' }];
+
+  // 准备并传 4 字节，然后“关页面”：客户端的 fail 通知发不出来
+  const prep = await (await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/browser-download/prepare`, {
+    method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M', files }),
+  })).json();
+  assert.equal(prep.state, 'downloading');
+  const c1 = await postChunk(base, admin, { offset: 0, bytes: CONTENT.subarray(0, 4) });
+  assert.equal(c1.status, 200);
+
+  // 浏览器通道活跃时，直连不许抢同一份文件（更不许返回浏览器任务假装直连在下载）
+  const conflict = await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/download`, {
+    method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M' }),
+  });
+  assert.equal(conflict.status, 409);
+
+  // 模拟 3 分钟无人续传（把最后收块时间拨到过去）
+  const job = engine.downloads.get(`${MODEL_ID}@Q4_K_M`);
+  assert.ok(job, '应有浏览器通道任务');
+  job.lastChunkAt = Date.now() - 10 * 60 * 1000;
+
+  // 状态接口：任务转成可重试的中断状态，且不把内部结构（entry/Map）吐给前端
+  const st = await (await fetch(`${base}/api/native/status`)).json();
+  const dl = st.models.find((m) => m.id === MODEL_ID).downloads.find((d) => d.quant === 'Q4_K_M');
+  assert.equal(dl.state, 'error');
+  assert.match(dl.error, /续传/);
+  assert.equal(dl.via, 'browser');
+  assert.equal('entry' in dl, false);
+  assert.equal('receivedByFile' in dl, false);
+
+  // 此时再走直连：必须是新的服务端任务（不能再返回那个假“下载中”）
+  const direct = await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/download`, {
+    method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M' }),
+  });
+  assert.equal(direct.status, 202);
+  // 测试桩里直连下载必失败，最终应落到 error 且通道不再标 browser
+  const deadline = Date.now() + 10000;
+  let last;
+  while (Date.now() < deadline) {
+    const s = await (await fetch(`${base}/api/native/status`)).json();
+    last = s.models.find((m) => m.id === MODEL_ID).downloads.find((d) => d.quant === 'Q4_K_M');
+    if (last && last.state === 'error' && last.via === 'server') break;
+    await new Promise((r) => setTimeout(r, 120));
+  }
+  assert.equal(last.state, 'error');
+  assert.equal(last.via, 'server');
+});
