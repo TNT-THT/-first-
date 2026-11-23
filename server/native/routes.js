@@ -5,6 +5,8 @@
  * - POST   /api/native/chat              网页聊天转发（需网站登录，自动加载已下载模型）
  * - POST   /api/native/binary            准备 llama.cpp 运行库（需 API 管理员）
  * - POST   /api/native/models/:id/download 下载权重（需 API 管理员）
+ * - POST   /api/native/models/:id/quants-preview 浏览器取到文件树后在本地分组（需网站登录）
+ * - POST   /api/native/models/:id/browser-download/* 浏览器取数、软件落盘的下载通道（需 API 管理员）
  * - DELETE /api/native/models/:id        删除权重（需 API 管理员）
  * - POST   /api/native/load | /unload    加载/卸载模型（需 API 管理员）
  *
@@ -165,6 +167,88 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
     try {
       const job = await engine.download(req.params.id, req.body?.quant);
       return res.status(202).json({ id: job.id, quant: job.quant, state: job.state });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  // 浏览器通道（与普通网页版同一条网络路）：量化清单由浏览器取文件树、
+  // 软件只负责分组计算，服务端直连 HF 失败时不再一上来就死。
+  app.post('/api/native/models/:id/quants-preview', requireSession, async (req, res) => {
+    try {
+      const model = engine.resolveModel(req.params.id);
+      if (!model) return res.status(404).json({ error: `未知模型：${req.params.id}` });
+      const files = Array.isArray(req.body?.files) ? req.body.files : [];
+      const grouped = engine.groupQuantsFromFiles(req.params.id, files);
+      return res.json({
+        id: model.id,
+        quants: grouped.map((g) => ({
+          quant: g.quant,
+          files: g.files.length,
+          totalBytes: g.totalBytes,
+          sizeGB: Math.round((g.totalBytes / 1e9) * 10) / 10,
+          ramGB: estimateRamGB(g.totalBytes),
+        })),
+      });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  // 浏览器通道下载：浏览器把权重字节分块传给软件，软件按偏移 append 到
+  // .part 并在收尾时核对大小转正。断网/关页面后再点下载按偏移续传。
+  app.post('/api/native/models/:id/browser-download/prepare', requireAdmin, async (req, res) => {
+    try {
+      const out = await engine.prepareBrowserDownload(req.params.id, req.body?.quant, req.body?.files);
+      return res.json(out);
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/models/:id/browser-download/chunk', requireAdmin, async (req, res) => {
+    try {
+      const file = decodeURIComponent(String(req.get('x-bd-file') || ''));
+      const quant = String(req.get('x-bd-quant') || '');
+      const expected = Number(req.get('x-bd-offset'));
+      const parts = [];
+      let total = 0;
+      for await (const chunk of req) {
+        total += chunk.length;
+        if (total > 64 * 1024 * 1024) {
+          return res.status(413).json({ error: '单块过大，请更新软件后重试。' });
+        }
+        parts.push(chunk);
+      }
+      const out = await engine.receiveBrowserChunk(
+        req.params.id,
+        quant,
+        file,
+        Number.isFinite(expected) ? expected : undefined,
+        Buffer.concat(parts),
+      );
+      return res.json(out);
+    } catch (err) {
+      if (Number.isFinite(err?.received)) {
+        return res.status(Number.isInteger(err.status) ? err.status : 409)
+          .json({ error: err.message, received: err.received });
+      }
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/models/:id/browser-download/finish', requireAdmin, async (req, res) => {
+    try {
+      const out = await engine.finishBrowserDownload(req.params.id, req.body?.quant);
+      return res.json(out);
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/models/:id/browser-download/fail', requireAdmin, async (req, res) => {
+    try {
+      return res.json(engine.failBrowserDownload(req.params.id, req.body?.quant, req.body?.error));
     } catch (err) {
       return errJson(res, err);
     }
