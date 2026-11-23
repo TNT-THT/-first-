@@ -219,20 +219,30 @@ export async function fetchNativeQuants(id, token, { timeoutMs = 40000 } = {}) {
 const HF_WEB_BASE = 'https://huggingface.co';
 
 /** 浏览器直连 HF 文件树，归一化为与服务端 fetchRepoFiles 一致的清单。 */
-export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = fetch, timeoutMs = 30000 } = {}) {
-  const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
-    ? AbortSignal.timeout(timeoutMs)
-    : undefined;
+export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = fetch, timeoutMs = 60000 } = {}) {
+  const url = `${HF_WEB_BASE}/api/models/${repo}/tree/main?recursive=true`;
   let res;
-  try {
-    res = await fetchImpl(`${HF_WEB_BASE}/api/models/${repo}/tree/main?recursive=true`, {
-      headers: { accept: 'application/json' },
-      cache: 'no-store',
-      signal,
-    });
-  } catch (err) {
+  let lastErr = null;
+  // 大仓库的文件树不小、慢代理下 30 秒经常不够：放宽到 60 秒，网络失败自动重试一次
+  for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
+    const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
+      ? AbortSignal.timeout(timeoutMs)
+      : undefined;
+    try {
+      res = await fetchImpl(url, {
+        headers: { accept: 'application/json' },
+        cache: 'no-store',
+        signal,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 0) await new Promise((r) => setTimeout(r, 1200));
+    }
+  }
+  if (!res) {
+    const err = lastErr;
     if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
-      throw new Error('浏览器连接 Hugging Face 超时，请检查网络/代理后重试。');
+      throw new Error('浏览器连接 Hugging Face 超时（仓库较大或网络较慢），请检查网络/代理后重试。');
     }
     throw new Error(`浏览器无法连接 Hugging Face（${err?.message || '网络错误'}）。`);
   }
@@ -278,7 +288,7 @@ function slimFiles(files, { ggufOnly = false } = {}) {
 }
 
 /** 量化列表（浏览器通道）：浏览器取文件树 → 本地服务分组 → 返回量化列表。 */
-export async function fetchQuantsViaBrowser({ id, repo, token, fetchImpl = fetch, timeoutMs = 30000 } = {}) {
+export async function fetchQuantsViaBrowser({ id, repo, token, fetchImpl = fetch, timeoutMs = 60000 } = {}) {
   const files = slimFiles(await fetchRepoTreeViaBrowser(repo, { fetchImpl, timeoutMs }), { ggufOnly: true });
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
@@ -391,14 +401,36 @@ async function downloadOneFileViaBrowser(ctx) {
         const data = mergeParts(parts, partsBytes);
         parts = [];
         partsBytes = 0;
-        const out = await postDownloadChunk({ ...ctx, filePath: file.path, offset: sent, data });
-        if (out.received !== sent + data.length) {
-          const err = new Error('软件确认的落盘位置对不上，自动校准后重试。');
-          err.received = out.received;
-          throw err;
+        // 同一块字节就地重试：写本地服务偶发失败（连接抖动、响应丢失）不该连累
+        // 已经从 HF 拉到的这一块回炉重读。服务端按偏移落盘是幂等的：若字节其实
+        // 已写入只是响应丢了，重试会收到 409 并带回真实落盘位置，对上账就算成功。
+        let postError = null;
+        for (let postAttempt = 0; postAttempt < 3; postAttempt += 1) {
+          try {
+            const out = await postDownloadChunk({ ...ctx, filePath: file.path, offset: sent, data });
+            if (out.received !== sent + data.length) {
+              const err = new Error('软件确认的落盘位置对不上，自动校准后重试。');
+              err.received = out.received;
+              throw err;
+            }
+            sent = out.received;
+            onProgress?.(sent);
+            return;
+          } catch (err) {
+            if (Number.isFinite(err?.received)) {
+              if (err.received === sent + data.length) {
+                // 字节已落盘、只是成功响应丢了：认账，不重传
+                sent = err.received;
+                onProgress?.(sent);
+                return;
+              }
+              throw err; // 真错位：交给外层按真实偏移校准续传
+            }
+            postError = err;
+            if (postAttempt < 2) await new Promise((r) => setTimeout(r, 500 * (postAttempt + 1)));
+          }
         }
-        sent = out.received;
-        onProgress?.(sent);
+        throw postError || new Error('把数据写入软件失败，请重试。');
       };
       for (;;) {
         const { done, value } = await reader.read();
@@ -442,7 +474,7 @@ export async function downloadModelViaBrowser({
   id, repo, quant, adminToken, onStatus,
   // 一块 2MB：足够大到不让本地请求次数爆炸，又足够细——慢网下也几秒就跳一次进度，
   // 不至于攒 8MB 才出现第一个百分比，用户误以为“没有下载进度”。
-  fetchImpl = fetch, treeTimeoutMs = 30000, chunkBytes = 2 * 1024 * 1024, retryDelayMs,
+  fetchImpl = fetch, treeTimeoutMs = 60000, chunkBytes = 2 * 1024 * 1024, retryDelayMs,
 } = {}) {
   const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
   note('正在经浏览器读取仓库文件列表（和网页版同一条网络路）…');

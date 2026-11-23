@@ -3155,6 +3155,10 @@ async function refreshBridgeStatus() {
 let nativeRefreshTimer = null;
 // 下载速度采样：<模型@量化> 上次状态刷新时的已下载字节与时刻，用差值估算速度/剩余时间
 const dlSpeedSamples = new Map();
+// 浏览器通道最近一次失败原因（按模型 id）：行内小字会被状态刷新重建冲掉，
+// 把原因存这里随行渲染，用户（和排障）才看得到浏览器通道到底死在哪一步，
+// 而不是永远只剩回退直连的那句报错。
+const browserDlErrors = new Map();
 
 /** 拉取本机大模型状态并刷新下拉框与管理面板；静态版没有该接口，自动保持隐藏。 */
 async function refreshNativeStatus() {
@@ -3248,6 +3252,14 @@ function buildNativeModelRow(m, admin) {
     err.className = 'error small';
     err.textContent = `下载 ${dlError.quant} 失败：${dlError.error || '未知错误'}（重新点下载可续传）`;
     row.append(err);
+  }
+  // 浏览器通道的失败原因常驻这一行（不被状态刷新冲掉）：这才是离用户网络最近的一手原因
+  const browserErr = browserDlErrors.get(m.id);
+  if (browserErr) {
+    const bErr = document.createElement('p');
+    bErr.className = 'error small';
+    bErr.textContent = `浏览器通道上次失败：${browserErr} 已下载的部分都保留，重新点下载会接着下；把这句原因发给客服/开发者最能定位问题。`;
+    row.append(bErr);
   }
   if (m.conversion) {
     const conv = document.createElement('p');
@@ -3369,6 +3381,7 @@ function buildNativeModelRow(m, admin) {
     void nativeAction(async () => {
       // 与普通网页版同一条网络路：浏览器负责从 Hugging Face 取数（自动走
       // 浏览器/系统代理），软件只落盘。浏览器通道不可用时自动回退软件直连。
+      browserDlErrors.delete(m.id);
       try {
         await downloadModelViaBrowser({
           id: m.id,
@@ -3378,7 +3391,8 @@ function buildNativeModelRow(m, admin) {
           onStatus: (text) => setQuantStatus(text),
         });
       } catch (browserErr) {
-        // 把浏览器通道失败的真实原因亮出来，不能只剩直连回退的一句报错
+        // 原因常驻行内（browserDlErrors），状态刷新也不会冲掉；行内小字同步提示
+        browserDlErrors.set(m.id, browserErr?.message || '未知原因');
         setQuantStatus(`浏览器通道下载失败（${browserErr?.message || '未知原因'}），已自动改用软件直连下载…`, true);
         await nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
           token: state.apiKeyAdminToken,
