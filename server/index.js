@@ -28,9 +28,34 @@ const __dirname = import.meta.url && String(import.meta.url).startsWith('file:')
   ? path.dirname(fileURLToPath(import.meta.url))
   : path.resolve(typeof __filename === 'string' ? path.dirname(__filename) : process.cwd());
 // 网站包里静态版与服务版网页共存（web/dist 与 web/dist-api），可用 OJ_WEB_DIST 指定服务版目录。
-const WEB_DIST = process.env.OJ_WEB_DIST
-  ? path.resolve(process.cwd(), process.env.OJ_WEB_DIST)
-  : path.resolve(__dirname, '..', 'web', 'dist');
+// 注意不能在模块加载时定死：独立软件启动器是在运行时才确定网页目录的（经 loadConfig 传入）。
+// 解析顺序：配置显式指定 → 环境变量 → server 同级的现成构建产物（dist-api 优先，其次 dist）。
+// 任何情况下用户都不需要、也不应该被要求先去执行构建命令。
+// 界面文件缺失时的兜底页（正常安装包不会走到这里）：只给用户看得懂的说明，绝不出现开发命令。
+export const MISSING_WEB_HTML =
+  '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
+  '<title>LLM托管平台——天蓝色1.0</title></head>' +
+  '<body style="font-family:system-ui,-apple-system,sans-serif;padding:2rem;line-height:1.8;color:#123">' +
+  '<h1>软件已启动，但界面文件不完整</h1>' +
+  '<p>这不是你的操作有问题：当前这份程序缺少网页界面文件。请从发布页面重新下载完整版本' +
+  '（Windows 单文件版 exe 或完整压缩包），双击即可使用，不需要安装任何东西，也不需要执行任何命令。</p>' +
+  '<p>接口服务本身可用：<code>/v1</code>（OpenAI 兼容 API）、<code>/api/docs</code>（接入说明）。</p>' +
+  '</body></html>';
+
+export function resolveWebDist({ webDist = '', env = process.env, baseDir = __dirname, exists = existsSync } = {}) {
+  const candidates = [];
+  const push = (p) => { if (p && !candidates.includes(p)) candidates.push(p); };
+  if (webDist) push(path.resolve(webDist));
+  if (env.OJ_WEB_DIST) push(path.resolve(env.OJ_WEB_DIST));
+  push(path.resolve(baseDir, '..', 'web', 'dist-api'));
+  push(path.resolve(baseDir, '..', 'web', 'dist'));
+  for (const dir of candidates) {
+    try {
+      if (exists(path.join(dir, 'index.html'))) return dir;
+    } catch { /* 试下一个候选 */ }
+  }
+  return candidates[0];
+}
 
 /** 简单的内存登录限流：每个 IP 15 分钟内最多 10 次失败尝试。 */
 function createLoginLimiter({ windowMs = 15 * 60 * 1000, max = 10 } = {}) {
@@ -794,9 +819,10 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
   );
 
   // ---- 前端静态资源 ----
-  if (existsSync(WEB_DIST)) {
+  const webDist = resolveWebDist({ webDist: cfg.webDist });
+  if (existsSync(path.join(webDist, 'index.html'))) {
     app.use(
-      express.static(WEB_DIST, {
+      express.static(webDist, {
         index: false,
         setHeaders(res, filePath) {
           if (filePath.endsWith('index.html')) res.setHeader('Cache-Control', 'no-cache');
@@ -809,12 +835,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
     app.get('*', (req, res, next) => {
       if (req.path.startsWith('/api/') || req.path.startsWith('/v1/')) return next();
       res.setHeader('Cache-Control', 'no-cache');
-      res.sendFile(path.join(WEB_DIST, 'index.html'));
+      res.sendFile(path.join(webDist, 'index.html'));
     });
   } else {
-    app.get('/', (_req, res) =>
-      res.type('text/plain').send('前端尚未构建，请先执行 npm run build:remote')
-    );
+    // 兜底：界面文件真的缺失时给用户看得懂的说明，绝不要求用户执行开发命令。
+    app.get('/', (_req, res) => res.type('html').send(MISSING_WEB_HTML));
   }
 
   app.use((err, req, res, _next) => {

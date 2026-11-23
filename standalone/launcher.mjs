@@ -9,10 +9,12 @@
  *    + OpenAI 兼容 /v1 API + 管理员面板与用量统计），功能与原网站包完全一致；
  * 4. 自动打开浏览器。关闭窗口即停止服务。
  *
- * 端口默认 3210（被占用时自动顺延）；OJ_PORT / PORT 可指定，OJ_NO_OPEN_BROWSER=1
- * 时不自动打开浏览器，OJ_DATA_DIR 可指定数据目录。
+ * 端口默认 3210（被占用时自动顺延）；OJ_PORT / PORT 可指定，OJ_DATA_DIR 可
+ * 指定数据目录。界面在独立软件窗口中打开（Edge/Chrome 的应用窗口模式，不是
+ * 浏览器标签页）；OJ_OPEN_MODE=browser 改用默认浏览器，=none 或
+ * OJ_NO_OPEN_BROWSER=1 时不自动打开任何窗口。
  */
-import { spawn } from 'node:child_process';
+import { openAppWindow } from './app-window.mjs';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -101,27 +103,8 @@ async function prepareAppRoot(dataDir, sea) {
   return appDir;
 }
 
-async function openBrowser(url) {
-  if (process.env.OJ_NO_OPEN_BROWSER === '1') return;
-  const [command, args] = process.platform === 'win32'
-    ? ['cmd', ['/c', 'start', '', url]]
-    : process.platform === 'darwin'
-      ? ['open', [url]]
-      : ['xdg-open', [url]];
-  try {
-    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
-    child.once('error', () => {});
-    child.unref();
-  } catch {
-    /* 打不开浏览器不影响服务，用户可手动访问 */
-  }
-}
 
 async function main() {
-  const { createApp } = await import('../server/index.js');
-  const { loadConfig } = await import('../server/config.js');
-  const { BrowserModelBridge } = await import('../server/browser-model-bridge.js');
-  const { NativeEngine } = await import('../server/native/engine.js');
   const { createServer } = await import('node:http');
 
   const sea = seaAssets();
@@ -129,6 +112,14 @@ async function main() {
   await mkdir(dataDir, { recursive: true });
   const appRoot = await prepareAppRoot(dataDir, sea);
   const { data: credentials, created } = await loadCredentials(dataDir);
+
+  // 必须在加载服务端模块之前确定网页目录：服务端既读配置也可能读环境变量，
+  // 两个通道都给到同一个值，软件开箱即有界面，绝不让用户先跑任何构建命令。
+  process.env.OJ_WEB_DIST = path.join(appRoot, 'web', 'dist-api');
+  const { createApp } = await import('../server/index.js');
+  const { loadConfig } = await import('../server/config.js');
+  const { BrowserModelBridge } = await import('../server/browser-model-bridge.js');
+  const { NativeEngine } = await import('../server/native/engine.js');
 
   const startPort = Number(process.env.OJ_PORT || process.env.PORT || 3210);
   const env = {
@@ -174,7 +165,9 @@ async function main() {
   console.log(`  数据目录：${dataDir}（凭据 credentials.json、模型权重 native/ 都在这里）`);
   if (created) console.log('  以上口令为首次运行自动生成并已保存，之后启动不会变化。');
   console.log('  关闭本窗口即停止服务。');
-  await openBrowser(url);
+  const plan = openAppWindow(url);
+  if (plan.kind === 'app') console.log('  已在独立软件窗口中打开（如未看到窗口，可手动用浏览器打开上面的地址）。');
+  else if (plan.kind === 'browser') console.log('  已在浏览器中打开（如未打开，可手动访问上面的地址）。');
 
   const shutdown = async () => {
     await nativeEngine.unload().catch(() => {});

@@ -58,6 +58,9 @@ export function loadConfig(env = process.env) {
     apiAdminPassword: env.API_ADMIN_PASSWORD || '',
     // 网页创建的 API Key 只保存摘要；该文件/目录需要持久化备份，并限制仅服务器用户可读。
     apiKeysFile: path.resolve(env.API_KEYS_FILE || path.join(process.cwd(), 'data', 'api-keys.json')),
+    // 服务版网页目录：独立软件/网站包启动器显式传入（OJ_WEB_DIST）。
+    // 留空时服务端自动按 web/dist-api → web/dist 找现成构建产物，用户无需执行任何构建命令。
+    webDist: env.OJ_WEB_DIST || '',
     // 管理员控制台修改的服务端模型参数持久化文件（API Key 以 0600 权限保存，不会由管理 API 回传）。
     apiSettingsFile: path.resolve(env.API_SETTINGS_FILE || path.join(process.cwd(), 'data', 'api-settings.json')),
     // API 用量统计持久化文件（只存按模型聚合的计数与定长近期日志，不含请求内容）。
