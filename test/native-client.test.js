@@ -450,6 +450,57 @@ test('fetchQuantsViaBrowser：文件树第一次拉取断网时自动重试一�
   assert.equal(treeCalls, 2);
 });
 
+test('浏览器身份校验模拟：默认 fetch 被经对象转手调用也不许 Illegal invocation', async () => {
+  // 真实根因回归测试：Chrome 的原生 fetch 必须以 window 身份调用，经普通
+  // 对象转手（ctx.fetchImpl(...)）会抛 “Failed to execute 'fetch' on
+  // 'Window': Illegal invocation”——浏览器通道过去在真机上每次拉权重都
+  // 死在这一步，而 Node 的 fetch 没有身份检查、普通桩测不出来。
+  // 这里给全局 fetch 套上同样的身份校验，走默认参数入口全程下载一遍。
+  const originalFetch = globalThis.fetch;
+  const fileUrl = 'https://huggingface.co/acme/Tiny-GGUF/resolve/main/Tiny-Q4_K_M.gguf';
+  let received = 0;
+  let finished = false;
+  const backend = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify([{ type: 'file', path: 'Tiny-Q4_K_M.gguf', lfs: { size: 6 } }]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === fileUrl) return new Response('ABCDEF', { status: 200 });
+    if (u.includes('/browser-download/prepare')) {
+      return new Response(JSON.stringify({ id: 'm', quant: 'Q4_K_M', state: 'downloading', total: 6, files: [{ path: 'Tiny-Q4_K_M.gguf', size: 6, url: fileUrl, offset: 0, done: false }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/browser-download/chunk')) {
+      const bytes = new Uint8Array(await new Response(opts.body).arrayBuffer());
+      received += bytes.length;
+      return new Response(JSON.stringify({ received, downloaded: received, total: 6 }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/browser-download/finish')) {
+      finished = true;
+      return new Response(JSON.stringify({ id: 'm', quant: 'Q4_K_M', state: 'done' }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('意外请求：' + u);
+  };
+  const strictFetch = function (...args) {
+    // 模拟 Chrome：以普通对象为身份调用原生 fetch 直接抛错
+    if (this !== undefined && this !== globalThis) {
+      throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    }
+    return backend(...args);
+  };
+  globalThis.fetch = strictFetch;
+  try {
+    const out = await downloadModelViaBrowser({
+      id: 'hf/acme/Tiny-GGUF', repo: 'acme/Tiny-GGUF', quant: 'Q4_K_M',
+      adminToken: 'adm', chunkBytes: 4, retryDelayMs: 1,
+    });
+    assert.equal(out.state, 'done');
+    assert.equal(finished, true);
+    assert.equal(received, 6);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('useRepoViaBrowser：浏览器下载失败时回退直连且带回真实原因，不许只剩 fetch failed', async () => {
   let treeCalls = 0;
   const fetchImpl = async (url, opts = {}) => {
