@@ -35,11 +35,12 @@ The first repository of me,and first of "炸药工厂"
 - **多轮对话记忆**：会话保存在浏览器本地，可以直接追问“为什么 TLE”。
 - **联网资料检索（可选，默认关闭）**：在 `工具 → 联网资料检索` 打开后，浏览器会把候选资料作为本轮回答的**不可信证据**。默认包含维基百科、Stack Overflow、Hacker News 三个浏览器直连公开 API，它们会收到经过清洗的查询词和访问者网络地址，**不是完整网页搜索，也不能保证时效或覆盖面**。快速检索会补取前 2 条的维基导言 / Stack Overflow 回答，深入检索补前 5 条并读取 HN 讨论。疑似私钥、令牌、授权头或凭据赋值会使整次联网检索 fail-closed（不发任何请求）。配置 SearXNG/自定义接口时，它们会与默认资料源并行交叉取样，不会单独垄断回答。来源卡显示资料、检索状态和有限的 `[编号]` 引用审计；编号存在不等于回答结论已被证明。为回看，本轮查询和实际给模型的资料摘录会随**本机**聊天历史保存；页面缓存本身只在内存中。详见下文“联网资料检索”一节。
 - **模型可选**（下拉框切换，列表在 `web/public/config.json` 的 `webllm.models` 中维护）。标签中的尺寸按参数量划分：
-  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 39 个可选：非推理 23 个、推理 16 个。默认模型为 Qwen2.5 3B。其中 Qwen2.5 3B 与 Qwen3 4B 另有 q4f32（fp32）版本，精度更高、显存略多，可在下拉框中直接选择，用于 fp16 版本回答乱码时切换。下拉框中的模型全部为纯文本语言模型，不接受图片输入，标签中均标注“纯文本”。每个标签末尾都标注了推理所需的显存（WebLLM 记录的 `vram_required_MB` ÷ 1024，取一位小数）。按尺寸：极小 3 个（Gemma 3 1B、Qwen2.5 0.5B、Llama 3.2 1B）；小 16 个（其中 1 个为第三方去审查版，见下）；中 16 个（其中 2 个为第三方去审查版，见下）；大 2 个；超大 2 个。
+  极小 ≤1B、小 1–4B、中 4–9B、大 ≥10B、超大 ≥30B。共 39 个可选：非推理 23 个、推理 16 个。默认模型为 Qwen2.5 3B。其中 Qwen2.5 3B 与 Qwen3 4B 另有 q4f32（fp32）版本，精度更高、显存略多，可在下拉框中直接选择，用于 fp16 版本回答乱码时切换。这 39 个可选模型全部为纯文本语言模型，不接受图片输入，标签中均标注“纯文本”。每个标签末尾都标注了推理所需的显存（WebLLM 记录的 `vram_required_MB` ÷ 1024，取一位小数）。按尺寸：极小 3 个（Gemma 3 1B、Qwen2.5 0.5B、Llama 3.2 1B）；小 16 个（其中 1 个为第三方去审查版，见下）；中 16 个（其中 2 个为第三方去审查版，见下）；大 2 个；超大 2 个。另在禁用的“待转换（暂不可用）”分组登记 1 个 Qwen3.8 27B，不计入这 39 个可选模型。
   - 厂商：Qwen（阿里）、Google Gemma、Microsoft Phi（Phi-4 mini 的官方语言列表含中文）、Mistral（Ministral 3 3B，官方列表含中文）、DeepSeek（仅 R1 蒸馏版，均为推理模型）、Meta Llama（大级与超大级，以及本次补入的 1B/3B/8B 中小选项，见下）。
   - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）、Gemma 2 9B q4f32（需约 8.2 GB 显存）。
   - 超大：Llama 3.1 70B、Llama 3 70B（均为 q3f16 量化，需约 30.4 GB 显存）。**8 GB 显存的 RTX 4060 无法加载这两个模型，即使是 16 GB 的 4060 Ti 也无法加载**，选中时会显示警告。这两个模型不能满足“4060 上 1 分钟内回复”的要求，也没有在任何真实硬件上测过速度。
   - 仅训练目录（不在下拉框中）的超大模型：Qwen2.5 32B、Yi 1.5 34B。WebLLM 没有它们的预编译运行库，需要在本机用训练流程编译后才能用，见 [`training/README.md`](training/README.md)。
+  - **待转换登记**：[Qwen3.8 27B](https://huggingface.co/Qwen/Qwen3.8-27B) 已登记在 `webllm.pendingModels`，会在下拉框的“待转换（暂不可用）”分组中禁用显示。它是 Qwen 官方 27B 稠密视觉语言模型，但本站使用的 WebLLM 0.2.86 尚无匹配的 MLC 模型记录与 WebGPU 运行库，因此当前不能选择、下载或通过 API 调用，也不会进入训练目录和模型下载清单；等 MLC 提供匹配运行库并完成真实设备验证后再转入正式列表。
   - **本次调整（按“不支持中文则移除、同级别补充”）**：移除 Llama 3 8B、Hermes 3 8B、Mistral 7B v0.2、OpenHermes 2.5、OLMo 2 1B/7B、TinyLlama 1.1B、StableLM 2 1.6B，依据各模型官方公布的语言列表。大级与超大级没有支持中文的同级预编译模型，因此按要求保留了之前的 Llama 2 13B、Llama 3.1 70B、Llama 3 70B。
   - **新增**：Qwen2.5 7B q4f32、Qwen2.5-Coder 7B q4f32、Phi-4 mini q4f32、Qwen3 8B q4f32、Gemma 2 9B q4f32（q4f32 用 fp32 计算，数值更稳定，显存更高）；Ministral 3 3B Instruct（非推理，小）；Qwen2.5 0.5B、Qwen3 0.6B、Qwen3.5 0.8B/2B/4B/9B 用于补充较小的级别。Qwen3.5 小模型的思考模式标为推理，尚未在本机实测。
   - **中小型扩充（最新）**：补入 Llama 3.2 1B（极小）、Llama 3.2 3B、Gemma 2 2B、Phi-3.5 mini 3.8B、Ministral 3 3B Reasoning（推理）、Mistral 7B v0.3、Llama 3.1 8B，均为 WebLLM 0.2.86 预编译、各自独立运行库。其中 Llama 3.2/3.1 与 Mistral 的官方语言列表未明确含中文，中文问答效果请以实机为准；默认模型仍为中文优先的 Qwen2.5 3B。仍不加入：DeepSeek-R1 1.5B（借用运行库参数不匹配、输出乱码，见下）、Qwen2.5/Qwen2.5-Coder/Qwen2.5-Math 的 1.5B 版本（都借用 Qwen2-1.5B 运行库，见下条）、SmolLM2 1.7B 与 Hermes 3 8B（中文能力弱）。
@@ -112,7 +113,7 @@ The first repository of me,and first of "炸药工厂"
 - 训练目录（`training/catalog.json`）中的原始仓库分别为 `huihui-ai/Huihui-Qwen3.5-4B-abliterated` 与 `Kewk/Heretical-Qwen3.5-9B`（BF16 safetensors），可作为训练的基础模型。
 - 每个模型都有独立的 model_id，适应记录（更正、知识库、参数）按 model_id 分开保存，与官方原版互不影响。
 
-`webllm.pendingModels` 目前为空。以后如果有需要登记但暂不可用的模型，仍可在其中添加（标签需包含“待转换”“暂不可用”，并附备注）。
+`webllm.pendingModels` 现在登记 1 个模型：Qwen3.8 27B。`appendOfficial` 只显示分组并禁用它；`serializePublicConfig` / `applyPublicConfig`（内部 `applyEffectiveConfig`）保存待转换登记但不会把它计入 `state.models`、可调用模型或训练目录。以后登记其它暂不可用模型时，标签同样需包含“待转换”“暂不可用”，并附备注。
 
 ### 跨模型迁移（管理员，仅本机）
 

@@ -2307,7 +2307,7 @@ function buildModelOptions({ compact = false } = {}) {
     if (notes.get(m.id)) opt.title = notes.get(m.id);
     return opt;
   });
-  // 待转换的第三方模型：禁用（尚不能运行），与官方模型分组显示，备注放在悬停提示中
+  // 待转换模型：禁用（尚不能运行），与正式模型分组显示，备注放在悬停提示中
   const pending = pendingModels(state.appConfig?.webllm);
   if (pending.length) {
     const group = document.createElement('optgroup');
