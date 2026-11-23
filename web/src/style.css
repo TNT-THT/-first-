@@ -1137,6 +1137,12 @@ body.embed .role-section { display: none !important; }
 .native-progress > i { display: block; height: 100%; background: var(--accent, #38bdf8); transition: width 0.4s ease; }
 .native-progress-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45); pointer-events: none; }
 .native-progress-label { margin: 2px 0 4px; font-size: 13px; font-weight: 600; }
+/* 模型下载独立面板：刻意做宽、左右留白，几十个模型的长列表不用挤在窄框里看 */
+.model-download-dialog { width: min(1120px, calc(100vw - 32px)); }
+.model-download-dialog .api-access-panel { max-width: 1060px; margin: 0 auto; padding: 24px 36px 30px; }
+@media (max-width: 720px) {
+  .model-download-dialog .api-access-panel { padding: 16px 14px 20px; }
+}
 
 /* Hugging Face 桥接面板 */
 .hf-bridge { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border, #3a4a63); }

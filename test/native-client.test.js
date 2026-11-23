@@ -383,6 +383,73 @@ test('downloadModelViaBrowser：权重拉取中途断流时给中文原因，不
   assert.equal(weightAttempts, 5); // 放宽到 5 次重试扛抖动（每次都续传，不从头）
 });
 
+test('downloadModelViaBrowser：写本地偶发失败时同一块就地重试，不回炉重拉 HF', async () => {
+  const fileUrl = 'https://huggingface.co/acme/Tiny-GGUF/resolve/main/Tiny-Q4_K_M.gguf';
+  let weightFetches = 0;
+  let chunkPosts = 0;
+  let received = 0;
+  const chunks = [];
+  let finished = false;
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify([{ type: 'file', path: 'Tiny-Q4_K_M.gguf', lfs: { size: 6 } }]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === fileUrl) {
+      weightFetches += 1;
+      return new Response('ABCDEF', { status: 200 });
+    }
+    if (u.includes('/browser-download/prepare')) {
+      return new Response(JSON.stringify({ id: 'm', quant: 'Q4_K_M', state: 'downloading', total: 6, files: [{ path: 'Tiny-Q4_K_M.gguf', size: 6, url: fileUrl, offset: 0, done: false }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/browser-download/chunk')) {
+      chunkPosts += 1;
+      if (chunkPosts === 1) throw new TypeError('socket hang up'); // 第一块第一次写失败
+      const bytes = new Uint8Array(await new Response(opts.body).arrayBuffer());
+      const offset = Number(opts.headers['x-bd-offset']);
+      if (offset !== received) {
+        return new Response(JSON.stringify({ error: '对不上', received }), { status: 409, headers: { 'content-type': 'application/json' } });
+      }
+      chunks.push(bytes);
+      received += bytes.length;
+      return new Response(JSON.stringify({ received, downloaded: received, total: 6 }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/browser-download/finish')) {
+      finished = true;
+      return new Response(JSON.stringify({ id: 'm', quant: 'Q4_K_M', state: 'done' }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('意外请求：' + u);
+  };
+  const out = await downloadModelViaBrowser({
+    id: 'hf/acme/Tiny-GGUF', repo: 'acme/Tiny-GGUF', quant: 'Q4_K_M',
+    adminToken: 'adm', fetchImpl, chunkBytes: 4, retryDelayMs: 1,
+  });
+  assert.equal(out.state, 'done');
+  assert.equal(finished, true);
+  assert.equal(weightFetches, 1); // 关键：HF 侧只拉了一次，写失败靠同一块重试扛过去
+  assert.equal(Buffer.concat(chunks.map((c) => Buffer.from(c))).toString(), 'ABCDEF');
+});
+
+test('fetchQuantsViaBrowser：文件树第一次拉取断网时自动重试一次', async () => {
+  let treeCalls = 0;
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('huggingface.co/api/models/')) {
+      treeCalls += 1;
+      if (treeCalls === 1) throw new TypeError('fetch failed');
+      return new Response(JSON.stringify([{ type: 'file', path: 'Tiny-Q4_K_M.gguf', lfs: { size: 10 } }]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/quants-preview')) {
+      assert.equal(JSON.parse(opts.body).files.length, 1);
+      return new Response(JSON.stringify({ quants: [{ quant: 'Q4_K_M' }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('意外请求：' + u);
+  };
+  const quants = await fetchQuantsViaBrowser({ id: 'hf/acme/Tiny-GGUF', repo: 'acme/Tiny-GGUF', token: 't', fetchImpl });
+  assert.deepEqual(quants, [{ quant: 'Q4_K_M' }]);
+  assert.equal(treeCalls, 2);
+});
+
 test('useRepoViaBrowser：浏览器下载失败时回退直连且带回真实原因，不许只剩 fetch failed', async () => {
   let treeCalls = 0;
   const fetchImpl = async (url, opts = {}) => {
