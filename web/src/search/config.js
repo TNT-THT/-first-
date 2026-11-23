@@ -22,7 +22,9 @@ export const SEARCH_MODE_LABELS = { quick: '快速检索', smart: '深入检索'
 export const KEYLESS_PROVIDERS = ['wikipedia', 'stackexchange', 'hackernews', 'duckduckgo'];
 /** 需要管理员自己填地址的进阶来源。 */
 export const ADVANCED_PROVIDERS = ['searxng', 'custom'];
-export const ALL_PROVIDERS = [...KEYLESS_PROVIDERS, ...ADVANCED_PROVIDERS];
+/** 服务端网页搜索（软件版 /api/search，只有带服务端的部署可用，由调用方注入开关）。 */
+export const SERVER_PROVIDERS = ['websearch'];
+export const ALL_PROVIDERS = [...KEYLESS_PROVIDERS, ...ADVANCED_PROVIDERS, ...SERVER_PROVIDERS];
 
 export const DEFAULT_WEB_SEARCH = {
   enabled: true,
@@ -271,10 +273,14 @@ export function planKeyless(config) {
 
 /** 所有实际启用的来源。进阶源在前只是展示与结果排序优先级，不再排他。 */
 export function planProviders(config, settings = {}) {
-  return [...planAdvanced(config, settings), ...planKeyless(config)];
+  // 软件版（带服务端）优先用服务端网页搜索：搜索引擎 + 正文抓取，中文/英文都可，
+  // 与浏览器直连的资料源并行、合并呈现（服务端不可用时自动回落到资料源）。
+  const server = settings.serverSearch ? [{ id: 'websearch', url: '/api/search' }] : [];
+  return [...server, ...planAdvanced(config, settings), ...planKeyless(config)];
 }
 
 export const PROVIDER_LABELS = {
+  websearch: '网页搜索',
   wikipedia: '维基百科',
   stackexchange: 'Stack Overflow',
   hackernews: 'Hacker News',

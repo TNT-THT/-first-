@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TRAINING_PACKAGE_NAME, packTraining, selectTrainingFiles } from '../scripts/pack-training.mjs';
 import { siteZipName } from '../scripts/site-files.mjs';
-import { SITE_PACKAGE_ASSETS, TRAINING_PACKAGE_ASSET } from '../web/src/release-downloads.js';
+import { SITE_PACKAGE_ASSETS, STANDALONE_ASSETS, TRAINING_PACKAGE_ASSET } from '../web/src/release-downloads.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -48,6 +48,9 @@ test('发布资源命名：网页按钮、打包脚本与训练包名保持一�
   const html = readFileSync(join(root, 'web', 'index.html'), 'utf8');
   for (const asset of SITE_PACKAGE_ASSETS) {
     assert.ok(html.includes(`data-site-package="${asset}"`), `index.html 应有 ${asset} 的下载按钮`);
+  }
+  for (const asset of STANDALONE_ASSETS) {
+    assert.ok(html.includes(`data-site-package="${asset}"`), `index.html 应有独立软件 ${asset} 的下载按钮`);
   }
   assert.ok(html.includes('id="trainingPackageBtn"'), 'index.html 应有一站式训练包按钮');
   assert.ok(html.includes('id="releasePageLink"'), 'index.html 应有 Release 列表页链接');
@@ -126,11 +129,18 @@ test('模型下载清单：39 个网页模型全部有与运行时一致的下�
   }
 });
 
-test('Release 工作流：发布五件资产且文件名与网页/脚本一致', () => {
+test('Release 工作流：发布全部资产且文件名与网页/脚本一致', () => {
   const yml = readFileSync(join(root, '.github', 'workflows', 'release.yml'), 'utf8');
-  for (const asset of [...SITE_PACKAGE_ASSETS, TRAINING_PACKAGE_ASSET]) {
+  const standaloneBuild = readFileSync(join(root, 'standalone', 'build-standalone.mjs'), 'utf8');
+  for (const asset of [...SITE_PACKAGE_ASSETS, TRAINING_PACKAGE_ASSET, ...STANDALONE_ASSETS]) {
     assert.ok(yml.includes(asset), `release.yml 应发布 ${asset}`);
   }
+  assert.ok(standaloneBuild.includes("'LLM托管平台-天蓝色1.0'"), '独立软件构建脚本应生成与网页一致的单连字符资产名');
+  assert.ok(standaloneBuild.includes('`${PRODUCT_FILE_NAME}.exe`'), '独立软件构建脚本应由统一文件名常量生成 exe');
+  assert.ok(standaloneBuild.includes('`${PRODUCT_FILE_NAME}.zip`'), '独立软件构建脚本应由统一文件名常量生成完整压缩包');
+  const standaloneLauncher = readFileSync(join(root, 'standalone', 'launcher.mjs'), 'utf8');
+  assert.ok(!/\bHERE\b/.test(standaloneLauncher), '启动器不能引用未定义的 HERE（解压版 node 模式会直接崩溃）');
+  assert.ok(standaloneLauncher.includes('process.argv[1]'), '启动器应按启动脚本路径定位解压版应用根目录');
   assert.match(yml, /tags:.*v\*/, 'release.yml 应由 v* 标签触发');
   assert.match(yml, /contents: write/, 'release.yml 需要写权限创建 Release');
 });

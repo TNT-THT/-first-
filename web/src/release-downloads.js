@@ -18,6 +18,11 @@ export const SITE_PACKAGE_ASSETS = [
 ];
 /** 一站式训练包的文件名，与 scripts/pack-training.mjs 一致。 */
 export const TRAINING_PACKAGE_ASSET = 'oj-training.zip';
+/** 独立软件「LLM托管平台——天蓝色1.0」的文件名，与 standalone/build-standalone.mjs 一致。 */
+export const STANDALONE_PACKAGE_ASSET = 'LLM托管平台-天蓝色1.0.zip';
+export const STANDALONE_EXE_ASSET = 'LLM托管平台-天蓝色1.0.exe';
+/** 独立软件的两个下载选项：完整压缩包与单文件 exe。 */
+export const STANDALONE_ASSETS = [STANDALONE_PACKAGE_ASSET, STANDALONE_EXE_ASSET];
 
 /** 是否为合法的 GitHub 仓库标识 owner/name（避免把任意字符串拼进 URL）。 */
 export function isValidReleaseRepo(repo) {
@@ -62,7 +67,7 @@ export function releasePageUrl(release) {
     : `https://github.com/${repo}/releases/tag/${encodeURIComponent(tag)}`;
 }
 
-/** 是否为 Release 中发布的资源文件名（网站包或训练包）。 */
+/** 是否为 Release 中发布的资源文件名（网站包、训练包或独立软件）。 */
 export function isReleaseAsset(file) {
-  return SITE_PACKAGE_ASSETS.includes(file) || file === TRAINING_PACKAGE_ASSET;
+  return SITE_PACKAGE_ASSETS.includes(file) || file === TRAINING_PACKAGE_ASSET || STANDALONE_ASSETS.includes(file);
 }

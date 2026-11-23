@@ -183,6 +183,7 @@ export function interleaveByProvider(groups, { limit = 5, maxSnippetChars = 240 
  * 避免「一个词都没命中」的极端情况下把整个来源误杀。
  */
 const PROVIDER_WEIGHT = {
+  websearch: 1.15,
   custom: 1.08,
   searxng: 1.08,
   stackexchange: 1.05,

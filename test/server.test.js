@@ -117,7 +117,7 @@ test('/api/info 与 /api/docs 提供两种远程接入说明且不泄露密钥',
   const infoRes = await req('/api/info');
   assert.equal(infoRes.status, 200);
   const info = await infoRes.json();
-  assert.equal(info.appName, 'OJ 刷题助手');
+  assert.equal(info.appName, 'LLM托管平台——天蓝色1.0');
   assert.equal(info.baseUrl, 'https://ai.example.test');
   assert.equal(info.endpoints.chatCompletions, 'https://ai.example.test/v1/chat/completions');
   assert.equal(info.auth.apiKeyConfigured, true);

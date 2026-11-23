@@ -68,6 +68,9 @@ Windows 可在 PowerShell 中使用 `curl.exe`，或在兼容 OpenAI 的软件�
 ## 可用模型
 
 - 网站内置的 39 个模型（见 `web/public/config.json`）都可通过 API 调用，首次调用某个模型时网页会先下载并加载权重，耗时较长；之后调用会直接使用已加载的模型。
+- **本机大模型（27B～671B）**：服务端另内置 llama.cpp 引擎（`server/native/`），Qwen3.8-27B、Qwen3-32B、Llama-3.3-70B、Qwen3-235B、Llama-3.1-405B、DeepSeek-R1-671B 等 11 个大模型会出现在 `GET /v1/models` 中（`owned_by: llama.cpp`），请求里写对应 `model` ID 即可调用（流式/非流式都支持，用量照常统计）。它们不在浏览器里跑：需要管理员先在网页“API 接入 → 本机大模型”中下载运行库与权重并加载（或直接发请求自动加载已下载的）。同一时间只运行一个大模型。`OJ_NATIVE_MODELS=0` 可关闭，权重默认在 `data/native/`。
+- **任意 Hugging Face 模型**：网页“API 接入 → 本机大模型 → Hugging Face 模型桥接”可搜索/粘贴链接一键添加任意 HF 仓库（接口 `GET /api/native/hf/search`、`POST /api/native/hf/use`，可带 `mode=auto|local|python|cloud` 指定路线）：GGUF 直接下载本机运行；Safetensors/PyTorch 自动转 GGUF（`POST /api/native/hf/convert`，需先一键准备转换工具）；ONNX/MLX/AWQ/GPTQ 等特殊格式也可点「本地运行（Python）」（`POST /api/native/hf/python`）把原格式下载到本地用 Transformers/ONNX Runtime 推理（需先 `POST /api/native/hf/prepare-runner` 一键准备本地运行时，与转换工具共用 venv）；云端推理（填好免费 Hugging Face Token 后）只是每个模型都能切换的选项，聊天默认本地优先。添加后模型 id 为 `hf/<owner>/<repo>`，出现在 `/v1/models`（`owned_by: huggingface`），聊天与用量与内置模型一致。
+- **服务端网页搜索**：`POST /api/search`（需网站登录）做真正的网页搜索：搜索引擎取候选 + 抓正文 + 去重排序，返回带出处的资料；网页聊天在软件版会自动优先用它。配置 `TAVILY_API_KEY` / `BRAVE_SEARCH_KEY` / `BING_SEARCH_KEY` 任一效果最佳，无密钥时免密钥兜底。
 - **每个请求都可以选不同的模型**：API 调用时在请求里写不同的 `model` 即可（先用 `GET /v1/models` 看全部可用模型）；网页聊天顶部也有模型选择栏，选中哪个就用哪个生成。网页的选择会记在本浏览器中，API 每次请求选什么模型**不会**改掉网页的选择，反过来也一样。
 - 网页聊天与 API 共用这台电脑的显卡，请求会排队逐个生成，不会互相打断；但显卡同一时间只加载一个模型，交替使用不同模型时会来回重新加载（权重下载过就不用再下，只是加载变慢），连续使用同一个模型最快。
 - 已在这台电脑的同一浏览器来源中登记的“导入模型 / 新建 AI”也会出现在 `/v1/models` 中（导入记录只存在于这台电脑的浏览器里；新登记后桥接会自动同步，必要时刷新本页）。
@@ -76,7 +79,7 @@ Windows 可在 PowerShell 中使用 `curl.exe`，或在兼容 OpenAI 的软件�
 ## 管理员（两个面板，分工不同）
 
 - **管理员面板**（顶部按钮）：管理这台电脑浏览器里的东西——导入“新建AI”、删除导入的 AI、直接填数字修改当前模型的参数。登录后即可使用。**API 地址也显示在这个面板里**，可一键复制（`http://127.0.0.1:3000/v1`）。
-- **API 管理**（顶部按钮）：用首次启动时显示的管理口令 `API_ADMIN_PASSWORD` 验证后，管理全站 API Key、调整服务端参数（temperature、输出上限等），并使用 API 调试台。若没记下管理口令，可在解压文件夹的 `.local-api.json` 中查看 `API_ADMIN_PASSWORD` 字段（找不到时请先在文件管理器中显示隐藏文件；请勿分享这个文件）。
+- **API 管理**（顶部按钮）：用首次启动时显示的管理口令 `API_ADMIN_PASSWORD` 验证后，管理全站 API Key、调整服务端参数（temperature、输出上限等），并使用 API 调试台。**验证只需一次**：令牌保存在本机浏览器（30 天），关闭“API 接入”面板、刷新页面都不用再验证；只有点击面板里的“锁定管理面板”或令牌到期才需要重新验证。若没记下管理口令，可在解压文件夹的 `.local-api.json` 中查看 `API_ADMIN_PASSWORD` 字段（找不到时请先在文件管理器中显示隐藏文件；请勿分享这个文件）。
 - **用量统计**（顶部按钮）：所有用户都能查看本浏览器里网页聊天的按模型用量（调用次数、提示/生成 Token、最近 7 天趋势与近期日志，只存汇总数字、不含对话内容，只保存在本机浏览器）；在 API 管理中验证过管理员口令后，同一面板还会显示服务端统计的全部 API 调用用量（`GET /api/admin/usage-stats`，仅管理员会话可读，可在同一面板清空）。两边都只存按模型聚合的计数与定长日志，空间有上限；Token 为按文本长度的估算值，与接口返回的 `usage` 口径一致。服务端统计保存在 `data/usage-stats.json`（可用环境变量 `USAGE_STATS_FILE` 改路径）。
 - 普通网站口令（`APP_PASSWORD`）不能代替管理口令，也不能直接调用 `/v1`。
 - GitHub Pages 的静态网页没有服务器，因此那里的“管理员面板”只能管理当前浏览器里的模型和数据，不包含本机 API 的参数控制台与全站 Key 管理；请打开本机启动后的 `http://127.0.0.1:3000` 再操作。

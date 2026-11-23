@@ -1125,3 +1125,17 @@ body.embed .role-section { display: none !important; }
 .search-attempt-skipped { color: var(--muted); }
 /* 摘录保留换行结构：Stack Overflow 等来源的代码答案靠缩进表达语义。 */
 .search-evidence-box .search-snippet { white-space: pre-line; }
+
+/* 本机大模型（llama.cpp 独立引擎）管理面板 */
+.native-model-list { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.native-model-row { border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; }
+.native-model-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.native-model-row .api-access-actions { flex-wrap: wrap; }
+.native-model-row select { max-width: 100%; }
+.native-progress { height: 6px; margin: 6px 0 2px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.native-progress > i { display: block; height: 100%; background: var(--accent, #38bdf8); transition: width 0.4s ease; }
+
+/* Hugging Face 桥接面板 */
+.hf-bridge { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border, #3a4a63); }
+.hf-bridge h4 { margin: 4px 0 6px; font-size: 14px; }
+.hf-bridge input[type="text"], .hf-bridge input[type="password"] { flex: 1 1 220px; }

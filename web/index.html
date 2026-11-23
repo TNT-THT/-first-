@@ -4,8 +4,8 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
-    <title>OJ 刷题助手</title>
-    <meta name="description" content="可嵌入 iframe 的算法刷题助手，浏览器内运行开源大模型" />
+    <title>LLM托管平台——天蓝色1.0</title>
+    <meta name="description" content="LLM托管平台——天蓝色1.0：浏览器内运行开源小模型，独立软件在本机原生运行 27B~671B 级开源大模型" />
     <link rel="icon" href="data:," />
   </head>
   <body>
@@ -14,7 +14,7 @@
       <section id="login" class="login" hidden>
         <form id="loginForm" class="login-card">
           <div class="logo">AI</div>
-          <h1 id="loginTitle">OJ 刷题助手</h1>
+          <h1 id="loginTitle">LLM托管平台——天蓝色1.0</h1>
           <p class="muted">请输入站点访问口令</p>
           <input id="password" type="password" autocomplete="current-password" placeholder="访问口令" required />
           <button id="loginBtn" type="submit" class="btn primary block">登录</button>
@@ -27,7 +27,7 @@
         <aside id="sidebar" class="sidebar">
           <div class="brand">
             <span class="logo">AI</span>
-            <span id="brandName" class="brand-name">OJ 刷题助手</span>
+            <span id="brandName" class="brand-name">LLM托管平台——天蓝色1.0</span>
           </div>
           <button id="newChatBtn" type="button" class="btn primary block">+ 新建会话</button>
           <nav id="sessionList" class="session-list" data-session-list aria-label="历史会话"></nav>
@@ -98,6 +98,11 @@
                     <button type="button" class="btn ghost small" data-site-package="site-linux-x64.zip">Linux 版</button>
                   </div>
                   <p id="sitePackageHint" class="muted small"></p>
+                  <p class="muted small">独立软件「LLM托管平台——天蓝色1.0」（推荐给想跑大模型的用户）：单文件 exe 双击即用，功能与网站包一致，另外内置 llama.cpp 本机大模型引擎，可下载并运行 27B～671B 级开源大模型；完整压缩包除 exe 外还含解压版程序与使用说明。大模型权重不包含在安装包里，首次使用时在软件内按需下载。</p>
+                  <div class="site-package-btns">
+                    <button type="button" class="btn ghost small" data-site-package="LLM托管平台-天蓝色1.0.exe">独立软件 exe（Windows 单文件）</button>
+                    <button type="button" class="btn ghost small" data-site-package="LLM托管平台-天蓝色1.0.zip">独立软件完整压缩包</button>
+                  </div>
                   <p class="muted small">一站式训练功能（在有显卡的电脑上自己微调模型，含模型清单、训练脚本与说明）也发布在同一 Release 中：<button type="button" class="btn ghost small" id="trainingPackageBtn">一站式训练包</button> <a class="btn ghost small" id="releasePageLink" href="https://github.com/TNT-THT/-first-/releases/latest" target="_blank" rel="noopener">查看全部下载</a></p>
                 </div>
                 <div class="data-export">
@@ -346,6 +351,59 @@
             <button id="shareIframeCopy" type="button" class="btn ghost small">复制 iframe 代码</button>
           </details>
         </section>
+        <section id="apiNativeSection" class="api-access-section" aria-labelledby="apiNativeTitle" hidden>
+          <h3 id="apiNativeTitle">本机大模型（llama.cpp 独立引擎）</h3>
+          <p class="muted small">27B～671B 级开源大模型在本机原生运行（浏览器 WebGPU 跑不了这么大的模型）。权重按需从 Hugging Face 下载到本机、不包含在安装包里；内存（内存+显存合计）不足时请选更小的量化。下载、加载、删除需要先在下方验证管理员口令（只验证一次，之后不用重复验证）；查看状态与聊天不需要。</p>
+          <p id="apiNativeBinaryStatus" class="muted small" role="status"></p>
+          <div class="api-access-actions">
+            <button id="apiNativeBinaryBtn" type="button" class="btn ghost small">准备 llama.cpp 运行库</button>
+            <label class="api-access-label">上下文
+              <select id="apiNativeCtx" aria-label="上下文长度">
+                <option value="4096">4096</option>
+                <option value="8192" selected>8192</option>
+                <option value="16384">16384</option>
+                <option value="32768">32768</option>
+              </select>
+            </label>
+            <label class="api-access-label">GPU 卸载层数
+              <input id="apiNativeGpuLayers" type="number" min="0" max="999" value="0" aria-label="GPU 卸载层数" />
+            </label>
+            <button id="apiNativeUnloadBtn" type="button" class="btn ghost small">卸载当前模型</button>
+          </div>
+          <p id="apiNativeHint" class="muted small"></p>
+          <div class="hf-bridge">
+            <h4>Hugging Face 模型桥接（搜索 → 拉取 → 点击使用）</h4>
+            <p class="muted small">不用懂仓库和格式：在下面搜模型名（或粘贴 Hugging Face 链接），点“一键使用”即可。GGUF 格式下载到本机运行；Safetensors 等 Transformers 格式自动转成 GGUF 后运行；ONNX/MLX 等本机跑不了的格式，在填好 HF Token 后走云端推理。下载好的模型会出现在聊天页的模型选择里（原有下拉框不变）。</p>
+            <div class="api-access-actions">
+              <input id="apiHfSearchInput" type="text" placeholder="搜模型，如 Qwen / Llama / DeepSeek，或粘贴 HF 链接" aria-label="搜索 Hugging Face 模型" />
+              <select id="apiHfFilter" aria-label="格式筛选">
+                <option value="all">全部格式</option>
+                <option value="local">可直接运行（GGUF）</option>
+                <option value="convert">可转换（Transformers）</option>
+                <option value="cloud">云端可用（其他格式）</option>
+              </select>
+              <button id="apiHfSearchBtn" type="button" class="btn primary small">搜索</button>
+            </div>
+            <div class="api-access-actions">
+              <input id="apiHfTokenInput" type="password" placeholder="HF Token（可选，云端模型用，去 huggingface.co/settings/tokens 免费创建）" aria-label="Hugging Face Token" />
+              <button id="apiHfTokenBtn" type="button" class="btn ghost small">保存 Token</button>
+              <span id="apiHfTokenStatus" class="muted small" role="status"></span>
+            </div>
+            <div class="api-access-actions">
+              <button id="apiHfConvertToolBtn" type="button" class="btn ghost small">一键准备格式转换工具</button>
+              <span id="apiHfConvertToolStatus" class="muted small" role="status"></span>
+            </div>
+            <div class="api-access-actions">
+              <button id="apiHfRunnerBtn" type="button" class="btn ghost small">一键准备本地运行时（特殊格式用）</button>
+              <span id="apiHfRunnerStatus" class="muted small" role="status"></span>
+            </div>
+            <p class="muted small">每个模型都可以切换：下载到本地运行，或云端使用（不下载、需 Token）。特殊格式（ONNX/AWQ 等）也能下载到本地用 Python 运行时跑，只是 CPU 上会慢一些。</p>
+            <p id="apiHfSearchStatus" class="muted small" role="status"></p>
+            <div id="apiHfResults" class="native-model-list"></div>
+          </div>
+          <div id="apiNativeList" class="native-model-list"></div>
+          <p id="apiNativeError" class="error small" role="alert"></p>
+        </section>
         <section id="apiAdminLoginSection" class="api-access-section" aria-labelledby="apiAdminLoginTitle">
           <h3 id="apiAdminLoginTitle">管理员控制面板</h3>
           <p id="apiKeyManagerHint" class="muted small"></p>
@@ -360,7 +418,7 @@
         </section>
         <section id="apiPlaygroundSection" class="api-access-section api-playground-section" aria-labelledby="apiPlaygroundTitle" hidden>
           <h3 id="apiPlaygroundTitle">管理员 API 调试台</h3>
-          <p class="muted small">仅通过 API 管理员口令验证后可用。请求使用短期管理员令牌，不使用普通网站登录会话；关闭面板或锁定管理台后会清除令牌。</p>
+          <p class="muted small">仅通过 API 管理员口令验证后可用。请求使用管理员令牌，不使用普通网站登录会话；验证一次后令牌保存在本机浏览器，关闭面板或刷新页面都不用再验证，只有点击“锁定管理面板”或令牌到期（30 天）才清除。</p>
           <form id="apiPlaygroundForm">
             <label class="api-access-label" for="apiPlaygroundSystem">可选：本次请求的 system 提示</label>
             <textarea id="apiPlaygroundSystem" rows="2" maxlength="12000" placeholder="留空则只使用服务器配置的系统提示词"></textarea>

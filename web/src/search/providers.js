@@ -42,7 +42,7 @@ function awaitWithSignal(value, signal) {
 }
 
 /** 搜索请求统一加超时；失败抛出可读错误。 */
-async function fetchJson(url, { fetchImpl = globalThis.fetch, signal, timeoutMs = 8000, headers } = {}) {
+async function fetchJson(url, { fetchImpl = globalThis.fetch, signal, timeoutMs = 8000, headers, method, body } = {}) {
   if (typeof fetchImpl !== 'function') throw new Error('当前环境不支持网络请求');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error('搜索请求超时')), Math.max(1000, timeoutMs));
@@ -59,6 +59,8 @@ async function fetchJson(url, { fetchImpl = globalThis.fetch, signal, timeoutMs 
         credentials: 'omit',
         referrerPolicy: 'no-referrer',
         headers,
+        ...(method ? { method } : {}),
+        ...(body !== undefined ? { body } : {}),
       }),
       controller.signal,
     );
@@ -466,6 +468,39 @@ export async function searchCustom({ query, endpoint, limit = 5, fetchImpl, sign
   return parseCustom(payload).slice(0, Math.max(1, limit));
 }
 
+/** 服务端网页搜索（软件版）：服务端聚合搜索引擎 + 正文抓取，这里只做结果归一化。 */
+export function parseServerWeb(payload) {
+  const list = Array.isArray(payload?.results) ? payload.results : [];
+  return list
+    .map((item) => {
+      const url = pick(item, ['url', 'link']);
+      if (!url) return null;
+      const content = typeof item?.content === 'string' ? item.content : '';
+      return {
+        title: stripHtml(pick(item, ['title', 'name']) || url),
+        url,
+        snippet: stripHtml(pick(item, ['snippet', 'description']) || content.slice(0, 240)),
+        ...(content ? { extract: content, evidenceKind: '网页正文（服务端搜索）' } : {}),
+        publishedAt: sourceDate(item),
+        provider: 'websearch',
+      };
+    })
+    .filter(Boolean);
+}
+
+export async function searchServerWeb({ query, endpoint = '/api/search', limit = 8, fetchImpl, signal, timeoutMs } = {}) {
+  const payload = await fetchJson(endpoint, {
+    fetchImpl,
+    signal,
+    timeoutMs: Math.max(timeoutMs || 0, 15000),
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ query, limit }),
+  });
+  if (payload?.error) throw new Error(String(payload.error).slice(0, 160));
+  return parseServerWeb(payload);
+}
+
 /** 按 id 调用对应来源；未知来源直接报错。 */
 export function runProvider(id, options = {}) {
   if (id === 'wikipedia') {
@@ -487,6 +522,7 @@ export function runProvider(id, options = {}) {
   if (id === 'duckduckgo') return searchDuckDuckGo(options);
   if (id === 'searxng') return searchSearxng(options);
   if (id === 'custom') return searchCustom(options);
+  if (id === 'websearch') return searchServerWeb(options);
   throw new Error(`未知的搜索源：${id}`);
 }
 
