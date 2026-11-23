@@ -34,6 +34,15 @@ const QUANT_CACHE_MS = 10 * 60 * 1000;
  * 中断后任务转为 error，前端按钮随之恢复可点，重新点下载会按偏移续传。
  */
 const BROWSER_JOB_STALE_MS = 180 * 1000;
+
+/** 下发给界面前的错误兜底：任何一层漏出的英文裸错（fetch failed 等）都换成中文。 */
+function visibleDownloadError(text) {
+  const raw = String(text || '').trim();
+  if (/^fetch failed$/i.test(raw) || /failed to fetch|networkerror/i.test(raw)) {
+    return '连接中断（网络或代理不稳）：已下载的部分都保留着，重新点下载会从断点续传。若反复失败，先在浏览器里打开 huggingface.co 确认能访问。';
+  }
+  return raw;
+}
 export const HF_ROUTER_URL = 'https://router.huggingface.co/v1/chat/completions';
 
 export class NativeEngine {
@@ -272,7 +281,7 @@ export class NativeEngine {
         .filter((d) => d.id === m.id)
         .map((d) => ({
           id: d.id, quant: d.quant, state: d.state,
-          downloaded: d.downloaded, total: d.total, error: d.error || '',
+          downloaded: d.downloaded, total: d.total, error: visibleDownloadError(d.error),
           via: d.via || 'server',
         }));
       models.push({

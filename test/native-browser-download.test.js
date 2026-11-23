@@ -217,6 +217,19 @@ test('浏览器通道：页面关掉后任务不再假装下载中，直连不�
   assert.equal('entry' in dl, false);
   assert.equal('receivedByFile' in dl, false);
 
+  // 重新准备让任务回到下载中，再用英文裸错标失败：下发给界面前也要换成中文
+  await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/browser-download/prepare`, {
+    method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M', files }),
+  });
+  const failRaw = await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/browser-download/fail`, {
+    method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M', error: 'fetch failed' }),
+  });
+  assert.equal(failRaw.status, 200);
+  const stRaw = await (await fetch(`${base}/api/native/status`)).json();
+  const dlRaw = stRaw.models.find((m) => m.id === MODEL_ID).downloads.find((d) => d.quant === 'Q4_K_M');
+  assert.doesNotMatch(dlRaw.error, /^fetch failed$/);
+  assert.match(dlRaw.error, /连接中断/);
+
   // 此时再走直连：必须是新的服务端任务（不能再返回那个假“下载中”）
   const direct = await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/download`, {
     method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M' }),
