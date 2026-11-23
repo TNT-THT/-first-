@@ -1,4 +1,4 @@
-// 待转换的第三方模型：只登记、不进入官方列表，且与官方模型的 model_id 完全分开。
+// 待转换模型：只登记、不进入可运行列表，且与正式模型的 model_id 完全分开。
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -41,9 +41,17 @@ const THIRD_PARTY = [
   },
 ];
 
-test('待转换列表已清空：两个第三方模型已改为正式登记（不再是待转换）', () => {
-  assert.deepEqual(webllm.pendingModels, []);
-  assert.equal(pending.length, 0);
+test('待转换列表：Qwen3.8 27B 仅登记展示，不进入可运行模型', () => {
+  assert.equal(pending.length, 1);
+  const [item] = pending;
+  assert.equal(item.id, 'Qwen3.8-27B');
+  assert.equal(item.status, undefined, 'pendingModels() 只返回展示字段，不透传 status');
+  assert.match(item.label, /待转换·暂不可用/);
+  assert.equal(item.source, 'https://huggingface.co/Qwen/Qwen3.8-27B');
+  assert.match(item.note, /WebLLM 0\.2\.86/);
+  assert.match(item.note, /不能选择、下载或调用/);
+  assert.equal(webllm.models.some((m) => m.id === item.id), false, '待转换模型不能混入正式下拉模型');
+  assert.equal(webllm.extraRecords.some((r) => r.model_id === item.id), false, '没有运行库时不能伪造 extraRecords');
 });
 
 test('两个第三方模型登记在下拉框与 extraRecords 中，指向指定的 MLC 仓库与官方 cs1k 运行库', () => {
@@ -77,9 +85,10 @@ test('下拉框中的每个模型都能在构建后的模型列表中找到（�
   }
 });
 
-test('第三方模型进入模型列表（可被加载），待转换列表中没有残留条目', () => {
+test('第三方模型进入模型列表（可被加载），待转换模型不能被加载', () => {
   const list = buildModelList(prebuiltAppConfig.model_list, webllm.extraRecords, '');
   for (const t of THIRD_PARTY) assert.equal(list.some((r) => r.model_id === t.id), true, t.id);
+  for (const p of pending) assert.equal(list.some((r) => r.model_id === p.id), false, `${p.id} 尚无运行库，不能进入可加载列表`);
 });
 
 test('pendingModels：忽略非 pending 状态、缺字段、与官方冲突和重复的条目', () => {

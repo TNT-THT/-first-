@@ -104,8 +104,12 @@ async function waitFor(check, { timeout = 1500, interval = 20 } = {}) {
 test('启动后两个模型下拉框内容一致，窄屏下拉框可用', () => {
   assert.equal($('#login').hidden, true, '静态模式应直接进入聊天');
   assert.equal($('#main').hidden, false);
-  assert.equal($$('#modelSelect option').length, config.webllm.models.length);
-  assert.equal($$('#modelSelectCompact option').length, config.webllm.models.length);
+  assert.equal($$('#modelSelect option').length, config.webllm.models.length + config.webllm.pendingModels.length);
+  assert.equal($$('#modelSelectCompact option').length, config.webllm.models.length + config.webllm.pendingModels.length);
+  const pendingOpt = $('#modelSelect option[value="Qwen3.8-27B"]');
+  assert.ok(pendingOpt, '待转换分组应展示 Qwen3.8 27B');
+  assert.equal(pendingOpt.disabled, true, '待转换模型必须禁用，不能被选中');
+  assert.equal(pendingOpt.parentElement.label, '待转换（暂不可用）');
   assert.equal($('#modelSelectCompact').hidden, false);
   // 窄屏下拉框显示短名称（不带“（非推理·小·…”），完整标签保留在 dataset 与悬停提示中
   assert.match($$('#modelSelectCompact option')[0].textContent, /^Qwen2\.5 3B$/);
