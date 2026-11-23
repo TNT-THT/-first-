@@ -3,7 +3,7 @@
 // 并验证权限边界（未登录 401、未知模型 404、未下载 409）。不访问真实网络。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createApp } from '../server/index.js';
@@ -247,4 +247,77 @@ test('下载→加载→聊天→/v1→用量：整条链路与权限边界', { 
     body: JSON.stringify({ model: 'Nope-999B', messages: [{ role: 'user', content: 'x' }] }),
   });
   assert.equal(unknown.status, 404);
+});
+
+test('直连下载：已下完的分片不再重复下载，.part 续传，多分片并行', { timeout: 30000 }, async (t) => {
+  // 一档 3 个分片：第 1 片已下完转正、第 2 片 .part 有 4 字节、第 3 片没下过。
+  // 以前重试会把第 1 片从头再拉一遍（用户眼里就是“失败后从头开始”），且是逐片排队。
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-native-resume-'));
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const SHARDS = [
+    { path: 'Qwen3-30B-A3B-Q4_K_M-00001-of-00003.gguf', content: 'AAAAAAAAAA' },
+    { path: 'Qwen3-30B-A3B-Q4_K_M-00002-of-00003.gguf', content: '0123456789' },
+    { path: 'Qwen3-30B-A3B-Q4_K_M-00003-of-00003.gguf', content: 'zzzzzzzzzz' },
+  ];
+  const fetchCounts = new Map();
+  const seenRanges = new Map();
+  let active = 0;
+  let maxActive = 0;
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify(SHARDS.map((s) => ({ type: 'file', path: s.path, size: 10, lfs: { size: 10 } }))), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/resolve/main/')) {
+      const name = decodeURIComponent(u.split('/resolve/main/')[1]);
+      const shard = SHARDS.find((s) => s.path === name);
+      assert.ok(shard, `不应请求清单外文件：${name}`);
+      fetchCounts.set(name, (fetchCounts.get(name) || 0) + 1);
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((r) => setTimeout(r, 30)); // 撑开时间窗，让并行可见
+      active -= 1;
+      const range = opts.headers?.range || opts.headers?.Range || '';
+      if (range) {
+        seenRanges.set(name, range);
+        const from = Number(range.match(/bytes=(\d+)-/)?.[1] || 0);
+        return new Response(shard.content.slice(from), {
+          status: 206,
+          headers: { 'content-type': 'application/octet-stream', 'content-length': String(10 - from) },
+        });
+      }
+      return new Response(shard.content, { headers: { 'content-type': 'application/octet-stream', 'content-length': '10' } });
+    }
+    throw new Error(`测试中不允许访问：${u}`);
+  };
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    fetchImpl,
+    env: {},
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  // 预置磁盘状态：第 1 片完整、第 2 片残片
+  const qdir = engine.modelDir(MODEL_ID, 'Q4_K_M');
+  await mkdir(qdir, { recursive: true });
+  await writeFile(path.join(qdir, SHARDS[0].path), SHARDS[0].content);
+  await writeFile(path.join(qdir, `${SHARDS[1].path}.part`), SHARDS[1].content.slice(0, 4));
+
+  const job = await engine.download(MODEL_ID, 'Q4_K_M');
+  const deadline = Date.now() + 10000;
+  while (job.state === 'downloading' && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.equal(job.state, 'done');
+  // 第 1 片一字节都不许再请求；第 2 片必须按 4 字节续传而不是从头
+  assert.equal(fetchCounts.get(SHARDS[0].path) || 0, 0);
+  assert.equal(seenRanges.get(SHARDS[1].path), 'bytes=4-');
+  assert.equal(fetchCounts.get(SHARDS[2].path), 1);
+  // 3 个分片至少有 2 路同时在拉（并行而非排队）
+  assert.ok(maxActive >= 2, `期望并行下载，实际最大并发 ${maxActive}`);
+  // 三片内容完整、清单已登记
+  for (const s of SHARDS) {
+    assert.equal(await readFile(path.join(qdir, s.path), 'utf8'), s.content);
+  }
+  const downloaded = await engine.downloadedQuants(MODEL_ID);
+  assert.deepEqual(downloaded.map((d) => d.quant), ['Q4_K_M']);
 });

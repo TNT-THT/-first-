@@ -3334,8 +3334,9 @@ function buildNativeModelRow(m, admin) {
           adminToken: state.apiKeyAdminToken,
           onStatus: (text) => setQuantStatus(text),
         });
-      } catch {
-        setQuantStatus('浏览器通道不可用，已自动改用软件直连下载…');
+      } catch (browserErr) {
+        // 把浏览器通道失败的真实原因亮出来，不能只剩直连回退的一句报错
+        setQuantStatus(`浏览器通道下载失败（${browserErr?.message || '未知原因'}），已自动改用软件直连下载…`, true);
         await nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
           token: state.apiKeyAdminToken,
           body: { quant: quantSelect.value || undefined },
@@ -3420,11 +3421,29 @@ function buildNativeModelRow(m, admin) {
   return row;
 }
 
+/**
+ * 在长动作（下载/转换准备等）执行期间每 2 秒刷新一次本机状态。
+ *
+ * 为什么需要它：refreshNativeStatus 的自动轮询要先“被观察到忙碌”才自我续期，
+ * 而浏览器通道下载恰恰是在点击里同步跑的——动作没结束就没人刷状态，
+ * 靠服务端状态渲染的那条进度条（百分比条 + 已下/总量）整个下载过程都不会出现，
+ * 用户只剩一行攒够几 MB 才跳一次的文字，看着像“没有下载进度”。
+ * 动作期间主动轮询后，进度条从下载第一秒就接管显示；文字行作为补充。
+ */
+async function withNativePolling(fn) {
+  const timer = setInterval(() => { void refreshNativeStatus(); }, 2000);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /** 执行管理员动作：失败显示原因（401 时按过期处理并锁定），之后刷新状态。 */
 async function nativeAction(fn) {
   if (els.apiNativeError) els.apiNativeError.textContent = '';
   try {
-    await fn();
+    await withNativePolling(fn);
   } catch (err) {
     if (err.status === 401 && state.apiKeyAdminToken) {
       lockApiKeyManager();
@@ -3625,9 +3644,15 @@ function renderHfResults() {
 /** 使用 HF 模型：mode = auto（一键）| local（下载到本地）| cloud（云端，不下载）。 */
 async function hfUseRepo(repo, mode = 'auto') {
   if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `正在处理 ${repo}（优先经浏览器，和网页版同一条网络路）…`;
+  // 下载可能持续很久：期间保持状态轮询，下方模型列表里会长出实时进度条
+  await withNativePolling(() => hfUseRepoInner(repo, mode));
+}
+
+async function hfUseRepoInner(repo, mode = 'auto') {
   try {
     let out;
     let downloadState = 'none';
+    let downloadError = '';
     try {
       const via = await useRepoViaBrowser({
         repo,
@@ -3637,6 +3662,7 @@ async function hfUseRepo(repo, mode = 'auto') {
       });
       out = via.out;
       downloadState = via.downloadState;
+      downloadError = via.downloadError || '';
     } catch {
       // 浏览器通道不可用才回退软件直连（直连不通时错误会如实显示在下方）
       out = await nativeAdminRequest('/api/native/hf/use', { token: state.apiKeyAdminToken, body: { repo, mode } });
@@ -3645,7 +3671,7 @@ async function hfUseRepo(repo, mode = 'auto') {
       if (downloadState === 'browser') {
         els.apiHfSearchStatus.textContent = `${repo}（${out.quant || '推荐量化'}）已通过浏览器通道下载完成，下方模型列表里点“加载”即可使用；之后在聊天页模型选择里也能选它。`;
       } else if (downloadState === 'fallback') {
-        els.apiHfSearchStatus.textContent = `浏览器通道不可用，已改用软件直连下载 ${repo}（${out.quant || '推荐量化'}），进度在下方模型列表里看。`;
+        els.apiHfSearchStatus.textContent = `浏览器通道不可用（${downloadError || '未知原因'}），已改用软件直连下载 ${repo}（${out.quant || '推荐量化'}），进度在下方模型列表里看。`;
       } else {
         els.apiHfSearchStatus.textContent = `已开始下载 ${repo}（${out.quant || '推荐量化'}），进度在下方模型列表里看；下载完成并加载后，就能在聊天页模型选择里用它。`;
       }

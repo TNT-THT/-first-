@@ -168,13 +168,15 @@ export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetch
   try {
     await downloadModelViaBrowser({ id: out.id, repo, quant: out.quant || undefined, adminToken, fetchImpl, onStatus: note });
     return { out, downloadState: 'browser' };
-  } catch {
-    // 浏览器传字节失败：回退服务端直连（量化分组缓存已在 /use 时写入，选档不必再列树）
+  } catch (browserErr) {
+    // 浏览器传字节失败：回退服务端直连（量化分组缓存已在 /use 时写入，选档不必再列树）。
+    // 失败原因必须带出来——以前这里默默吞掉，用户最后只看到直连的一句 fetch failed，
+    // 根本不知道浏览器通道到底死在哪一步。
     await adminJson(fetchImpl, `/api/native/models/${encodeURIComponent(out.id)}/download`, {
       token: adminToken,
       body: { quant: out.quant || undefined },
     });
-    return { out, downloadState: 'fallback' };
+    return { out, downloadState: 'fallback', downloadError: browserErr?.message || '未知原因' };
   }
 }
 
@@ -355,6 +357,7 @@ async function downloadOneFileViaBrowser(ctx) {
         throw new Error(`从 Hugging Face 下载 ${file.path} 失败（HTTP ${res.status}）。`);
       }
       if (!res.body?.getReader) throw new Error('当前浏览器不支持流式读取，浏览器通道不可用。');
+      if (ctx.shouldStop?.()) throw new Error('已有其他文件下载失败，本文件暂停（已传部分保留，可续传）。');
       reader = res.body.getReader();
       let parts = [];
       let partsBytes = 0;
@@ -375,6 +378,7 @@ async function downloadOneFileViaBrowser(ctx) {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (ctx.shouldStop?.()) throw new Error('已有其他文件下载失败，本文件暂停（已传部分保留，可续传）。');
         if (value?.length) {
           parts.push(value);
           partsBytes += value.length;
@@ -389,6 +393,8 @@ async function downloadOneFileViaBrowser(ctx) {
     } catch (err) {
       lastError = err;
       try { await reader?.cancel(); } catch { /* 忽略 */ }
+      // 并行下载里已有别的文件失败：不用再重试探路，直接停，根因由失败的那个文件给出
+      if (ctx.shouldStop?.()) throw err;
       if (Number.isFinite(err?.received)) {
         sent = err.received;
       } else if (attempt < 2) {
@@ -409,7 +415,9 @@ async function downloadOneFileViaBrowser(ctx) {
  */
 export async function downloadModelViaBrowser({
   id, repo, quant, adminToken, onStatus,
-  fetchImpl = fetch, treeTimeoutMs = 30000, chunkBytes = 8 * 1024 * 1024,
+  // 一块 2MB：足够大到不让本地请求次数爆炸，又足够细——慢网下也几秒就跳一次进度，
+  // 不至于攒 8MB 才出现第一个百分比，用户误以为“没有下载进度”。
+  fetchImpl = fetch, treeTimeoutMs = 30000, chunkBytes = 2 * 1024 * 1024,
 } = {}) {
   const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
   note('正在经浏览器读取仓库文件列表（和网页版同一条网络路）…');
@@ -424,21 +432,43 @@ export async function downloadModelViaBrowser({
   }
   const ctx = { fetchImpl, id, quant: prep.quant, adminToken, chunkBytes };
   let moved = (prep.files || []).reduce((n, f) => n + (Number(f.offset) || 0), 0);
+  // 还没传第一个字节就先给个 0%：别让界面停在“正在读取文件列表”，误以为卡住
+  note(`正在下载（浏览器通道）：${(moved / 1e9).toFixed(2)} / ${((prep.total || 0) / 1e9).toFixed(2)} GB（${prep.total ? Math.floor((moved / prep.total) * 100) : 0}%），关掉这个页面会中断，重新点下载可续传。`);
   try {
-    for (const file of prep.files || []) {
-      if (file.done || (Number(file.offset) || 0) >= file.size) continue;
-      let fileBase = Number(file.offset) || 0;
-      await downloadOneFileViaBrowser({
-        ...ctx,
-        file,
-        onProgress: (sentNow) => {
-          moved += sentNow - fileBase;
-          fileBase = sentNow;
-          const pct = prep.total ? Math.floor((moved / prep.total) * 100) : 0;
-          note(`正在下载（浏览器通道）：${(moved / 1e9).toFixed(2)} / ${(prep.total / 1e9).toFixed(2)} GB（${pct}%），关掉这个页面会中断，重新点下载可续传。`);
-        },
-      });
-    }
+    // 分片并行：大模型的量化通常有几十个分片文件，3 个一起传比排队逐个传快得多；
+    // 并发只跨文件（服务端按文件分开落 .part），单个文件内部仍顺序传、偏移不会乱。
+    // 一个文件失败时其余在飞的会尽快停下（已落盘的字节都保留，下次续传）。
+    const pending = (prep.files || []).filter((f) => !(f.done || (Number(f.offset) || 0) >= f.size));
+    const sentByPath = new Map(pending.map((f) => [f.path, Number(f.offset) || 0]));
+    let firstError = null;
+    let cursor = 0;
+    const worker = async () => {
+      for (;;) {
+        if (firstError) return;
+        const file = pending[cursor];
+        cursor += 1;
+        if (!file) return;
+        try {
+          await downloadOneFileViaBrowser({
+            ...ctx,
+            file,
+            shouldStop: () => !!firstError,
+            onProgress: (sentNow) => {
+              sentByPath.set(file.path, sentNow);
+              moved = (prep.files || []).reduce((n, f) => n
+                + (sentByPath.has(f.path) ? sentByPath.get(f.path) : (Number(f.offset) || 0)), 0);
+              const pct = prep.total ? Math.floor((moved / prep.total) * 100) : 0;
+              note(`正在下载（浏览器通道）：${(moved / 1e9).toFixed(2)} / ${(prep.total / 1e9).toFixed(2)} GB（${pct}%），关掉这个页面会中断，重新点下载可续传。`);
+            },
+          });
+        } catch (err) {
+          if (!firstError) firstError = err;
+          return;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, Math.max(1, pending.length)) }, () => worker()));
+    if (firstError) throw firstError;
     const out = await adminJson(fetchImpl, `/api/native/models/${encodeURIComponent(id)}/browser-download/finish`, {
       token: adminToken,
       body: { quant: prep.quant },

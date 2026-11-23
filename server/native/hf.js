@@ -134,8 +134,16 @@ export function resolveFileUrl(repo, filePath) {
  * 下载单个文件到 dest（先写 .part，支持 Range 断点续传，完成后改名）。
  * @returns {Promise<{bytes: number, resumed: boolean}>}
  */
-export async function downloadFile({ url, dest, fetchImpl = fetch, signal, onProgress, headers: extraHeaders = {} } = {}) {
+export async function downloadFile({ url, dest, fetchImpl = fetch, signal, onProgress, headers: extraHeaders = {}, expectedSize = 0 } = {}) {
   await mkdir(path.dirname(dest), { recursive: true });
+  // 已转正的完整文件不要再下一遍：分片权重失败重试时，逐片检查能省下大量重复流量
+  // （以前只认 .part，下完转正的分片在重试时会被从头再拉一次，用户看着就是“又从 0 开始”）。
+  if (expectedSize > 0) {
+    try {
+      const st = await stat(dest);
+      if (st.size === expectedSize) return { bytes: st.size, resumed: true, skipped: true };
+    } catch { /* 正式文件不在，走下面的 .part 续传 */ }
+  }
   const part = `${dest}.part`;
   let offset = 0;
   try {
@@ -145,7 +153,13 @@ export async function downloadFile({ url, dest, fetchImpl = fetch, signal, onPro
   }
   const headers = { ...extraHeaders };
   if (offset > 0) headers.range = `bytes=${offset}-`;
-  const res = await fetchImpl(url, { headers, signal, redirect: 'follow' });
+  let res;
+  try {
+    res = await fetchImpl(url, { headers, signal, redirect: 'follow' });
+  } catch (err) {
+    if (err?.name === 'AbortError' || signal?.aborted) throw err;
+    throw hfNetworkError(err, HF_TIMEOUT_MS);
+  }
   if (res.status === 416 && offset > 0) {
     // 服务器说范围无效：多半是 .part 已完整，直接收尾
     await rename(part, dest);
@@ -165,7 +179,13 @@ export async function downloadFile({ url, dest, fetchImpl = fetch, signal, onPro
     done += chunk.length;
     onProgress?.({ downloaded: done, total });
   });
-  await pipeline(body, out, { signal });
+  try {
+    await pipeline(body, out, { signal });
+  } catch (err) {
+    if (err?.name === 'AbortError' || signal?.aborted) throw err;
+    // 传到一半断线：.part 已落盘的部分保留，下次重试按偏移续传，不用从头来
+    throw new Error(`下载中断（${err?.message || '网络错误'}），已下载的部分已保留，重新下载会从断点续传。`);
+  }
   const finalSize = (await stat(part)).size;
   if (total && finalSize !== total) {
     throw new Error(`文件下载不完整：期望 ${total} 字节，实际 ${finalSize} 字节。可重试续传。`);
