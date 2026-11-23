@@ -12,7 +12,7 @@
  *    走 Hugging Face 云端推理，模型 id 不变、用量照常统计。
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   groupFilesByQuant,
@@ -635,6 +635,214 @@ export class NativeEngine {
       }
     })();
     return job;
+  }
+
+  /**
+   * 浏览器通道：用浏览器已经取到的仓库文件树在本地分组（计算规则与服务端直连
+   * 完全一致，只是取数的人换成浏览器——浏览器能走代理/系统网络，服务端直连
+   * 在很多用户电脑上连不上 Hugging Face）。返回分组并写入量化缓存。
+   */
+  groupQuantsFromFiles(id, files) {
+    const model = this.resolveModel(id);
+    if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
+    const clean = [];
+    for (const f of Array.isArray(files) ? files.slice(0, 50000) : []) {
+      if (!f || typeof f.path !== 'string') continue;
+      clean.push({ path: f.path, size: Math.max(0, Number(f.size) || 0), sha256: typeof f.sha256 === 'string' ? f.sha256 : '' });
+    }
+    const grouped = groupFilesByQuant(this._safeListFiles(clean, model.repo));
+    if (!grouped.length) {
+      throw Object.assign(new Error(`仓库 ${model.repo} 里没有找到可用的 GGUF 量化文件。`), { status: 400 });
+    }
+    this.quantCache.set(model.repo, { at: Date.now(), grouped });
+    return grouped;
+  }
+
+  /** 过滤掉会逃出模型目录的文件路径（浏览器传回的清单不可盲信）。 */
+  _safeListFiles(files, repo) {
+    const out = [];
+    for (const f of files) {
+      const p = String(f.path || '');
+      if (!p || p.length > 512 || p.includes('\\') || p.includes('\0')) continue;
+      if (p.startsWith('/') || /^[a-zA-Z]:/.test(p)) continue;
+      const parts = p.split('/');
+      if (parts.some((seg) => seg === '..' || seg === '')) continue;
+      out.push({ ...f, path: p });
+    }
+    return out;
+  }
+
+  /** 单个仓库相对路径是否安全（不逃出量化目录）。 */
+  _isSafeRepoPath(p) {
+    if (typeof p !== 'string' || !p || p.length > 512) return false;
+    if (p.includes('\\') || p.includes('\0') || p.startsWith('/') || /^[a-zA-Z]:/.test(p)) return false;
+    return p.split('/').every((seg) => seg !== '..' && seg !== '');
+  }
+
+  _pickQuantEntry(grouped, quant) {
+    return grouped.find((g) => g.quant === String(quant || '').toUpperCase())
+      || grouped.find((g) => g.quant === pickDefaultQuant(grouped));
+  }
+
+  /**
+   * 浏览器通道下载-准备：返回每个文件的下载地址与已落盘偏移（断点续传）。
+   * files 是浏览器取到的文件树（可省，省时走服务端直连列树，兜底用）。
+   */
+  async prepareBrowserDownload(id, quant, files) {
+    await this._preferLocal(id);
+    const model = this.resolveModel(id);
+    if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
+    const grouped = Array.isArray(files) && files.length
+      ? this.groupQuantsFromFiles(id, files)
+      : await this.availableQuants(id);
+    const entry = this._pickQuantEntry(grouped, quant);
+    if (!entry) throw Object.assign(new Error(`仓库里没有量化：${quant}`), { status: 400 });
+    const key = `${id}@${entry.quant}`;
+    const downloaded = await this.downloadedQuants(id);
+    if (downloaded.some((d) => d.quant === entry.quant)) {
+      const done = { id, quant: entry.quant, state: 'done', downloaded: entry.totalBytes, total: entry.totalBytes, error: '' };
+      this.downloads.set(key, done);
+      return { id, quant: entry.quant, state: 'done', total: entry.totalBytes, files: [] };
+    }
+    const existing = this.downloads.get(key);
+    if (existing?.state === 'downloading' && existing.via !== 'browser') {
+      throw Object.assign(new Error('该量化已有软件直连下载在进行中，等它完成或失败后再试。'), { status: 409 });
+    }
+    const free = await freeDiskBytes(this.modelsDir);
+    if (Number.isFinite(free) && free < entry.totalBytes * 1.05) {
+      throw Object.assign(new Error(`磁盘空间不足：该量化需要约 ${(entry.totalBytes / 1e9).toFixed(1)} GB，可用约 ${(free / 1e9).toFixed(1)} GB。`), { status: 507 });
+    }
+    const dir = this.modelDir(id, entry.quant);
+    const job = existing?.via === 'browser' && existing.state === 'downloading'
+      ? existing
+      : {
+          id, quant: entry.quant, state: 'downloading', downloaded: 0, total: entry.totalBytes,
+          error: '', via: 'browser', entry, receivedByFile: new Map(),
+        };
+    job.entry = entry;
+    if (!(job.receivedByFile instanceof Map)) job.receivedByFile = new Map();
+    this.downloads.set(key, job);
+    const outFiles = [];
+    let sum = 0;
+    for (const file of entry.files) {
+      if (!this._isSafeRepoPath(file.path)) {
+        throw Object.assign(new Error(`仓库文件名不安全，已拒绝：${file.path}`), { status: 400 });
+      }
+      const dest = path.join(dir, file.path);
+      await mkdir(path.dirname(dest), { recursive: true });
+      const part = `${dest}.part`;
+      let offset = 0;
+      try {
+        const st = await stat(dest);
+        if (st.size === file.size) offset = file.size;
+      } catch { /* 正式文件不在，看 .part */ }
+      if (offset < file.size) {
+        try {
+          const st = await stat(part);
+          offset = st.size;
+          if (offset > file.size) {
+            // 半成品比目标还大：损坏，重下
+            await rm(part, { force: true });
+            offset = 0;
+          } else if (offset === file.size) {
+            offset = file.size;
+          }
+        } catch { offset = 0; }
+      }
+      job.receivedByFile.set(file.path, offset);
+      sum += offset;
+      outFiles.push({ path: file.path, size: file.size, url: resolveFileUrl(model.repo, file.path), offset, done: offset >= file.size });
+    }
+    job.downloaded = sum;
+    return { id, quant: entry.quant, state: 'downloading', total: entry.totalBytes, files: outFiles };
+  }
+
+  /**
+   * 浏览器通道下载-收一块：把浏览器传来的原始字节顺序追加到 .part。
+   * expectedOffset 必须与服务端已落盘大小一致，防止错位写坏权重。
+   */
+  async receiveBrowserChunk(id, quant, filePath, expectedOffset, buffer) {
+    const model = this.resolveModel(id);
+    if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
+    const key = `${id}@${String(quant || '').toUpperCase()}`;
+    const job = this.downloads.get(key);
+    if (!job || job.state !== 'downloading' || job.via !== 'browser' || !job.entry) {
+      throw Object.assign(new Error('没有进行中的浏览器通道下载，请重新点下载。'), { status: 409 });
+    }
+    if (!this._isSafeRepoPath(filePath) || !job.entry.files.some((f) => f.path === filePath)) {
+      throw Object.assign(new Error(`文件不在本次下载清单里：${filePath}`), { status: 400 });
+    }
+    const part = path.join(this.modelDir(id, job.quant), `${filePath}.part`);
+    await mkdir(path.dirname(part), { recursive: true });
+    let current = 0;
+    try { current = (await stat(part)).size; } catch { current = 0; }
+    if (Number.isFinite(expectedOffset) && expectedOffset !== current) {
+      const err = Object.assign(new Error(`写入位置对不上（软件已存 ${current} 字节，你以为 ${expectedOffset} 字节），请重新点下载自动续传。`), { status: 409 });
+      err.received = current;
+      throw err;
+    }
+    if (buffer?.length) await appendFile(part, buffer);
+    const received = current + (buffer?.length || 0);
+    job.receivedByFile.set(filePath, received);
+    job.downloaded = [...job.receivedByFile.values()].reduce((n, v) => n + v, 0);
+    job.lastChunkAt = Date.now();
+    return { received, downloaded: job.downloaded, total: job.total };
+  }
+
+  /** 浏览器通道下载-收尾：核对每个文件大小，.part 转正并写清单。 */
+  async finishBrowserDownload(id, quant) {
+    const model = this.resolveModel(id);
+    if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
+    const key = `${id}@${String(quant || '').toUpperCase()}`;
+    const job = this.downloads.get(key);
+    if (!job?.entry) throw Object.assign(new Error('没有这次下载的清单，请重新点下载。'), { status: 409 });
+    const dir = this.modelDir(id, job.quant);
+    for (const file of job.entry.files) {
+      const dest = path.join(dir, file.path);
+      const part = `${dest}.part`;
+      let ok = false;
+      try { ok = (await stat(dest)).size === file.size; } catch { ok = false; }
+      if (!ok) {
+        let partSize = -1;
+        try { partSize = (await stat(part)).size; } catch { partSize = -1; }
+        if (partSize === file.size) {
+          await mkdir(path.dirname(dest), { recursive: true });
+          await rename(part, dest);
+          ok = true;
+        }
+      }
+      if (!ok) {
+        job.state = 'error';
+        job.error = `文件 ${file.path} 还没传完整，重新点下载会自动续传。`;
+        throw Object.assign(new Error(job.error), { status: 409 });
+      }
+    }
+    await writeFile(
+      path.join(dir, 'manifest.json'),
+      `${JSON.stringify({
+        id,
+        quant: job.quant,
+        repo: model.repo,
+        files: job.entry.files,
+        totalBytes: job.entry.totalBytes,
+        downloadedAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+    );
+    job.state = 'done';
+    job.downloaded = job.total;
+    job.error = '';
+    return { id, quant: job.quant, state: 'done' };
+  }
+
+  /** 浏览器通道下载-失败标记：保留 .part，下次点下载按偏移续传。 */
+  failBrowserDownload(id, quant, message) {
+    const key = `${id}@${String(quant || '').toUpperCase()}`;
+    const job = this.downloads.get(key);
+    if (job && job.state === 'downloading') {
+      job.state = 'error';
+      job.error = String(message || '浏览器通道下载中断').slice(0, 300);
+    }
+    return { ok: true };
   }
 
   /** 管理员：删除已下载权重（不删正在运行的）。整模型删除时同时注销自定义/云端登记。 */

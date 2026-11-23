@@ -83,7 +83,7 @@ import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAcc
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
 import { pendingModels } from './pending-models.js';
 import { clearApiAdminSession, loadApiAdminSession, saveApiAdminSession } from './api-admin-auth.js';
-import { fetchNativeQuants, fetchNativeStatus, hfModelInfo, hfSearch, nativeAdminRequest } from './engines/native-client.js';
+import { downloadModelViaBrowser, fetchNativeQuants, fetchNativeStatus, fetchQuantsViaBrowser, hfModelInfo, hfSearch, nativeAdminRequest } from './engines/native-client.js';
 import { DEFAULT_PRESET_ID, findPreset, getPresetId, layerParams, PRESETS, presetOverrides, setPresetId } from './presets.js';
 import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
@@ -3287,9 +3287,16 @@ function buildNativeModelRow(m, admin) {
     btn.disabled = true;
     btn.textContent = '正在读取…';
     placeholder.textContent = '正在读取量化列表…';
-    setQuantStatus('正在从 Hugging Face 读取量化列表，网速慢时可能要等几十秒…');
+    setQuantStatus('正在读取量化列表（优先经浏览器，和网页版同一条网络路）…');
     try {
-      const quants = await fetchNativeQuants(m.id, getToken());
+      let quants = null;
+      let viaBrowser = false;
+      try {
+        quants = await fetchQuantsViaBrowser({ id: m.id, repo: m.repo, token: getToken() });
+        viaBrowser = true;
+      } catch {
+        quants = await fetchNativeQuants(m.id, getToken());
+      }
       placeholder.textContent = '选择量化（已下载的排在前面）';
       quantSelect.replaceChildren(placeholder, ...(m.downloaded || []).map((d) => {
         const opt = document.createElement('option');
@@ -3302,7 +3309,7 @@ function buildNativeModelRow(m, admin) {
         opt.textContent = `${q.quant} · ${q.sizeGB} GB · 内存约 ${q.ramGB} GB`;
         return opt;
       }));
-      setQuantStatus(`已读取 ${quants.length} 个量化：在左边下拉里选一档，再点“下载所选量化”。`);
+      setQuantStatus(`已读取 ${quants.length} 个量化（${viaBrowser ? '经浏览器通道读取' : '经软件直连读取'}）：在左边下拉里选一档，再点“下载所选量化”。`);
       if (els.apiNativeError) els.apiNativeError.textContent = '';
     } catch (err) {
       placeholder.textContent = (m.downloaded || []).length ? '选择量化（已下载的排在前面）' : '先获取量化列表';
@@ -3315,10 +3322,25 @@ function buildNativeModelRow(m, admin) {
   }));
 
   controls.append(mkBtn(isLoading ? '加载中…' : isRunning ? '运行中' : '下载所选量化', () => {
-    void nativeAction(() => nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
-      token: state.apiKeyAdminToken,
-      body: { quant: quantSelect.value || undefined },
-    }));
+    void nativeAction(async () => {
+      // 与普通网页版同一条网络路：浏览器负责从 Hugging Face 取数（自动走
+      // 浏览器/系统代理），软件只落盘。浏览器通道不可用时自动回退软件直连。
+      try {
+        await downloadModelViaBrowser({
+          id: m.id,
+          repo: m.repo,
+          quant: quantSelect.value || undefined,
+          adminToken: state.apiKeyAdminToken,
+          onStatus: (text) => setQuantStatus(text),
+        });
+      } catch {
+        setQuantStatus('浏览器通道不可用，已自动改用软件直连下载…');
+        await nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
+          token: state.apiKeyAdminToken,
+          body: { quant: quantSelect.value || undefined },
+        });
+      }
+    });
   }, { disabled: !admin || isRunning || isLoading || !!dl }));
 
   if (m.kind === 'hf' && !(m.downloaded || []).length
