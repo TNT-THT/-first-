@@ -57,10 +57,21 @@ export async function hfModelInfo(repo, token) {
 }
 
 /** 某模型在仓库里可下载的量化列表（需网站登录令牌由 api.js 的 getToken 提供）。 */
-export async function fetchNativeQuants(id, token) {
+export async function fetchNativeQuants(id, token, { timeoutMs = 40000 } = {}) {
   const headers = {};
   if (token) headers.authorization = `Bearer ${token}`;
-  const res = await fetch(`/api/native/models/${encodeURIComponent(id)}/quants`, { headers, cache: 'no-store' });
+  const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
+    ? AbortSignal.timeout(timeoutMs)
+    : undefined;
+  let res;
+  try {
+    res = await fetch(`/api/native/models/${encodeURIComponent(id)}/quants`, { headers, cache: 'no-store', signal });
+  } catch (err) {
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new Error('读取量化列表超时：连接模型仓库太慢或不可达，请检查网络后重试。');
+    }
+    throw new Error(`读取量化列表失败（${err?.message || '网络错误'}），请检查网络后重试。`);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `请求失败（HTTP ${res.status}）`);
   return data.quants || [];

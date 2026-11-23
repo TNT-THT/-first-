@@ -3273,9 +3273,24 @@ function buildNativeModelRow(m, admin) {
     return btn;
   };
 
-  controls.append(mkBtn('获取量化列表', async () => {
+  // 行内状态：点按钮的反馈就显示在这一行，不让用户去面板别处找红字
+  const quantStatus = document.createElement('p');
+  quantStatus.className = 'muted small';
+  quantStatus.hidden = true;
+  const setQuantStatus = (text, isError = false) => {
+    quantStatus.textContent = text;
+    quantStatus.className = isError ? 'error small' : 'muted small';
+    quantStatus.hidden = !text;
+  };
+  controls.append(mkBtn('获取量化列表', async (ev) => {
+    const btn = ev.currentTarget;
+    btn.disabled = true;
+    btn.textContent = '正在读取…';
+    placeholder.textContent = '正在读取量化列表…';
+    setQuantStatus('正在从 Hugging Face 读取量化列表，网速慢时可能要等几十秒…');
     try {
       const quants = await fetchNativeQuants(m.id, getToken());
+      placeholder.textContent = '选择量化（已下载的排在前面）';
       quantSelect.replaceChildren(placeholder, ...(m.downloaded || []).map((d) => {
         const opt = document.createElement('option');
         opt.value = d.quant;
@@ -3287,9 +3302,15 @@ function buildNativeModelRow(m, admin) {
         opt.textContent = `${q.quant} · ${q.sizeGB} GB · 内存约 ${q.ramGB} GB`;
         return opt;
       }));
+      setQuantStatus(`已读取 ${quants.length} 个量化：在左边下拉里选一档，再点“下载所选量化”。`);
       if (els.apiNativeError) els.apiNativeError.textContent = '';
     } catch (err) {
+      placeholder.textContent = (m.downloaded || []).length ? '选择量化（已下载的排在前面）' : '先获取量化列表';
+      setQuantStatus(err.message || '读取量化列表失败，请检查网络后重试。', true);
       if (els.apiNativeError) els.apiNativeError.textContent = err.message || '读取量化列表失败';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '获取量化列表';
     }
   }));
 
@@ -3370,7 +3391,7 @@ function buildNativeModelRow(m, admin) {
     }));
   }, { disabled: !admin || isRunning || !(m.downloaded || []).length }));
 
-  row.append(controls);
+  row.append(controls, quantStatus);
   return row;
 }
 

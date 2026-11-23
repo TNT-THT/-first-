@@ -10,13 +10,38 @@ import { pipeline } from 'node:stream/promises';
 
 export const HF_BASE = 'https://huggingface.co';
 
+/** HF 接口默认超时：慢/挂死的网络必须在有限时间内给出明确说法，不能让前端无限干等。 */
+export const HF_TIMEOUT_MS = 30000;
+
+function timeoutSignal(timeoutMs) {
+  const ms = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : HF_TIMEOUT_MS;
+  return typeof AbortSignal?.timeout === 'function' ? AbortSignal.timeout(ms) : undefined;
+}
+
+function isTimeoutError(err) {
+  return err?.name === 'TimeoutError' || err?.name === 'AbortError';
+}
+
+/** 把网络层异常翻译成用户看得懂的中文（裸 fetch 只会抛英文 fetch failed）。 */
+function hfNetworkError(err, timeoutMs) {
+  if (isTimeoutError(err)) {
+    return new Error(`连接 Hugging Face 超时（${Math.round((timeoutMs || HF_TIMEOUT_MS) / 1000)} 秒），网络可能较慢或不可达，请检查网络后重试。`);
+  }
+  return new Error(`无法连接 Hugging Face（${err?.message || '网络错误'}），请检查网络后重试。`);
+}
+
 /**
  * 列出仓库全部文件（递归）。
  * @returns {Promise<Array<{path: string, size: number, sha256: string}>>}
  */
-export async function fetchRepoFiles(repo, { fetchImpl = fetch } = {}) {
+export async function fetchRepoFiles(repo, { fetchImpl = fetch, timeoutMs = HF_TIMEOUT_MS } = {}) {
   const url = `${HF_BASE}/api/models/${repo}/tree/main?recursive=true`;
-  const res = await fetchImpl(url, { headers: { accept: 'application/json' } });
+  let res;
+  try {
+    res = await fetchImpl(url, { headers: { accept: 'application/json' }, signal: timeoutSignal(timeoutMs) });
+  } catch (err) {
+    throw hfNetworkError(err, timeoutMs);
+  }
   if (!res.ok) {
     throw new Error(`读取模型仓库 ${repo} 失败（HTTP ${res.status}），请确认仓库存在且网络可达 Hugging Face。`);
   }
@@ -43,7 +68,12 @@ export async function searchModels({ query = '', limit = 24, sort = 'downloads',
   });
   const q = String(query || '').trim();
   if (q) params.set('search', q);
-  const res = await fetchImpl(`${HF_BASE}/api/models?${params}`, { headers: { accept: 'application/json' } });
+  let res;
+  try {
+    res = await fetchImpl(`${HF_BASE}/api/models?${params}`, { headers: { accept: 'application/json' }, signal: timeoutSignal(HF_TIMEOUT_MS) });
+  } catch (err) {
+    throw hfNetworkError(err, HF_TIMEOUT_MS);
+  }
   if (!res.ok) throw new Error(`Hugging Face 搜索失败（HTTP ${res.status}），请检查网络后重试。`);
   const list = await res.json();
   if (!Array.isArray(list)) throw new Error('Hugging Face 搜索返回了无法识别的结果。');
@@ -64,8 +94,13 @@ export async function searchModels({ query = '', limit = 24, sort = 'downloads',
 }
 
 /** 仓库详情：真实文件树 + 格式判定（搜索结果点开/一键使用时调用）。 */
-export async function fetchModelInfo(repo, { fetchImpl = fetch } = {}) {
-  const res = await fetchImpl(`${HF_BASE}/api/models/${repo}`, { headers: { accept: 'application/json' } });
+export async function fetchModelInfo(repo, { fetchImpl = fetch, timeoutMs = HF_TIMEOUT_MS } = {}) {
+  let res;
+  try {
+    res = await fetchImpl(`${HF_BASE}/api/models/${repo}`, { headers: { accept: 'application/json' }, signal: timeoutSignal(timeoutMs) });
+  } catch (err) {
+    throw hfNetworkError(err, timeoutMs);
+  }
   if (!res.ok) {
     throw Object.assign(
       new Error(res.status === 404 ? `仓库不存在：${repo}` : `读取仓库 ${repo} 失败（HTTP ${res.status}）。`),
