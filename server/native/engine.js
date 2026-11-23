@@ -511,7 +511,8 @@ export class NativeEngine {
       if (/^(\.gitattributes|README)/i.test(file.path)) continue;
       const dest = path.join(dir, file.path);
       await mkdir(path.dirname(dest), { recursive: true });
-      await downloadFile({ url: resolveFileUrl(model.repo, file.path), dest, fetchImpl: this.fetchImpl, headers: this._hfAuthHeaders() });
+      // expectedSize 让已下完的文件直接跳过：快照中断后重试不从头来
+      await downloadFile({ url: resolveFileUrl(model.repo, file.path), dest, fetchImpl: this.fetchImpl, headers: this._hfAuthHeaders(), expectedSize: file.size });
       saved.push({ path: file.path, size: file.size });
     }
     return saved;
@@ -702,23 +703,47 @@ export class NativeEngine {
     const dir = this.modelDir(id, entry.quant);
     await mkdir(dir, { recursive: true });
     (async () => {
+      const ac = new AbortController();
       try {
-        let base = 0;
-        for (const file of entry.files) {
-          const dest = path.join(dir, file.path);
-          await mkdir(path.dirname(dest), { recursive: true });
-          await downloadFile({
-            url: resolveFileUrl(model.repo, file.path),
-            dest,
-            fetchImpl: this.fetchImpl,
-            headers: this._hfAuthHeaders(),
-            onProgress: ({ downloaded }) => {
-              job.downloaded = base + downloaded;
-            },
-          });
-          base += file.size;
-          job.downloaded = base;
-        }
+        // 大模型通常有几十个分片：3 路并行一起拉，比排队逐个下快得多；
+        // 并发只按文件分工，单个文件内部仍是一条流顺序写，不会写乱。
+        // 已下完的分片由 downloadFile 按大小直接跳过，失败重试不从头来。
+        const perFile = new Array(entry.files.length).fill(0);
+        const bump = () => { job.downloaded = perFile.reduce((n, v) => n + v, 0); };
+        let cursor = 0;
+        let firstError = null;
+        const worker = async () => {
+          for (;;) {
+            if (firstError) return;
+            const i = cursor;
+            cursor += 1;
+            if (i >= entry.files.length) return;
+            const file = entry.files[i];
+            const dest = path.join(dir, file.path);
+            await mkdir(path.dirname(dest), { recursive: true });
+            try {
+              const done = await downloadFile({
+                url: resolveFileUrl(model.repo, file.path),
+                dest,
+                fetchImpl: this.fetchImpl,
+                headers: this._hfAuthHeaders(),
+                signal: ac.signal,
+                expectedSize: file.size,
+                onProgress: ({ downloaded }) => { perFile[i] = downloaded; bump(); },
+              });
+              perFile[i] = Math.max(perFile[i], Number(done?.bytes) || file.size);
+              bump();
+            } catch (err) {
+              if (!firstError) {
+                firstError = err;
+                ac.abort(); // 一片失败就停掉其余在飞的，别让注定要重试的下载白占带宽
+              }
+              return;
+            }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(3, Math.max(1, entry.files.length)) }, () => worker()));
+        if (firstError) throw firstError;
         await writeFile(
           path.join(dir, 'manifest.json'),
           `${JSON.stringify({
