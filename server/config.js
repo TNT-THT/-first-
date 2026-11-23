@@ -48,7 +48,7 @@ export function loadConfig(env = process.env) {
     // 部署在 Nginx / 代理工具等反向代理之后时设为 1，以便正确获取客户端 IP（用于登录限流）。
     trustProxy: env.TRUST_PROXY ? Number(env.TRUST_PROXY) : false,
 
-    appName: env.APP_NAME || 'OJ 刷题助手',
+    appName: env.APP_NAME || 'LLM托管平台——天蓝色1.0',
 
     // ---- 对外 API（模式一：自建服务器 API，OpenAI 兼容 /v1/*）----
     // API_KEYS：逗号分隔的外部调用密钥，可配置多个；也支持单值 API_KEY。
@@ -68,6 +68,22 @@ export function loadConfig(env = process.env) {
     // CORS：允许浏览器跨域调用 /v1/* 的来源（同源网页与 /api/* 不走跨域许可）。'*' 表示任意来源（默认）。
     // 收紧时写逗号分隔的 origin 列表，例如 https://oj.example.com,https://*.example.com
     corsOrigins: parseList(env.CORS_ORIGINS) || ['*'],
+
+    // ---- 本机大模型（llama.cpp 原生引擎，运行 27B~671B 级 GGUF 模型）----
+    // 默认启用：模型管理接口要求 API 管理员令牌，聊天要求网站登录，不会匿名开放。
+    // OJ_NATIVE_MODELS=0 关闭。权重与运行库都放在 nativeDataDir，不进安装包。
+    nativeModelsEnabled: env.OJ_NATIVE_MODELS ? env.OJ_NATIVE_MODELS !== '0' : true,
+    nativeDataDir: path.resolve(env.OJ_NATIVE_DATA_DIR || path.join(process.cwd(), 'data', 'native')),
+    // llama.cpp 变体：cpu（默认）| cuda | vulkan，决定下载哪个官方构建。
+    llamaVariant: ['cpu', 'cuda', 'vulkan'].includes(env.OJ_LLAMA_VARIANT) ? env.OJ_LLAMA_VARIANT : 'cpu',
+
+    // ---- 服务端网页搜索（软件版“正经网页搜索”，POST /api/search）----
+    // 任选其一配置即可显著提升稳定性与质量；都不配时用免密钥兜底（Bing RSS + DuckDuckGo）。
+    searchKeys: {
+      tavily: env.TAVILY_API_KEY || '',
+      brave: env.BRAVE_SEARCH_KEY || '',
+      bing: env.BING_SEARCH_KEY || '',
+    },
 
     // 等待上游模型服务开始响应的超时（毫秒，正文流式传输阶段不计时）
     upstreamTimeoutMs: Number(env.UPSTREAM_TIMEOUT_MS ?? 60_000),

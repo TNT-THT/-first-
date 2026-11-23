@@ -72,6 +72,8 @@ function providerOptions(id, { query, enQuery, url, config, settings, fetchImpl,
     baseUrl: url,
     endpoint: url,
     limit: config.maxResults,
+    // 服务端网页搜索用完整问题（服务端自己做查询理解），不吃浏览器侧的关键词裁剪
+    ...(id === 'websearch' ? { query, endpoint: url || '/api/search', limit: Math.max(config.maxResults, 8) } : {}),
     maxSnippetChars: config.maxSnippetChars,
     readerTemplate: settings.readerTemplate || config.smart?.readerTemplate || '',
     fetchImpl,

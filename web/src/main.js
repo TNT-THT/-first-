@@ -20,7 +20,7 @@ import { addCheckRule, checkRuleError, findViolations, listCheckRules } from './
 import { checkWebGPU, getModelRecords, releaseEngine, WEBGPU_MISSING } from './engines/webllm.js';
 import { formatGB, imageModelsOf, isSelectable, sourceSizes, sourceUrls, totalBytes } from './image/catalog.js';
 import { createImageClient } from './image/client.js';
-import { TRAINING_PACKAGE_ASSET, isReleaseAsset, releaseAssetUrl, releasePageUrl } from './release-downloads.js';
+import { STANDALONE_ASSETS, TRAINING_PACKAGE_ASSET, isReleaseAsset, releaseAssetUrl, releasePageUrl } from './release-downloads.js';
 import { estimatePromptTokens, estimateTokens } from './budget.js';
 import {
   USAGE_STORAGE_KEY,
@@ -82,6 +82,8 @@ import {
 import { adminExpiry, grantAdmin, hasAccessGate, isAdmin, revokeAdmin, verifyAccessPassword } from './access.js';
 import { addLocalModel, loadLocalModels, localRecords, removeLocalModel } from './local-models.js';
 import { pendingModels } from './pending-models.js';
+import { clearApiAdminSession, loadApiAdminSession, saveApiAdminSession } from './api-admin-auth.js';
+import { fetchNativeQuants, fetchNativeStatus, hfModelInfo, hfSearch, nativeAdminRequest } from './engines/native-client.js';
 import { DEFAULT_PRESET_ID, findPreset, getPresetId, layerParams, PRESETS, presetOverrides, setPresetId } from './presets.js';
 import { buildDataExport, DATA_SECTIONS, dataExportFilename } from './data-export.js';
 import {
@@ -241,6 +243,27 @@ const els = {
   apiKeyManagerError: $('#apiKeyManagerError'),
   apiKeyList: $('#apiKeyList'),
   apiKeyAdminLogout: $('#apiKeyAdminLogout'),
+  apiNativeSection: $('#apiNativeSection'),
+  apiNativeBinaryStatus: $('#apiNativeBinaryStatus'),
+  apiNativeBinaryBtn: $('#apiNativeBinaryBtn'),
+  apiNativeCtx: $('#apiNativeCtx'),
+  apiNativeGpuLayers: $('#apiNativeGpuLayers'),
+  apiNativeUnloadBtn: $('#apiNativeUnloadBtn'),
+  apiNativeHint: $('#apiNativeHint'),
+  apiNativeList: $('#apiNativeList'),
+  apiNativeError: $('#apiNativeError'),
+  apiHfSearchInput: $('#apiHfSearchInput'),
+  apiHfFilter: $('#apiHfFilter'),
+  apiHfSearchBtn: $('#apiHfSearchBtn'),
+  apiHfTokenInput: $('#apiHfTokenInput'),
+  apiHfTokenBtn: $('#apiHfTokenBtn'),
+  apiHfTokenStatus: $('#apiHfTokenStatus'),
+  apiHfConvertToolBtn: $('#apiHfConvertToolBtn'),
+  apiHfConvertToolStatus: $('#apiHfConvertToolStatus'),
+  apiHfRunnerBtn: $('#apiHfRunnerBtn'),
+  apiHfRunnerStatus: $('#apiHfRunnerStatus'),
+  apiHfSearchStatus: $('#apiHfSearchStatus'),
+  apiHfResults: $('#apiHfResults'),
   password: $('#password'),
   main: $('#main'),
   brandName: $('#brandName'),
@@ -1341,9 +1364,21 @@ async function send(rawText) {
           queryText: searchInput,
           config: state.search.config,
           prefs: state.search.prefs,
-          settings: state.search.settings,
+          // 软件版（服务端模式）启用服务端网页搜索：搜索引擎 + 正文抓取，与浏览器资料源并行
+          settings: { ...state.search.settings, serverSearch: MODE === 'remote' },
           cache: state.search.cache,
           signal: controller.signal,
+          // 只有打到本站 /api/search 时才带登录令牌，其他公开资料源保持匿名直连
+          fetchImpl: (url, opts = {}) => {
+            if (String(url).startsWith('/api/search')) {
+              const token = getToken();
+              return fetch(url, {
+                ...opts,
+                headers: { ...(opts.headers || {}), ...(token ? { authorization: `Bearer ${token}` } : {}) },
+              });
+            }
+            return fetch(url, opts);
+          },
         });
         if (res.ok) {
           // 资料块和历史卡必须使用同一组、同一长度的摘录；不能把被上下文预算裁掉的候选
@@ -2385,7 +2420,7 @@ function requireAdmin(action) {
  */
 async function downloadSitePackage(file, btn) {
   const isTraining = file === TRAINING_PACKAGE_ASSET;
-  const kind = isTraining ? '一站式训练包' : '网站包';
+  const kind = isTraining ? '一站式训练包' : STANDALONE_ASSETS.includes(file) ? '独立软件' : '网站包';
   if (!requireAdmin(`下载${kind}`)) return;
   const label = btn.textContent;
   btn.disabled = true;
@@ -2494,6 +2529,8 @@ function usageModelLabel(id) {
   } catch { /* 本机清单读取失败时回退到 ID */ }
   const bridged = apiBridgeModels.find((m) => m.id === id);
   if (bridged?.label || bridged?.name) return bridged.label || bridged.name;
+  const native = nativeModels().find((m) => m.id === id);
+  if (native?.name) return `${native.name}（本机大模型）`;
   return id;
 }
 
@@ -2600,6 +2637,12 @@ async function loadApiUsage() {
       headers: { authorization: `Bearer ${token}` },
       cache: 'no-store',
     });
+    if (res.status === 401) {
+      // 令牌已失效（过期或被服务端拒绝）：锁定并提示重新验证，避免反复失败却不知道原因
+      lockApiKeyManager();
+      els.usageApiHint.textContent = '管理员验证已过期，请在“API 接入”中重新验证一次（之后长期有效）。';
+      return;
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     if (state.apiKeyAdminToken !== token) return; // 加载期间管理员已退出/切换，丢弃旧结果
@@ -2624,7 +2667,7 @@ function openUsagePanel() {
       loadApiUsage();
     } else {
       els.usageApiHint.textContent = state.appConfig.apiKeyManagerEnabled
-        ? 'API 用量仅管理员可见：请先点顶部“API 管理”验证管理员口令，再回到本面板查看。'
+        ? 'API 用量仅管理员可见：请先在“API 接入”中验证一次管理员口令（验证后长期有效，关闭面板、刷新页面都不用再验证；只有点“锁定管理面板”或 30 天到期才需重新验证），然后回到本面板查看。'
         : '服务端未配置 API_ADMIN_PASSWORD，API 用量不可见（管理员功能未启用）。';
       els.usageApiBody.hidden = true;
       els.usageApiClear.hidden = true;
@@ -2966,11 +3009,24 @@ let apiPlaygroundController = null;
 let apiPlaygroundRunId = 0;
 let apiBridgeModels = [];
 
+/** 本机大模型（llama.cpp 原生引擎）状态：只有带服务端的部署才有，静态版恒为 null。 */
+let nativeStatus = null;
+function nativeModels() {
+  return Array.isArray(nativeStatus?.models) ? nativeStatus.models : [];
+}
+function isNativeModelId(id) {
+  return nativeModels().some((m) => m.id === id);
+}
+/** 聊天可选的全部模型（桥接网页模型 + 本机大模型）。 */
+function chatModelIds() {
+  return [...apiBridgeModels.map((m) => m.id), ...nativeModels().map((m) => m.id)];
+}
+
 function apiDisplayModel() {
   if (state.appConfig.localBrowserBridge) {
     // 调试台/示例使用下拉框中选中的模型（每次请求可不同）；未选或已失效时用第一个
     const selected = els.apiPlaygroundModel?.value || '';
-    return apiBridgeModels.some((m) => m.id === selected) ? selected : apiBridgeModels[0]?.id || '';
+    return chatModelIds().includes(selected) ? selected : apiBridgeModels[0]?.id || nativeModels()[0]?.id || '';
   }
   return state.appConfig.model || '';
 }
@@ -2981,7 +3037,10 @@ function renderPlaygroundModelOptions() {
   if (!select) return;
   const prev = select.value;
   const options = state.appConfig.localBrowserBridge
-    ? apiBridgeModels
+    ? [
+        ...apiBridgeModels,
+        ...nativeModels().map((m) => ({ id: m.id, label: `${m.name}（本机大模型·${m.paramsB}B）` })),
+      ]
     : state.appConfig.model
       ? [{ id: state.appConfig.model, label: state.appConfig.model }]
       : [];
@@ -3009,7 +3068,7 @@ function renderApiAccessInfo() {
   els.apiAccessEndpoint.textContent = `${apiBase}/chat/completions`;
   if (state.appConfig.localBrowserBridge) {
     els.apiAccessModel.textContent = apiDisplayModel()
-      ? `${apiDisplayModel()}（共 ${apiBridgeModels.length} 个网页模型；API 以每次请求里的 model 为准，完整列表请求 GET /v1/models；下方调试台可切换这里显示的模型）`
+      ? `${apiDisplayModel()}（共 ${apiBridgeModels.length} 个网页模型${nativeModels().length ? ` + ${nativeModels().length} 个本机大模型` : ''}；API 以每次请求里的 model 为准，完整列表请求 GET /v1/models；下方调试台可切换这里显示的模型）`
       : '等待本机网页连接模型…';
   } else {
     els.apiAccessModel.textContent = state.appConfig.model || '服务端尚未配置模型';
@@ -3085,6 +3144,308 @@ async function refreshBridgeStatus() {
   }
 }
 
+// ---------- 本机大模型（llama.cpp 原生引擎） ----------
+
+let nativeRefreshTimer = null;
+
+/** 拉取本机大模型状态并刷新下拉框与管理面板；静态版没有该接口，自动保持隐藏。 */
+async function refreshNativeStatus() {
+  if (MODE !== 'remote') return;
+  const data = await fetchNativeStatus();
+  const wasEnabled = !!nativeStatus;
+  nativeStatus = data;
+  if (els.apiNativeSection) els.apiNativeSection.hidden = !data;
+  if (data) {
+    renderNativePanel();
+    renderBridgeModelOptions();
+    renderPlaygroundModelOptions();
+    // 下载/加载/转换进行中时加快刷新，方便看进度
+    const busy = nativeModels().some((m) => (m.downloads || []).some((d) => d.state === 'downloading'))
+      || nativeModels().some((m) => m.conversion?.state === 'running')
+      || nativeModels().some((m) => m.pythonJob?.state === 'running')
+      || nativeStatus.hf?.converterJob?.state === 'running'
+      || nativeStatus.hf?.runnerJob?.state === 'running'
+      || nativeStatus.running?.state === 'loading';
+    if (busy) {
+      clearTimeout(nativeRefreshTimer);
+      nativeRefreshTimer = setTimeout(refreshNativeStatus, 2000);
+    }
+  } else if (wasEnabled) {
+    renderBridgeModelOptions();
+  }
+}
+
+function buildNativeModelRow(m, admin) {
+  const row = document.createElement('div');
+  row.className = 'native-model-row';
+  const running = nativeStatus?.running || {};
+  const isRunning = running.modelId === m.id && running.state === 'ready';
+  const isLoading = running.modelId === m.id && running.state === 'loading';
+
+  const head = document.createElement('div');
+  head.className = 'native-model-head';
+  const title = document.createElement('strong');
+  title.textContent = m.name;
+  const meta = document.createElement('span');
+  meta.className = 'muted small';
+  meta.textContent = `${m.vendor} · ${m.paramsB ? `${m.paramsB}B${m.activeB ? `（激活约 ${m.activeB}B）` : ''} · ` : ''}${m.reasoning ? '推理 · ' : ''}${m.kind === 'hf' ? `HF：${m.repo} · ` : ''}${nativeStateText(m)}`;
+  head.append(title, meta);
+  row.append(head);
+
+  if (m.note) {
+    const note = document.createElement('p');
+    note.className = 'muted small';
+    note.textContent = m.note;
+    row.append(note);
+  }
+
+  const dl = (m.downloads || []).find((d) => d.state === 'downloading');
+  if (dl) {
+    const pct = dl.total ? Math.floor((dl.downloaded / dl.total) * 100) : 0;
+    const bar = document.createElement('div');
+    bar.className = 'native-progress';
+    const fill = document.createElement('i');
+    fill.style.width = `${pct}%`;
+    bar.append(fill);
+    const label = document.createElement('p');
+    label.className = 'muted small';
+    label.textContent = `正在下载 ${dl.quant}：${(dl.downloaded / 1e9).toFixed(2)} / ${(dl.total / 1e9).toFixed(2)} GB（${pct}%），断网后重新点下载可续传。`;
+    row.append(bar, label);
+  }
+  const dlError = (m.downloads || []).find((d) => d.state === 'error');
+  if (dlError) {
+    const err = document.createElement('p');
+    err.className = 'error small';
+    err.textContent = `下载 ${dlError.quant} 失败：${dlError.error || '未知错误'}（重新点下载可续传）`;
+    row.append(err);
+  }
+  if (m.conversion) {
+    const conv = document.createElement('p');
+    conv.className = m.conversion.state === 'error' ? 'error small' : 'muted small';
+    conv.textContent = m.conversion.state === 'running'
+      ? `正在转换：${m.conversion.stage || '处理中'}…`
+      : m.conversion.state === 'error'
+        ? `转换失败：${m.conversion.error || '未知错误'}`
+        : '转换完成，已生成 GGUF，可直接加载。';
+    row.append(conv);
+  }
+  if (m.remote && !(m.downloaded || []).length) {
+    const remote = document.createElement('p');
+    remote.className = 'muted small';
+    remote.textContent = '已启用云端使用（Hugging Face 云端推理）：在聊天页模型选择里选它即可，不占用本机内存。';
+    row.append(remote);
+  }
+  if (m.pythonJob) {
+    const pj = document.createElement('p');
+    pj.className = m.pythonJob.state === 'error' ? 'error small' : 'muted small';
+    pj.textContent = m.pythonJob.state === 'running'
+      ? `本地运行（Python）：${m.pythonJob.stage || '启动中'}…`
+      : m.pythonJob.state === 'error'
+        ? `本地运行（Python）失败：${m.pythonJob.error || '未知错误'}`
+        : '本地运行（Python）中。';
+    row.append(pj);
+  }
+
+  const controls = document.createElement('div');
+  controls.className = 'api-access-actions';
+
+  const quantSelect = document.createElement('select');
+  quantSelect.setAttribute('aria-label', `${m.name} 量化`);
+  const placeholder = document.createElement('option');
+  placeholder.value = '';
+  placeholder.textContent = (m.downloaded || []).length ? '选择量化（已下载的排在前面）' : '先获取量化列表';
+  quantSelect.append(placeholder);
+  for (const d of m.downloaded || []) {
+    const opt = document.createElement('option');
+    opt.value = d.quant;
+    opt.textContent = `${d.quant}（已下载 · ${(d.totalBytes / 1e9).toFixed(1)} GB）`;
+    quantSelect.append(opt);
+  }
+  controls.append(quantSelect);
+
+  const mkBtn = (text, onClick, { disabled = false } = {}) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn ghost small';
+    btn.textContent = text;
+    btn.disabled = disabled;
+    btn.addEventListener('click', onClick);
+    return btn;
+  };
+
+  controls.append(mkBtn('获取量化列表', async () => {
+    try {
+      const quants = await fetchNativeQuants(m.id, getToken());
+      quantSelect.replaceChildren(placeholder, ...(m.downloaded || []).map((d) => {
+        const opt = document.createElement('option');
+        opt.value = d.quant;
+        opt.textContent = `${d.quant}（已下载 · ${(d.totalBytes / 1e9).toFixed(1)} GB）`;
+        return opt;
+      }), ...quants.filter((q) => !(m.downloaded || []).some((d) => d.quant === q.quant)).map((q) => {
+        const opt = document.createElement('option');
+        opt.value = q.quant;
+        opt.textContent = `${q.quant} · ${q.sizeGB} GB · 内存约 ${q.ramGB} GB`;
+        return opt;
+      }));
+      if (els.apiNativeError) els.apiNativeError.textContent = '';
+    } catch (err) {
+      if (els.apiNativeError) els.apiNativeError.textContent = err.message || '读取量化列表失败';
+    }
+  }));
+
+  controls.append(mkBtn(isLoading ? '加载中…' : isRunning ? '运行中' : '下载所选量化', () => {
+    void nativeAction(() => nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
+      token: state.apiKeyAdminToken,
+      body: { quant: quantSelect.value || undefined },
+    }));
+  }, { disabled: !admin || isRunning || isLoading || !!dl }));
+
+  if (m.kind === 'hf' && !(m.downloaded || []).length
+    && (m.formats || []).some((f) => f === 'safetensors' || f === 'pytorch')) {
+    controls.append(mkBtn(m.conversion?.state === 'running' ? '转换中…' : '转换并使用', () => {
+      void nativeAction(async () => {
+        try {
+          await nativeAdminRequest('/api/native/hf/convert', { token: state.apiKeyAdminToken, body: { id: m.id } });
+        } catch (err) {
+          if (err.status === 503) {
+            await nativeAdminRequest('/api/native/hf/prepare-converter', { token: state.apiKeyAdminToken });
+            if (els.apiNativeError) els.apiNativeError.textContent = '正在准备转换工具（只需一次），准备好后会自动开始转换；请稍等片刻再点一次“转换并使用”。';
+            return;
+          }
+          throw err;
+        }
+      });
+    }, { disabled: !admin || m.conversion?.state === 'running' }));
+  }
+
+  if (m.kind === 'hf' && (m.formats || []).some((f) => ['safetensors', 'pytorch', 'onnx', 'mlx', 'coreml'].includes(f))) {
+    controls.append(mkBtn(m.pythonJob?.state === 'running' ? '本地运行启动中…' : '本地运行（Python）', () => {
+      void nativeAction(async () => {
+        try {
+          await nativeAdminRequest('/api/native/hf/python', { token: state.apiKeyAdminToken, body: { id: m.id } });
+        } catch (err) {
+          if (err.status === 503) {
+            await nativeAdminRequest('/api/native/hf/prepare-runner', { token: state.apiKeyAdminToken });
+            if (els.apiNativeError) els.apiNativeError.textContent = '正在准备本地运行时（只需一次），准备好后再点一次“本地运行（Python）”。';
+            return;
+          }
+          throw err;
+        }
+      });
+    }, { disabled: !admin || m.pythonJob?.state === 'running' }));
+  }
+
+  if (m.kind === 'hf' && !m.remote) {
+    controls.append(mkBtn('云端使用', () => {
+      void nativeAction(async () => {
+        const out = await nativeAdminRequest('/api/native/hf/use', { token: state.apiKeyAdminToken, body: { repo: m.repo, mode: 'cloud' } });
+        if (out.action === 'needs-token' && els.apiNativeError) {
+          els.apiNativeError.textContent = '云端使用需要先在上方保存 HF Token；不想用云端可继续用本地下载/运行。';
+          els.apiHfTokenInput?.focus();
+        }
+      });
+    }, { disabled: !admin }));
+  }
+
+  controls.append(mkBtn('加载', () => {
+    void nativeAction(async () => {
+      await nativeAdminRequest('/api/native/load', {
+        token: state.apiKeyAdminToken,
+        body: {
+          id: m.id,
+          quant: quantSelect.value || undefined,
+          contextTokens: Number(els.apiNativeCtx?.value) || 8192,
+          gpuLayers: Math.max(0, Number(els.apiNativeGpuLayers?.value) || 0),
+        },
+      });
+    });
+  }, { disabled: !admin || isRunning || isLoading || !(m.downloaded || []).length }));
+
+  controls.append(mkBtn('删除权重', () => {
+    if (!window.confirm(`删除 ${m.name} 已下载的全部权重？之后需要重新下载。`)) return;
+    void nativeAction(() => nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}`, {
+      token: state.apiKeyAdminToken,
+      method: 'DELETE',
+      body: {},
+    }));
+  }, { disabled: !admin || isRunning || !(m.downloaded || []).length }));
+
+  row.append(controls);
+  return row;
+}
+
+/** 执行管理员动作：失败显示原因（401 时按过期处理并锁定），之后刷新状态。 */
+async function nativeAction(fn) {
+  if (els.apiNativeError) els.apiNativeError.textContent = '';
+  try {
+    await fn();
+  } catch (err) {
+    if (err.status === 401 && state.apiKeyAdminToken) {
+      lockApiKeyManager();
+      if (els.apiNativeError) els.apiNativeError.textContent = '管理员验证已过期，请重新验证后再操作大模型。';
+    } else if (els.apiNativeError) {
+      els.apiNativeError.textContent = err.message || '操作失败';
+    }
+  }
+  await refreshNativeStatus();
+}
+
+function renderNativePanel() {
+  if (!els.apiNativeList || !nativeStatus) return;
+  const admin = !!state.apiKeyAdminToken;
+  const running = nativeStatus.running || {};
+  if (els.apiNativeBinaryStatus) {
+    els.apiNativeBinaryStatus.textContent = nativeStatus.binaryReady
+      ? `llama.cpp 运行库已就绪（${{ env: '环境变量指定', bundled: '随包附带', path: '系统已安装', downloaded: '已下载到本机' }[nativeStatus.binarySource] || '可用'}）。`
+      : nativeStatus.binaryJob?.state === 'downloading'
+        ? '正在下载 llama.cpp 运行库…'
+        : 'llama.cpp 运行库尚未准备：点下方按钮从官方 GitHub 下载（约几十 MB），或自行安装 llama.cpp 后设置环境变量 LLAMA_SERVER_BIN。';
+  }
+  if (els.apiNativeBinaryBtn) {
+    els.apiNativeBinaryBtn.disabled = !admin || nativeStatus.binaryReady;
+    els.apiNativeBinaryBtn.textContent = nativeStatus.binaryReady ? '运行库已就绪' : '准备 llama.cpp 运行库';
+  }
+  if (els.apiNativeUnloadBtn) {
+    els.apiNativeUnloadBtn.disabled = !admin || !running.modelId;
+    els.apiNativeUnloadBtn.textContent = running.modelId
+      ? `卸载当前模型（${running.modelId}${running.state === 'loading' ? '·加载中' : ''}）`
+      : '卸载当前模型';
+  }
+  if (els.apiNativeHint) {
+    els.apiNativeHint.textContent = admin
+      ? '下载/加载/删除会占用本机磁盘与内存，超大模型请先确认内存（内存+显存合计）足够。同一时间只运行一个大模型，加载新模型会自动卸载当前模型。'
+      : '查看状态不需要验证；下载、加载、删除权重需要先在下方“管理员控制面板”验证口令（验证一次即可，之后不用重复验证，点“锁定管理面板”才退出）。';
+  }
+  if (els.apiHfTokenStatus) {
+    els.apiHfTokenStatus.textContent = nativeStatus.hf?.hasToken
+      ? 'Token 已保存（云端模型可用；清空输入后保存可清除）'
+      : '未保存 Token（仅云端模型需要，本机模型不用）';
+  }
+  if (els.apiHfConvertToolStatus) {
+    const job = nativeStatus.hf?.converterJob;
+    els.apiHfConvertToolStatus.textContent = job?.state === 'running'
+      ? '正在准备转换工具（下载 llama.cpp 与 Python 依赖，可能需要几分钟）…'
+      : job?.state === 'error'
+        ? `准备失败：${job.error || '未知错误'}`
+        : nativeStatus.hf?.converter?.ready
+          ? '转换工具已就绪（Safetensors 等格式可一键转换）'
+          : '转换工具未准备（只有转换 Transformers 格式时才需要）';
+  }
+  if (els.apiHfConvertToolBtn) els.apiHfConvertToolBtn.disabled = !admin || nativeStatus.hf?.converter?.ready;
+  if (els.apiHfRunnerStatus) {
+    const rjob = nativeStatus.hf?.runnerJob;
+    els.apiHfRunnerStatus.textContent = rjob?.state === 'running'
+      ? '正在准备本地运行时（下载 Python 依赖，可能需要几分钟）…'
+      : rjob?.state === 'error'
+        ? `准备失败：${rjob.error || '未知错误'}`
+        : nativeStatus.hf?.runner?.ready
+          ? '本地运行时已就绪（ONNX/AWQ 等特殊格式可本地运行）'
+          : '本地运行时未准备（只有特殊格式本地运行时才需要）';
+  }
+  if (els.apiHfRunnerBtn) els.apiHfRunnerBtn.disabled = !admin || nativeStatus.hf?.runner?.ready;
+  els.apiNativeList.replaceChildren(...nativeModels().map((m) => buildNativeModelRow(m, admin)));
+}
+
 /**
  * 本机版网页聊天自己选用的模型（与 API 调用方各自选的模型互不影响：
  * API 请求带什么模型就用什么模型，不会改掉这里的选择；这里切换也只影响网页接下来的发送）。
@@ -3112,10 +3473,149 @@ function saveLocalChatModel(id) {
   }
 }
 
-/** 把桥接可用模型填入聊天页的模型选择栏（侧边栏 + 窄屏各一个，始终同步）。 */
+// ---------- Hugging Face 桥接（搜索 → 拉取 → 点击使用） ----------
+
+let hfSearchResults = [];
+
+function hfRouteGuess(formats = []) {
+  if (formats.includes('gguf')) return { key: 'local', label: '可直接运行（GGUF）' };
+  if (formats.includes('safetensors') || formats.includes('pytorch')) return { key: 'convert', label: '可转换后运行' };
+  if (formats.length) return { key: 'cloud', label: '云端可用' };
+  return { key: 'cloud', label: '点一键使用自动判断' };
+}
+
+async function runHfSearch() {
+  if (!els.apiHfResults) return;
+  const q = els.apiHfSearchInput?.value.trim() || '';
+  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = '正在搜索 Hugging Face…';
+  try {
+    const data = await hfSearch(q, getToken());
+    hfSearchResults = data.results || [];
+    if (els.apiHfSearchStatus) {
+      els.apiHfSearchStatus.textContent = hfSearchResults.length
+        ? `找到 ${hfSearchResults.length} 个模型，点“一键使用”即可（系统自动按格式处理）。`
+        : '没有找到相关模型，换个关键词试试（如 Qwen、Llama、Mistral）。';
+    }
+    renderHfResults();
+  } catch (err) {
+    if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `搜索失败：${err.message}`;
+  }
+}
+
+function renderHfResults() {
+  if (!els.apiHfResults) return;
+  const filter = els.apiHfFilter?.value || 'all';
+  const admin = !!state.apiKeyAdminToken;
+  const rows = hfSearchResults
+    .filter((r) => filter === 'all' || hfRouteGuess(r.formats || []).key === filter)
+    .map((r) => {
+      const row = document.createElement('div');
+      row.className = 'native-model-row';
+      const head = document.createElement('div');
+      head.className = 'native-model-head';
+      const title = document.createElement('strong');
+      title.textContent = r.repo;
+      const meta = document.createElement('span');
+      meta.className = 'muted small';
+      const guess = hfRouteGuess(r.formats || []);
+      meta.textContent = `↓${(r.downloads || 0).toLocaleString()} · ♥${r.likes || 0} · ${guess.label}${(r.formats || []).length ? ` · 格式：${r.formats.join('/')}` : ''}`;
+      head.append(title, meta);
+      row.append(head);
+      const detail = document.createElement('p');
+      detail.className = 'muted small';
+      detail.hidden = true;
+      row.append(detail);
+      const controls = document.createElement('div');
+      controls.className = 'api-access-actions';
+      const mkBtn = (text, onClick, disabled = false) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'btn ghost small';
+        btn.textContent = text;
+        btn.disabled = disabled;
+        btn.addEventListener('click', onClick);
+        return btn;
+      };
+      controls.append(mkBtn('一键使用', () => void hfUseRepo(r.repo, 'auto'), !admin));
+      controls.append(mkBtn('下载到本地', () => void hfUseRepo(r.repo, 'local'), !admin));
+      controls.append(mkBtn('云端使用', () => void hfUseRepo(r.repo, 'cloud'), !admin));
+      controls.append(mkBtn('查看详情', async () => {
+        detail.hidden = false;
+        detail.textContent = '正在读取仓库文件与格式…';
+        try {
+          const info = await hfModelInfo(r.repo, getToken());
+          detail.textContent = `${info.route.label}：${info.route.detail} 格式：${info.formats.join('/') || '未知'}${info.variants?.length ? `（${info.variants.join('/')}）` : ''}；仓库共 ${info.totalGB} GB。文件示例：${info.files.slice(0, 5).map((f) => f.path).join('、')}`;
+        } catch (err) {
+          detail.textContent = `读取失败：${err.message}`;
+        }
+      }));
+      if (!admin) {
+        const tip = document.createElement('span');
+        tip.className = 'muted small';
+        tip.textContent = '下载/使用需先在下方验证管理员口令（只验证一次）';
+        controls.append(tip);
+      }
+      row.append(controls);
+      return row;
+    });
+  els.apiHfResults.replaceChildren(...rows);
+}
+
+/** 使用 HF 模型：mode = auto（一键）| local（下载到本地）| cloud（云端，不下载）。 */
+async function hfUseRepo(repo, mode = 'auto') {
+  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `正在处理 ${repo}…`;
+  try {
+    const out = await nativeAdminRequest('/api/native/hf/use', { token: state.apiKeyAdminToken, body: { repo, mode } });
+    if (out.action === 'download') {
+      els.apiHfSearchStatus.textContent = `已开始下载 ${repo}（${out.quant || '推荐量化'}），进度在下方模型列表里看；下载完成并加载后，就能在聊天页模型选择里用它。`;
+    } else if (out.action === 'convert') {
+      if (out.converterReady) {
+        await nativeAdminRequest('/api/native/hf/convert', { token: state.apiKeyAdminToken, body: { id: out.id } });
+        els.apiHfSearchStatus.textContent = `已开始把 ${repo} 转成 GGUF，转换进度在下方模型列表里看，完成后即可加载使用。`;
+      } else {
+        els.apiHfSearchStatus.textContent = `${repo} 需要先把权重转成 GGUF：请点上方“一键准备格式转换工具”（只需一次），准备好后再点一次。`;
+      }
+    } else if (out.action === 'python') {
+      if (out.runnerReady) {
+        await nativeAdminRequest('/api/native/hf/python', { token: state.apiKeyAdminToken, body: { id: out.id } });
+        els.apiHfSearchStatus.textContent = `已开始下载 ${repo} 并在本机用 Python 运行时加载，进度在下方模型列表里看；加载完成后在聊天页模型选择里选它即可（CPU 上会慢一些）。`;
+      } else {
+        await nativeAdminRequest('/api/native/hf/prepare-runner', { token: state.apiKeyAdminToken });
+        els.apiHfSearchStatus.textContent = `正在准备本地运行时（只需一次，约数百 MB），准备好后再点一次“下载到本地”即可。`;
+      }
+    } else if (out.action === 'remote') {
+      els.apiHfSearchStatus.textContent = `${repo} 已启用云端使用：在聊天页模型选择里选它就能对话（走 Hugging Face 云端推理，不占用本机）。之后想下载到本地，点“下载到本地”即可切换。`;
+    } else if (out.action === 'needs-token') {
+      els.apiHfSearchStatus.textContent = `云端使用需要 HF Token：先在上方填入并保存，再点一次“云端使用”。不想用云端就点“下载到本地”。`;
+      els.apiHfTokenInput?.focus();
+    } else if (out.action === 'browser') {
+      els.apiHfSearchStatus.textContent = `${repo} 是浏览器 MLC 格式：在网页版模型路线里使用（聊天页的浏览器模型）；软件版也可以切换为云端使用。`;
+    } else {
+      els.apiHfSearchStatus.textContent = `${repo}：${out.route?.detail || '暂未识别的格式，无法使用。'}`;
+    }
+  } catch (err) {
+    if (err.status === 401 && state.apiKeyAdminToken) lockApiKeyManager();
+    if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `使用失败：${err.message}`;
+  }
+  await refreshNativeStatus();
+}
+
+/** 本机大模型在下拉框/列表中显示的状态：运行中 > 下载中 > 已下载 > 未下载。 */
+function nativeStateText(m) {
+  if (nativeStatus?.running?.modelId === m.id && nativeStatus.running.state === 'ready') return '运行中';
+  if (nativeStatus?.running?.modelId === m.id && nativeStatus.running.state === 'loading') return '加载中';
+  const dl = (m.downloads || []).find((d) => d.state === 'downloading');
+  if (dl) return `下载中 ${dl.total ? Math.floor((dl.downloaded / dl.total) * 100) : 0}%`;
+  if ((m.downloaded || []).length) return '已下载';
+  if (m.conversion?.state === 'running') return '转换中';
+  if (m.remote) return '云端可用';
+  return '未下载';
+}
+
+/** 把桥接可用模型填入聊天页的模型选择栏（侧边栏 + 窄屏各一个，始终同步）；本机大模型单独分组。 */
 function renderBridgeModelOptions() {
   if (MODE !== 'remote' || !state.appConfig.localBrowserBridge) return;
-  const ids = apiBridgeModels.map((m) => m.id);
+  const ids = chatModelIds();
   if (!ids.length) {
     els.modelSelect.hidden = true;
     els.modelSelectCompact.hidden = true;
@@ -3132,15 +3632,28 @@ function renderBridgeModelOptions() {
   for (const select of [els.modelSelect, els.modelSelectCompact]) {
     if (!select) continue;
     const compact = select === els.modelSelectCompact;
-    select.replaceChildren(
-      ...apiBridgeModels.map((m) => {
+    const children = apiBridgeModels.map((m) => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      opt.dataset.label = m.label || m.id;
+      opt.textContent = compact ? shortModelLabel(m.label || m.id) : m.label || m.id;
+      return opt;
+    });
+    const natives = nativeModels();
+    if (natives.length) {
+      const group = document.createElement('optgroup');
+      group.label = '本机大模型（llama.cpp 引擎）';
+      for (const m of natives) {
         const opt = document.createElement('option');
         opt.value = m.id;
-        opt.dataset.label = m.label || m.id;
-        opt.textContent = compact ? shortModelLabel(m.label || m.id) : m.label || m.id;
-        return opt;
-      }),
-    );
+        opt.dataset.label = `${m.name}（${m.paramsB ? `${m.paramsB}B·` : ''}${m.kind === 'hf' ? 'Hugging Face' : '本机大模型'}·${nativeStateText(m)}）`;
+        opt.textContent = compact ? shortModelLabel(opt.dataset.label) : opt.dataset.label;
+        opt.title = m.note || '';
+        group.append(opt);
+      }
+      children.push(group);
+    }
+    select.replaceChildren(...children);
     select.value = localChatModelId;
     select.hidden = false;
     select.title = '选择网页聊天使用的模型（与 API 调用各自选的模型互不影响）';
@@ -3150,12 +3663,23 @@ function renderBridgeModelOptions() {
 
 /** 网页聊天切换模型：只记下选择，下一次发送时按这个模型请求；不影响 API 的模型选择。 */
 function onBridgeModelChange(id) {
-  if (!apiBridgeModels.some((m) => m.id === id)) return;
+  const bridged = apiBridgeModels.find((m) => m.id === id);
+  const native = nativeModels().find((m) => m.id === id);
+  if (!bridged && !native) return;
   localChatModelId = id;
   saveLocalChatModel(id);
   if (els.modelSelect) els.modelSelect.value = id;
   if (els.modelSelectCompact) els.modelSelectCompact.value = id;
-  const label = apiBridgeModels.find((m) => m.id === id)?.label || id;
+  if (native) {
+    const stateText = nativeStateText(native);
+    showStatus(
+      stateText === '未下载'
+        ? `网页聊天已切换到 ${native.name}（本机大模型），但权重尚未下载：请打开“API 接入 → 本机大模型”下载并加载后再发送。`
+        : `网页聊天已切换到 ${native.name}（本机大模型·${stateText}）。下次发送时使用这个模型；API 调用选用的模型不受影响。`,
+    );
+    return;
+  }
+  const label = bridged?.label || id;
   showStatus(`网页聊天已切换到 ${label}。下次发送时使用这个模型；API 调用选用的模型不受影响。`);
 }
 
@@ -3408,11 +3932,13 @@ function openApiAccess({ focusAdmin = false } = {}) {
 }
 
 function lockApiKeyManager() {
-  // 使关闭面板前发出的异步响应失效，避免令牌或新密钥在关闭后重新写回页面。
+  // 只有管理员主动“锁定管理面板”、或服务端返回 401（令牌过期/失效）时才调用：
+  // 清除内存与本机保存的令牌，之后必须重新验证。关闭面板、刷新页面都不锁定。
   apiKeyManagerEpoch += 1;
   clearApiPlayground();
   apiPlaygroundController = null;
   state.apiKeyAdminToken = '';
+  clearApiAdminSession(localStorage);
   els.apiKeyAdminPassword.value = '';
   els.apiAdminApiKey.value = '';
   els.apiAdminClearApiKey.checked = false;
@@ -3600,8 +4126,8 @@ els.apiSelfApplyBtn?.addEventListener('click', async () => {
 });
 els.apiSelfKeyCopy?.addEventListener('click', () => copyPlainText(els.apiSelfKeyValue.value, els.apiSelfKeyCopy));
 els.apiAccessDialog.addEventListener('close', () => {
-  // 管理令牌与新建密钥只在面板打开期间留在内存，关闭时立即清除。
-  lockApiKeyManager();
+  // 管理员验证只验证一次：关闭面板不清令牌（令牌保存在本机浏览器中），
+  // 只有点“锁定管理面板”或令牌过期才需要重新验证。这里只清临时内容。
   clearApiPlayground();
   els.sharePromptInput.value = '';
   els.shareAutoSend.checked = false;
@@ -3650,6 +4176,9 @@ els.apiKeyAdminLoginForm.addEventListener('submit', async (e) => {
     if (!res.ok) throw new Error(data.error || `验证失败（HTTP ${res.status}）`);
     if (epoch !== apiKeyManagerEpoch || !els.apiAccessDialog.open) return;
     state.apiKeyAdminToken = data.token;
+    // 验证一次即可：把令牌保存在本机浏览器，之后打开面板/刷新页面都不用再验证，
+    // 只有点“锁定管理面板”或令牌到期（30 天）才需要重新验证。
+    saveApiAdminSession(localStorage, { token: data.token, expiresAt: data.expiresAt });
     els.apiKeyAdminPassword.value = '';
     renderApiAccessInfo();
     requestAnimationFrame(() => els.apiAdminSettingsSection.scrollIntoView({ block: 'start' }));
@@ -3768,6 +4297,44 @@ els.apiKeyNewCopy.addEventListener('click', () => copyPlainText(els.apiKeyNewVal
 els.apiCurlCopy.addEventListener('click', () => copyPlainText(els.apiCurlExample.textContent, els.apiCurlCopy));
 els.localApiCopy?.addEventListener('click', () => copyPlainText(els.localApiEndpoint.textContent, els.localApiCopy));
 els.apiKeyAdminLogout.addEventListener('click', lockApiKeyManager);
+els.apiNativeBinaryBtn?.addEventListener('click', () => {
+  void nativeAction(async () => {
+    await nativeAdminRequest('/api/native/binary', { token: state.apiKeyAdminToken });
+  });
+});
+els.apiNativeUnloadBtn?.addEventListener('click', () => {
+  void nativeAction(() => nativeAdminRequest('/api/native/unload', { token: state.apiKeyAdminToken }));
+});
+els.apiHfSearchBtn?.addEventListener('click', () => void runHfSearch());
+els.apiHfSearchInput?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    void runHfSearch();
+  }
+});
+els.apiHfFilter?.addEventListener('change', () => renderHfResults());
+els.apiHfTokenBtn?.addEventListener('click', () => {
+  void nativeAction(async () => {
+    const out = await nativeAdminRequest('/api/native/hf/token', {
+      token: state.apiKeyAdminToken,
+      body: { token: els.apiHfTokenInput.value },
+    });
+    els.apiHfTokenInput.value = '';
+    if (els.apiHfTokenStatus) els.apiHfTokenStatus.textContent = out.hasToken ? 'Token 已保存（云端模型可用）' : 'Token 已清除';
+  });
+});
+els.apiHfConvertToolBtn?.addEventListener('click', () => {
+  void nativeAction(async () => {
+    await nativeAdminRequest('/api/native/hf/prepare-converter', { token: state.apiKeyAdminToken });
+    if (els.apiHfConvertToolStatus) els.apiHfConvertToolStatus.textContent = '正在准备转换工具（下载依赖中，可能需要几分钟）…';
+  });
+});
+els.apiHfRunnerBtn?.addEventListener('click', () => {
+  void nativeAction(async () => {
+    await nativeAdminRequest('/api/native/hf/prepare-runner', { token: state.apiKeyAdminToken });
+    if (els.apiHfRunnerStatus) els.apiHfRunnerStatus.textContent = '正在准备本地运行时（下载依赖中，可能需要几分钟）…';
+  });
+});
 els.apiKeyList.addEventListener('click', async (e) => {
   const button = e.target.closest('[data-api-key-revoke]');
   if (!button) return;
@@ -5826,6 +6393,12 @@ async function init() {
   state.search.prefs = resolveSearchPrefs(state.search.config, loadSearchPrefs());
 
   state.backend = createBackend({ mode: MODE, appConfig: state.appConfig });
+  // 恢复本机保存的 API 管理员验证：验证过一次后（含关掉面板、刷新页面）不用重复验证，
+  // 只有点“锁定管理面板”或令牌到期（30 天）才需要重新验证。
+  if (MODE === 'remote') {
+    const savedAdmin = loadApiAdminSession(localStorage);
+    if (savedAdmin) state.apiKeyAdminToken = savedAdmin.token;
+  }
   // 本机浏览器模型桥接：把网页里的 WebGPU 引擎暴露给同机 API（保持网页打开即可）
   if (MODE === 'remote' && state.appConfig.localBrowserBridge) {
     try {
@@ -5843,6 +6416,8 @@ async function init() {
     // 模型选择栏：拉取桥接可用模型并定期刷新（新导入模型后自动出现，不用刷新页面）
     localChatModelId = loadLocalChatModel();
     refreshBridgeStatus();
+    // 本机大模型（llama.cpp）：静态版没有该接口，会自动隐藏；网站包/独立软件中可用
+    refreshNativeStatus();
     setInterval(() => {
       if (!document.hidden) refreshBridgeStatus();
     }, 10000);

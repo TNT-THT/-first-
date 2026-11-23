@@ -44,6 +44,13 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: ${{ inputs.tag || github.ref_name }}
           body: |
+            ## 独立软件：LLM托管平台——天蓝色1.0（推荐，尤其想跑大模型时）
+
+            - `LLM托管平台-天蓝色1.0.exe`：Windows 单文件版，双击即用，不需要预装任何东西。
+            - `LLM托管平台-天蓝色1.0.zip`：完整压缩包（exe + 解压版程序 + llama.cpp 运行库 + 使用说明）。
+
+            功能与网站包一致（网页小模型、OpenAI 兼容 API、管理员面板、用量统计），另外内置 llama.cpp 本机大模型引擎：可下载并运行 Qwen3.8-27B、Qwen3-32B、Llama-3.3-70B、Llama-4-Scout-109B、Qwen3-235B、Llama-3.1-405B、DeepSeek-R1-671B 等 27B～671B 级开源大模型。大模型权重不含在安装包内，首次使用时在软件里按需下载（请先确认内存足够）。
+
             ## 网站包（按你的电脑四选一，不要全部下载）
 
             - Windows：`site-win-x64.zip`
@@ -51,8 +58,8 @@ jobs:
             - Mac（Intel 芯片）：`site-darwin-x64.zip`
             - Linux：`site-linux-x64.zip`
 
-            每个包都包含网页与本机 API 服务（含对应平台的内置 Node 运行时），解压后双击里面的启动文件即可使用，不需要预装 Node.js，也不用敲命令。
-            网站包不包含任何 AI 模型：模型在网页首次选用时自动下载并缓存，全部 39 个模型的权重与运行库下载地址见仓库的 `docs/model-downloads.md`。
+            每个包都包含网页与本机 API 服务（含对应平台的内置 Node 运行时），解压后双击里面的启动文件即可使用，不需要预装 Node.js，也不用敲命令。网站包同样支持上面的本机大模型（在“API 接入 → 本机大模型”中下载运行库与权重）。
+            网站包不包含任何 AI 模型：网页小模型在首次选用时自动下载并缓存，全部 39 个模型的权重与运行库下载地址见仓库的 `docs/model-downloads.md`。
 
             ## 一站式训练包
 
@@ -67,3 +74,24 @@ jobs:
             release-assets/oj-training.zip
           fail_on_unmatched_files: true
           make_latest: true
+
+  # 独立软件在 Windows 上构建单文件 exe（Node SEA 需要目标平台的 Node 二进制），
+  # 并组装完整压缩包（含 llama.cpp 官方 Windows 构建），追加到同一个 Release。
+  standalone:
+    needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node standalone/build-standalone.mjs --with-llama
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            release-assets/standalone/LLM托管平台-天蓝色1.0.exe
+            release-assets/standalone/LLM托管平台-天蓝色1.0.zip
+          fail_on_unmatched_files: true

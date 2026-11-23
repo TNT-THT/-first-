@@ -19,8 +19,14 @@ import { buildApiInfo, buildDocsHtml, API_VERSION } from './docs.js';
 import { ApiKeyStore } from './api-key-store.js';
 import { ApiSettingsStore } from './settings-store.js';
 import { UsageStatsStore } from './usage-stats.js';
+import { NativeEngine } from './native/engine.js';
+import { searchWeb } from './search.js';
+import { registerNativeRoutes, streamNativeToHttp, nativeCompletionJson } from './native/routes.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+// 单文件打包（SEA/CJS）里没有 import.meta.url，退回 __filename；普通路径不是 URL 不能转。
+const __dirname = import.meta.url && String(import.meta.url).startsWith('file:')
+  ? path.dirname(fileURLToPath(import.meta.url))
+  : path.resolve(typeof __filename === 'string' ? path.dirname(__filename) : process.cwd());
 // 网站包里静态版与服务版网页共存（web/dist 与 web/dist-api），可用 OJ_WEB_DIST 指定服务版目录。
 const WEB_DIST = process.env.OJ_WEB_DIST
   ? path.resolve(process.cwd(), process.env.OJ_WEB_DIST)
@@ -83,7 +89,7 @@ function originMatches(origin, pattern) {
   }
 }
 
-export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
+export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngine = null } = {}) {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', cfg.trustProxy);
@@ -208,6 +214,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
       modelConfigured: bridgeStatus ? bridgeStatus.connected : !!(cfg.llmBaseUrl && cfg.llmModel),
       localBrowserBridge: !!browserBridge,
       browserModelConnected: bridgeStatus?.connected ?? null,
+      nativeModelRunning: nativeEngine ? nativeEngine.llama.info?.modelId || null : null,
     });
   });
 
@@ -258,6 +265,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
       apiKeyAuth: !!cfg.apiKeys?.length || !!cfg.apiAdminPassword,
       apiKeyManagerEnabled: !!cfg.apiAdminPassword,
       localBrowserBridge: !!browserBridge,
+      nativeModels: !!nativeEngine,
       apiDefaultTemperature: cfg.llmTemperature,
       apiMaxTokens: cfg.apiMaxTokens,
       version: API_VERSION,
@@ -278,7 +286,9 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
       return res.status(401).json({ error: '管理员口令错误。' });
     }
     apiKeyAdminLimiter.reset(ip);
-    const { token, expiresAt } = createToken(apiKeyAdminSecret, 8 * 60 * 60 * 1000);
+    // 管理员验证一次后长期有效（30 天），网页会把令牌保存在本机浏览器中，
+    // 只有管理员主动点“锁定管理面板”或令牌到期才需要重新验证。
+    const { token, expiresAt } = createToken(apiKeyAdminSecret, 30 * 24 * 60 * 60 * 1000);
     return res.json({ token, expiresAt });
   });
 
@@ -344,6 +354,32 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     return res.json(usageStats.snapshot());
   });
 
+  // 本机大模型（llama.cpp）：模型管理需 API 管理员，网页聊天需网站登录。
+  if (nativeEngine) {
+    registerNativeRoutes(app, { engine: nativeEngine, requireSession: requireAuth, requireAdmin: requireApiKeysAdmin });
+  }
+
+  // 服务端网页搜索（软件版）：搜索引擎候选 + 正文抓取，需网站登录，避免被匿名滥用。
+  app.post('/api/search', requireAuth, async (req, res) => {
+    try {
+      const query = typeof req.body?.query === 'string' ? req.body.query : '';
+      const limit = Number.isInteger(req.body?.limit) ? Math.min(20, Math.max(1, req.body.limit)) : 8;
+      const out = await searchWeb({
+        query,
+        limit,
+        env: {
+          TAVILY_API_KEY: cfg.searchKeys?.tavily || '',
+          BRAVE_SEARCH_KEY: cfg.searchKeys?.brave || '',
+          BING_SEARCH_KEY: cfg.searchKeys?.bing || '',
+        },
+      });
+      return res.json(out);
+    } catch (err) {
+      const status = Number.isInteger(err?.status) ? err.status : 500;
+      return res.status(status).json({ error: err?.message || '网页搜索失败' });
+    }
+  });
+
   app.delete('/api/admin/usage-stats', requireApiKeysAdmin, (_req, res) => {
     return res.json(usageStats.clear());
   });
@@ -383,11 +419,24 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         // 本机桥接模式下没有服务端上游：网页自身的聊天也交给本机网页的 WebGPU 模型。
         // 网页可在请求中指定 model（模型选择栏的选择，仅影响这一条请求）；
         // 不指定时沿用桥接上报的第一个模型。API 请求选什么模型不会改掉网页自己的选择。
+        const requestedModel = typeof req.body?.model === 'string' && req.body.model ? req.body.model : '';
+        // 本机大模型（llama.cpp）不走浏览器桥接：由服务端原生引擎生成（浏览器没连上时也能用）。
+        if (nativeEngine && requestedModel && nativeEngine.hasModel(requestedModel)) {
+          const nativeMessages = messages.some((m) => m.role === 'system')
+            ? messages
+            : [{ role: 'system', content: cfg.systemPrompt }, ...messages];
+          await streamNativeToHttp(nativeEngine, {
+            model: requestedModel,
+            messages: nativeMessages,
+            signal: ac.signal,
+            res,
+          });
+          return;
+        }
         const bridgeStatus = browserBridge.status();
         if (!bridgeStatus.connected) {
           return res.status(503).json({ error: '本机模型尚未连接：请保持本网页打开，待模型连接后再发送。' });
         }
-        const requestedModel = typeof req.body?.model === 'string' && req.body.model ? req.body.model : '';
         if (requestedModel && !bridgeStatus.models?.some((m) => m.id === requestedModel)) {
           return res.status(404).json({ error: `模型不存在或本机网页未提供该模型：${requestedModel}` });
         }
@@ -429,6 +478,15 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         }
         return;
       }
+      // 无桥接时，本机大模型同样由服务端原生引擎生成（优先于上游 API）。
+      const nativeModel = typeof req.body?.model === 'string' ? req.body.model : '';
+      if (nativeEngine && nativeModel && nativeEngine.hasModel(nativeModel)) {
+        const nativeMessages = messages.some((m) => m.role === 'system')
+          ? messages
+          : [{ role: 'system', content: cfg.systemPrompt }, ...messages];
+        await streamNativeToHttp(nativeEngine, { model: nativeModel, messages: nativeMessages, signal: ac.signal, res });
+        return;
+      }
       await proxyChatStream({ cfg, messages, res, signal: ac.signal });
     } catch (err) {
       const status = err instanceof HttpError
@@ -462,9 +520,27 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     owned_by: 'oj-ai-assistant',
   });
 
-  const availableApiModels = () => browserBridge
-    ? browserBridge.status().models.map((model) => ({ id: model.id, object: 'model', created: 0, owned_by: 'oj-ai-assistant', name: model.label }))
-    : cfg.llmModel ? [modelObject()] : [];
+  const availableApiModels = () => {
+    const list = browserBridge
+      ? browserBridge.status().models.map((model) => ({ id: model.id, object: 'model', created: 0, owned_by: 'oj-ai-assistant', name: model.label }))
+      : cfg.llmModel
+        ? [modelObject()]
+        : [];
+    if (nativeEngine) {
+      for (const m of nativeEngine.listModels()) {
+        if (!list.some((entry) => entry.id === m.id)) {
+          list.push({
+            id: m.id,
+            object: 'model',
+            created: 0,
+            owned_by: m.kind === 'hf' ? 'huggingface' : 'llama.cpp',
+            name: m.paramsB ? `${m.name}（本机大模型·${m.paramsB}B）` : `${m.name}（Hugging Face）`,
+          });
+        }
+      }
+    }
+    return list;
+  };
 
   // 兼容把完整对话接口误填为 Base URL 的客户端：它们会在其后拼接 /models 取列表，
   // 请求 /v1/chat/completions/models 时同样返回模型列表，避免用户被莫名其妙的 404 卡住。
@@ -488,7 +564,8 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
     let usageModel = '';
     let usageRecorded = false;
     try {
-      const requestCfg = browserBridge ? { ...cfg, llmModel: '' } : cfg;
+      const bodyModel = typeof req.body?.model === 'string' ? req.body.model : '';
+      const requestCfg = browserBridge || (nativeEngine && nativeEngine.hasModel(bodyModel)) ? { ...cfg, llmModel: '' } : cfg;
       const { messages, stream, temperature, maxTokens, params, model: requestedModel } = validateChatCompletionBody(req.body, requestCfg);
       // 即使调用方未提交 max_tokens，也应用服务端上限，避免无限制生成消耗服务器额度。
       const outputLimit = maxTokens ?? cfg.apiMaxTokens ?? 8192;
@@ -500,6 +577,53 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
         usageRecorded = true;
         usageStats.record({ model: usageModel, promptTokens: promptTokensOf(), completionTokens, status });
       };
+      // 本机大模型（llama.cpp）：不依赖浏览器桥接与上游 API，由服务端原生生成。
+      if (nativeEngine && requestedModel && nativeEngine.hasModel(requestedModel)) {
+        usageModel = requestedModel;
+        if (stream) {
+          let streamedChars = 0;
+          const out = await streamNativeToHttp(nativeEngine, {
+            model: requestedModel,
+            messages,
+            temperature,
+            maxTokens: outputLimit,
+            signal: ac.signal,
+            res,
+            onText: (t) => {
+              streamedChars += t.length;
+            },
+          });
+          noteApiUsage(out.usage?.completion_tokens ?? Math.ceil(streamedChars / 4));
+          return;
+        }
+        const out = await nativeCompletionJson(nativeEngine, {
+          model: requestedModel,
+          messages,
+          temperature,
+          maxTokens: outputLimit,
+          signal: ac.signal,
+        });
+        if (ac.signal.aborted || res.destroyed) return;
+        if (!out.content.trim()) {
+          noteApiUsage(0, 'error');
+          return openAiError(res, 502, `模型生成结束但没有输出任何内容（模型 ${requestedModel}）。请确认模型已正确加载后重试。`, 'server_error');
+        }
+        const completionTokens = out.usage?.completion_tokens ?? Math.ceil(out.content.length / 4);
+        noteApiUsage(completionTokens);
+        const promptTokens = promptTokensOf();
+        return res.json({
+          id: out.id,
+          object: 'chat.completion',
+          created: out.created,
+          model: requestedModel,
+          choices: out.choices,
+          usage: out.usage || {
+            prompt_tokens: promptTokens,
+            completion_tokens: completionTokens,
+            total_tokens: promptTokens + completionTokens,
+          },
+        });
+      }
       if (browserBridge) {
         if (!browserBridge.status().connected) {
           return openAiError(res, 503, '本机模型网页尚未连接。请在这台电脑打开服务网页，并保持网页打开。', 'service_unavailable');
@@ -708,7 +832,9 @@ export function createApp(cfg = loadConfig(), { browserBridge = null } = {}) {
 }
 
 // 直接运行时启动服务（测试时通过 import 使用 createApp，不会自动监听）
-const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// 独立软件会把服务端打进单文件程序内嵌调用，此时 OJ_EMBEDDED_SERVER=1，禁止自动监听。
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__dirname, 'index.js')
+  && process.env.OJ_EMBEDDED_SERVER !== '1';
 if (isMain) {
   // 原生 `npm start` 也读取项目根目录的 .env；Docker Compose 的 env_file 环境变量优先不被覆盖。
   dotenv.config({ path: path.resolve(process.cwd(), '.env') });
@@ -744,7 +870,13 @@ if (isMain) {
     console.warn('[warn] 未配置 API_KEYS 或 API_ADMIN_PASSWORD，外部 API（/v1/*）仅接受网页登录令牌；如需供外部系统调用，请配置其中一项。');
   }
   const browserBridge = process.env.LOCAL_BROWSER_BRIDGE === '1' ? new BrowserModelBridge() : null;
-  const server = createServer(createApp(cfg, { browserBridge }));
+  const nativeEngine = cfg.nativeModelsEnabled
+    ? new NativeEngine({ dataDir: cfg.nativeDataDir, variant: cfg.llamaVariant })
+    : null;
+  if (nativeEngine) {
+    console.log(`[native] 本机大模型（llama.cpp）已启用：权重目录 ${cfg.nativeDataDir}（OJ_NATIVE_MODELS=0 可关闭）。`);
+  }
+  const server = createServer(createApp(cfg, { browserBridge, nativeEngine }));
   browserBridge?.attach(server);
   server.listen(cfg.port, cfg.host, () => {
     console.log(`${cfg.appName} 已启动: http://${cfg.host}:${cfg.port}`);

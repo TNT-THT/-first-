@@ -29,3 +29,7 @@ training/**/__pycache__/
 __pycache__/
 .node-runtime-cache/
 .package-staging/
+
+# 独立软件构建中间产物（正式产物在 release-assets/，已忽略）
+standalone/.build/
+standalone/.data/

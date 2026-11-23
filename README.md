@@ -1,9 +1,9 @@
 # -first-
 The first repository of me,and first of "炸药工厂"
 
-# OJ 刷题助手（iframe + 自建 API / 网页链接）
+# LLM托管平台——天蓝色1.0（原 OJ 刷题助手）
 
-一个专为算法刷题设计的 AI 助手。默认纯静态模式下，开源模型直接在浏览器里通过 WebGPU 运行，对话内容不会离开本机；另外提供**自建服务器模式**，由你自己的 Node.js 服务器提供 API 与网页链接接入，完全自托管时可连接本地 Ollama / vLLM，不依赖第三方平台提供远程服务。
+一个本地优先的开源大模型托管平台（原 OJ 刷题助手）。默认纯静态模式下，开源模型直接在浏览器里通过 WebGPU 运行，对话内容不会离开本机；**网站包与独立软件**还内置 llama.cpp 本机引擎，可在本机原生运行 27B～671B 级开源大模型；另外提供**自建服务器模式**，由你自己的 Node.js 服务器提供 API 与网页链接接入，完全自托管时可连接本地 Ollama / vLLM，不依赖第三方平台提供远程服务。
 
 ## 功能
 
@@ -13,7 +13,8 @@ The first repository of me,and first of "炸药工厂"
 - **嵌入模式**：`?embed=1` 一键隐藏自带侧边栏与 Logo；标题栏保留一个很小的模型下拉框，窄屏或 iframe 里也能切换模型。
 - **工具面板（思考模式 / 滑动窗口 / 联网资料检索）**：这些开关统一收在输入框右侧的「工具」按钮里。点开是一列带开关的工具行，点某一行会在下方展开对应的说明与设置卡片（参考 Qwen 网页端的工具选择）；按钮上的角标显示已开启几项，鼠标悬停会列出名称。开关偏好保存在本浏览器。
 - **postMessage 填题**：父页面可以把题目文本填入输入框（默认不自动发送）。
-- **自建服务器 API**：服务端模式提供 OpenAI 兼容的纯文本 `/v1/models`、`/v1/chat/completions`（流式 / 非流式）。API 管理员验证后可使用网页调试台、服务端模型参数控制台和 API Key 管理；管理员可按用户/应用创建并分发独立 Key，非管理员用户用自己的 Key 从外部网站或软件调用 API。明文只在创建时显示一次。
+- **自建服务器 API**：服务端模式提供 OpenAI 兼容的纯文本 `/v1/models`、`/v1/chat/completions`（流式 / 非流式）。API 管理员验证后可使用网页调试台、服务端模型参数控制台和 API Key 管理；管理员可按用户/应用创建并分发独立 Key，非管理员用户用自己的 Key 从外部网站或软件调用 API。明文只在创建时显示一次。**管理员口令只需验证一次**：令牌（30 天）保存在本机浏览器，关闭“API 接入”面板、刷新页面都不用再验证，只有点击“锁定管理面板”或令牌到期才需要重新验证；API 用量统计也因此随时可看。
+- **本机大模型（网站包 / 独立软件）**：带服务端的部署内置 llama.cpp 引擎，可下载并运行 Qwen3.8-27B、Qwen3-32B、Qwen3-30B-A3B、DeepSeek-R1 蒸馏 32B、Llama-3.3-70B、Qwen2.5-72B、Llama-4-Scout-109B、Mixtral-8x22B-141B、Qwen3-235B、Llama-3.1-405B、DeepSeek-R1-671B 共 11 个 27B～671B 开源大模型，网页聊天与 `/v1` API 都能直接调用；权重按需从 Hugging Face 下载到本机，不进安装包。纯静态网页版没有服务端，仍只跑浏览器小模型。详见“本机大模型与独立软件”一节。
 - **网页链接接入**：分享 `/?q=题目` 预填问题，`&send=1` 自动发送，或 `/?embed=1` 通过 iframe 嵌入；服务端模式下网页/API 由自有服务器提供。详见下方“自建服务器：API 与网页链接接入”。
 - **Markdown、代码高亮、一键复制、LaTeX 公式**（KaTeX，本地打包）。
 - **引用回复**：选中任意回复中的文字，点出现的“引用”按钮，内容会以 Markdown 引用格式填入输入框，方便针对某段内容继续提问（超过 4000 字会截取）。
@@ -40,7 +41,7 @@ The first repository of me,and first of "炸药工厂"
   - 大型：Llama 2 13B（需约 11.5 GB 显存，多数设备无法运行）、Gemma 2 9B q4f32（需约 8.2 GB 显存）。
   - 超大：Llama 3.1 70B、Llama 3 70B（均为 q3f16 量化，需约 30.4 GB 显存）。**8 GB 显存的 RTX 4060 无法加载这两个模型，即使是 16 GB 的 4060 Ti 也无法加载**，选中时会显示警告。这两个模型不能满足“4060 上 1 分钟内回复”的要求，也没有在任何真实硬件上测过速度。
   - 仅训练目录（不在下拉框中）的超大模型：Qwen2.5 32B、Yi 1.5 34B。WebLLM 没有它们的预编译运行库，需要在本机用训练流程编译后才能用，见 [`training/README.md`](training/README.md)。
-  - **待转换登记**：[Qwen3.8 27B](https://huggingface.co/Qwen/Qwen3.8-27B) 已登记在 `webllm.pendingModels`，会在下拉框的“待转换（暂不可用）”分组中禁用显示。它是 Qwen 官方 27B 稠密视觉语言模型，但本站使用的 WebLLM 0.2.86 尚无匹配的 MLC 模型记录与 WebGPU 运行库，因此当前不能选择、下载或通过 API 调用，也不会进入训练目录和模型下载清单；等 MLC 提供匹配运行库并完成真实设备验证后再转入正式列表。
+  - **待转换登记**：[Qwen3.8 27B](https://huggingface.co/Qwen/Qwen3.8-27B) 已登记在 `webllm.pendingModels`，会在纯静态网页版下拉框的“待转换（暂不可用）”分组中禁用显示：它是 Qwen 官方 27B 稠密视觉语言模型，但浏览器用的 WebLLM 0.2.86 尚无匹配的 MLC 模型记录与 WebGPU 运行库。**在网站包与独立软件中，它已可通过 llama.cpp 本机大模型引擎直接运行**（见下一节），不再受浏览器限制；训练目录和模型下载清单仍不收录它。
   - **本次调整（按“不支持中文则移除、同级别补充”）**：移除 Llama 3 8B、Hermes 3 8B、Mistral 7B v0.2、OpenHermes 2.5、OLMo 2 1B/7B、TinyLlama 1.1B、StableLM 2 1.6B，依据各模型官方公布的语言列表。大级与超大级没有支持中文的同级预编译模型，因此按要求保留了之前的 Llama 2 13B、Llama 3.1 70B、Llama 3 70B。
   - **新增**：Qwen2.5 7B q4f32、Qwen2.5-Coder 7B q4f32、Phi-4 mini q4f32、Qwen3 8B q4f32、Gemma 2 9B q4f32（q4f32 用 fp32 计算，数值更稳定，显存更高）；Ministral 3 3B Instruct（非推理，小）；Qwen2.5 0.5B、Qwen3 0.6B、Qwen3.5 0.8B/2B/4B/9B 用于补充较小的级别。Qwen3.5 小模型的思考模式标为推理，尚未在本机实测。
   - **中小型扩充（最新）**：补入 Llama 3.2 1B（极小）、Llama 3.2 3B、Gemma 2 2B、Phi-3.5 mini 3.8B、Ministral 3 3B Reasoning（推理）、Mistral 7B v0.3、Llama 3.1 8B，均为 WebLLM 0.2.86 预编译、各自独立运行库。其中 Llama 3.2/3.1 与 Mistral 的官方语言列表未明确含中文，中文问答效果请以实机为准；默认模型仍为中文优先的 Qwen2.5 3B。仍不加入：DeepSeek-R1 1.5B（借用运行库参数不匹配、输出乱码，见下）、Qwen2.5/Qwen2.5-Coder/Qwen2.5-Math 的 1.5B 版本（都借用 Qwen2-1.5B 运行库，见下条）、SmolLM2 1.7B 与 Hermes 3 8B（中文能力弱）。
@@ -74,13 +75,40 @@ The first repository of me,and first of "炸药工厂"
 
 ## 下载发布（GitHub Release）
 
-网站包与一站式训练包统一发布在仓库的 [GitHub Release](https://github.com/TNT-THT/-first-/releases/latest) 中，不再随 GitHub Pages 一起分发：
+网站包、独立软件与一站式训练包统一发布在仓库的 [GitHub Release](https://github.com/TNT-THT/-first-/releases/latest) 中，不再随 GitHub Pages 一起分发：
 
-- **网站包（四选一）**：`site-win-x64.zip`（Windows）、`site-darwin-arm64.zip`（Mac Apple 芯片）、`site-darwin-x64.zip`（Mac Intel 芯片）、`site-linux-x64.zip`（Linux）。每个包只含对应平台的内置 Node 运行时，下载一个即可。
+- **独立软件（推荐）**：`LLM托管平台-天蓝色1.0.exe`（Windows 单文件，双击即用）与 `LLM托管平台-天蓝色1.0.zip`（完整压缩包：exe + 解压版程序 + llama.cpp 运行库 + 使用说明）。功能与网站包一致，另可跑 27B～671B 本机大模型，见“本机大模型与独立软件”一节。
+- **网站包（四选一）**：`site-win-x64.zip`（Windows）、`site-darwin-arm64.zip`（Mac Apple 芯片）、`site-darwin-x64.zip`（Mac Intel 芯片）、`site-linux-x64.zip`（Linux）。每个包只含对应平台的内置 Node 运行时，下载一个即可。网站包同样支持本机大模型（服务端内置同一套 llama.cpp 引擎）。
 - **一站式训练包**：`oj-training.zip`，包含 `training/` 的训练脚本、模型清单（41 个可训练模型）、示例与说明。在有显卡的电脑上解压后，按包内 `training/README.md` 安装依赖并运行 `python3 training/ojtrain.py models`。
 - **模型下载链接**：网页会自动下载所选模型，平时不需要手动下载；需要手动下载、校验或镜像时，见 [docs/model-downloads.md](docs/model-downloads.md)（39 个网页模型的权重仓库与运行库地址，由 `node scripts/model-links.mjs` 生成）。训练用基座权重的下载见 `training/ojtrain.py models` 输出的 Hugging Face 地址。
 - **网页下载入口**：网页“下载网站包”与“一站式训练包”按钮按 `web/public/config.json` 的 `release` 配置生成 Release 直达链接。部署者可把 `release.repo` 改为自己的仓库、`release.tag` 改为固定版本号（如 `"v1.0.0"`）锁定版本；缺省为最新版（`latest`）。
-- **发布方式**：给仓库打 `v*` 标签推送（或在 Actions 页面手动运行 Release 工作流并填写版本号），`.github/workflows/release.yml` 会在可联网环境运行测试、构建带运行时的四平台网站包（`npm run build`）、生成训练包（`node scripts/pack-training.mjs`），并把五个文件发布到对应 Release。本地/沙箱无法下载各平台官方 Node 二进制，正式发布包请以 Release 中的为准。
+- **发布方式**：给仓库打 `v*` 标签推送（或在 Actions 页面手动运行 Release 工作流并填写版本号），`.github/workflows/release.yml` 会在可联网环境运行测试、构建带运行时的四平台网站包（`npm run build`）、生成训练包（`node scripts/pack-training.mjs`），并在 Windows 任务中构建独立软件 exe 与完整压缩包（`node standalone/build-standalone.mjs --with-llama`），共七个文件发布到对应 Release。本地/沙箱无法下载各平台官方 Node 二进制，正式发布包请以 Release 中的为准。
+
+## 本机大模型与独立软件（llama.cpp 引擎）
+
+浏览器 WebGPU 跑不了几十 B 以上的大模型：WebLLM 0.2.86 在 9B 之上只有 Llama 2 13B 与两个 70B。为此，带服务端的部署（网站包、独立软件、自建服务器）内置了一套 **llama.cpp 本机引擎**（`server/native/`）：在本机用 llama-server 原生运行 GGUF 权重，网页聊天（模型下拉框的“本机大模型”分组）与 OpenAI 兼容 `/v1` API 都能直接调用，调用同样计入 API 用量统计。纯静态网页版没有服务端进程，这部分功能自动隐藏，行为不变。
+
+**可运行的开源大模型（11 个，权重在 Hugging Face，运行时按需下载）**：
+
+| 模型 | 参数 | 说明 |
+| --- | --- | --- |
+| Qwen3.8-27B | 27B | 原网页版“待转换”模型，在本机引擎中已转正；仅文本对话 |
+| Qwen3-32B / DeepSeek-R1 蒸馏 Qwen-32B | 32B | 稠密；后者为推理模型 |
+| Qwen3-30B-A3B | 30B（激活约 3B） | MoE，内存按 30B 算、速度快 |
+| Llama-3.3-70B / Qwen2.5-72B | 70B / 72B | 稠密旗舰 |
+| Llama-4-Scout-109B | 109B（激活约 17B） | MoE，仅加载语言部分 |
+| Mixtral-8x22B-141B | 141B（激活约 39B） | MoE |
+| Qwen3-235B-A22B | 235B（激活约 22B） | MoE 推理旗舰 |
+| Llama-3.1-405B | 405B | Meta 最大开源权重 |
+| DeepSeek-R1-671B | 671B（激活约 37B） | MoE 推理旗舰 |
+
+**怎么用**：登录后打开“API 接入 → 本机大模型（llama.cpp 独立引擎）”：管理员验证一次口令后，依次点“准备 llama.cpp 运行库”（自动下载官方构建，或用环境变量 `LLAMA_SERVER_BIN` 指定已有安装）、“获取量化列表”看每档量化的大小与约需内存、下载、加载；然后在聊天页模型下拉框的“本机大模型”分组里选用，或用 API 以模型 ID 调用。同一时间只运行一个大模型；量化与内存估算以仓库实际文件为准（27B Q4 约需 20GB、70B Q4 约 45GB、235B Q4 约 140GB、671B 低比特约 180GB 起，均为内存+显存合计）。`OJ_NATIVE_MODELS=0` 可关闭该引擎，`OJ_NATIVE_DATA_DIR` 改权重存放目录（默认 `data/native/`），`OJ_LLAMA_VARIANT=cuda|vulkan` 选择 GPU 版运行库。
+
+**多格式与 Hugging Face 桥接（软件版）**：内置目录只是精选，软件版还支持从 Hugging Face 添加任意模型（原有下拉框保持不变，添加的模型进入同一个“本机大模型/Hugging Face”分组，聊天、`/v1` API、用量统计、管理员面板全部对齐可用）。面板里的“Hugging Face 模型桥接”就是给小白用的：搜模型名或粘贴 HF 链接 → 点“一键使用”，系统按格式自动处理——GGUF 直接下载到本机运行；Safetensors/PyTorch 等 Transformers 格式自动下载并用 llama.cpp 官方脚本转成 GGUF 后运行（首次点“一键准备格式转换工具”装好 Python 转换环境，约数百 MB 只装一次；不支持的架构会明确报错）；**ONNX/MLX/AWQ/GPTQ 等特殊格式也可下载到本地用内置 Python 运行时（Transformers / ONNX Runtime）直接推理**（点“一键准备本地运行时”，与转换工具共用同一个 Python 环境；CPU 上大模型会慢，但保证纯本地能跑）；**HF 云端推理只是每个模型都能选的切换项，不是某些格式的唯一出路**——填好免费 HF Token 后任何模型都可以点「云端使用」，切回本地后默认本地优先。格式识别、路线与四路选项在 `server/native/formats.js`，转换在 `server/native/convert.js`，本地 Python 运行时在 `server/native/python-runner.js`（脚本 `server/native/python/runner.py`）。
+
+**网页搜索（软件版）**：软件版的联网检索升级为服务端网页搜索（`server/search.js`，`POST /api/search`）：像上市 AI 一样先向搜索引擎取候选、再抓取前几条网页正文去重排序后交给模型并要求标注来源编号。配置 `TAVILY_API_KEY` / `BRAVE_SEARCH_KEY` / `BING_SEARCH_KEY` 任一密钥质量最佳，都不配时用 Bing RSS + DuckDuckGo 免密钥兜底；浏览器资料源（维基/SO/HN）仍并行合并，服务端不可用时自动回落。纯静态网页版仍用浏览器直连资料源。
+
+**独立软件「LLM托管平台——天蓝色1.0」**（`standalone/`）：把上述全部功能打进单个 Windows exe（Node SEA，内置服务版网页与服务端），双击即用、自动开浏览器，口令首次自动生成并保存在数据目录；完整压缩包另含解压版程序（需 Node 18+）与 llama.cpp 运行库。构建：`npm run build:standalone`（本机产物在 `release-assets/standalone/`，Windows exe 在 Release 工作流的 standalone 任务中构建）。原有网站包、训练包与静态网页版的全部功能与用法保持不变。
 
 ## 网站包与本机数据导出（仅管理员，静态版）
 
@@ -89,7 +117,7 @@ The first repository of me,and first of "炸药工厂"
   - 直接双击 `index.html` 不可行：浏览器会阻止模块脚本和 Worker，必须通过本机服务器打开。
   - 启动文件的源码在 `scripts/launcher/`。
 - **导出本机数据**：管理员勾选要导出的分区（会话记录、管理员说明/参数/更正、本地知识库、新建AI清单、用量统计），点“导出所选数据”，得到 `oj-ai-data-日期.json`。文件只保存在你的电脑上，不会上传；它可能包含对话内容，请妥善保管。
-- **用量统计**（顶部“用量统计”按钮，所有用户可用）：按模型查看网页聊天的调用次数与 Token 用量、最近 7 天趋势和近期使用日志；本机版在 API 管理中验证管理员口令后，还能查看服务端统计的全部 API 调用用量。两边都只保存按模型聚合的计数（不含对话内容），空间有硬上限、记录为 O(1) 聚合更新；实现见 `web/src/usage-stats.js` 与 `server/usage-stats.js`，详见 `docs/local-api.md`。
+- **用量统计**（顶部“用量统计”按钮，所有用户可用）：按模型查看网页聊天的调用次数与 Token 用量、最近 7 天趋势和近期使用日志；本机版在 API 管理中验证一次管理员口令后（之后不用重复验证），还能查看服务端统计的全部 API 调用用量。两边都只保存按模型聚合的计数（不含对话内容），空间有硬上限、记录为 O(1) 聚合更新；实现见 `web/src/usage-stats.js` 与 `server/usage-stats.js`，详见 `docs/local-api.md`。
   - 永远不导出：管理员标记（`oj-ai.admin`）、服务端令牌（`oj-ai.token`）。
   - 模型权重不属于本机数据。需要模型时，使用上面的“导出当前模型”，一次只导出一个模型。
 - **仅静态版**：服务端模式（`VITE_ENGINE=remote`）下这两个按钮隐藏。

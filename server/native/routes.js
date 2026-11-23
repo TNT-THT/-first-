@@ -1,0 +1,299 @@
+/**
+ * 本机大模型（llama.cpp）的 HTTP 接口：
+ * - GET    /api/native/status            状态与模型目录（公开，不含本机路径）
+ * - GET    /api/native/models/:id/quants 仓库可下载量化（需网站登录）
+ * - POST   /api/native/chat              网页聊天转发（需网站登录，自动加载已下载模型）
+ * - POST   /api/native/binary            准备 llama.cpp 运行库（需 API 管理员）
+ * - POST   /api/native/models/:id/download 下载权重（需 API 管理员）
+ * - DELETE /api/native/models/:id        删除权重（需 API 管理员）
+ * - POST   /api/native/load | /unload    加载/卸载模型（需 API 管理员）
+ *
+ * 另导出 streamNativeToHttp / nativeCompletionJson 供 /v1 与 /api/chat 复用。
+ */
+import { randomUUID } from 'node:crypto';
+import { estimateRamGB } from './catalog.js';
+import { parseHfRepoInput } from './formats.js';
+import { createThinkFolder, foldMessageReasoning } from './llama.js';
+import { validateMessages } from '../chat.js';
+
+function errJson(res, err, fallback = '本机大模型服务出错') {
+  const status = Number.isInteger(err?.status) ? err.status : 500;
+  return res.status(status).json({ error: err?.message || fallback });
+}
+
+/**
+ * 把 llama-server 的流式响应转成 OpenAI 风格 SSE 写给客户端。
+ * reasoning_content 会折叠为 <think>…</think>，与网页端思考展示逻辑一致。
+ * @returns {Promise<{content: string, usage: object|null}>}
+ */
+export async function streamNativeToHttp(engine, { model, messages, temperature, maxTokens, signal, res, onText }) {
+  const upstream = await engine.chatCompletion({ model, messages, stream: true, temperature, maxTokens, signal });
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+  const id = `chatcmpl-${randomUUID().replaceAll('-', '')}`;
+  const created = Math.floor(Date.now() / 1000);
+  const emit = (data) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+  emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }] });
+  const folder = createThinkFolder();
+  let content = '';
+  let usage = null;
+  let buffer = '';
+  const decoder = new TextDecoder();
+  for await (const chunk of upstream.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if (payload === '[DONE]') continue;
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      if (data.usage) usage = data.usage;
+      const delta = data.choices?.[0]?.delta || {};
+      const text = folder.push(delta);
+      if (text) {
+        content += text;
+        onText?.(text);
+        emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] });
+      }
+      const finish = data.choices?.[0]?.finish_reason;
+      if (finish) {
+        emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finish }] });
+      }
+    }
+  }
+  res.write('data: [DONE]\n\n');
+  res.end();
+  return { content, usage };
+}
+
+/** 非流式：返回 OpenAI 风格的完整响应对象。 */
+export async function nativeCompletionJson(engine, { model, messages, temperature, maxTokens, signal }) {
+  const upstream = await engine.chatCompletion({ model, messages, stream: false, temperature, maxTokens, signal });
+  const data = await upstream.json();
+  const choice = data.choices?.[0] || {};
+  const message = foldMessageReasoning(choice.message || { role: 'assistant', content: '' });
+  return {
+    id: data.id || `chatcmpl-${randomUUID().replaceAll('-', '')}`,
+    object: 'chat.completion',
+    created: data.created || Math.floor(Date.now() / 1000),
+    model,
+    choices: [{ index: 0, message, finish_reason: choice.finish_reason || 'stop' }],
+    usage: data.usage || null,
+    content: typeof message.content === 'string' ? message.content : '',
+  };
+}
+
+export function registerNativeRoutes(app, { engine, requireSession, requireAdmin }) {
+  app.get('/api/native/status', async (_req, res) => {
+    try {
+      return res.json(await engine.status());
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.get('/api/native/models/:id/quants', requireSession, async (req, res) => {
+    try {
+      const model = engine.resolveModel(req.params.id);
+      if (!model) return res.status(404).json({ error: `未知模型：${req.params.id}` });
+      const grouped = await engine.availableQuants(req.params.id);
+      return res.json({
+        id: model.id,
+        quants: grouped.map((g) => ({
+          quant: g.quant,
+          files: g.files.length,
+          totalBytes: g.totalBytes,
+          sizeGB: Math.round((g.totalBytes / 1e9) * 10) / 10,
+          ramGB: estimateRamGB(g.totalBytes),
+        })),
+      });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/chat', requireSession, async (req, res) => {
+    const ac = new AbortController();
+    res.on('close', () => {
+      if (!res.writableFinished) ac.abort();
+    });
+    try {
+      const model = typeof req.body?.model === 'string' ? req.body.model : '';
+      if (!engine.hasModel(model)) return res.status(404).json({ error: `未知模型：${model || '(未指定)'}` });
+      const messages = validateMessages(req.body?.messages, { allowSystem: true });
+      const temperature = Number.isFinite(req.body?.temperature) ? req.body.temperature : undefined;
+      const maxTokens = Number.isInteger(req.body?.max_tokens) ? req.body.max_tokens : undefined;
+      if (req.body?.stream === false) {
+        const out = await nativeCompletionJson(engine, { model, messages, temperature, maxTokens, signal: ac.signal });
+        const { content: _content, ...json } = out;
+        return res.json(json);
+      }
+      await streamNativeToHttp(engine, { model, messages, temperature, maxTokens, signal: ac.signal, res });
+      return undefined;
+    } catch (err) {
+      if (res.headersSent) {
+        try {
+          res.write(`data: ${JSON.stringify({ error: { message: err.message || '生成失败', type: 'server_error', code: null } })}\n\n`);
+        } catch { /* 连接已断开 */ }
+        return res.end();
+      }
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/binary', requireAdmin, async (_req, res) => {
+    try {
+      const got = await engine.ensureBinary();
+      return res.json({ ok: true, source: got.source || 'downloaded' });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/models/:id/download', requireAdmin, async (req, res) => {
+    try {
+      const job = await engine.download(req.params.id, req.body?.quant);
+      return res.status(202).json({ id: job.id, quant: job.quant, state: job.state });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.delete('/api/native/models/:id', requireAdmin, async (req, res) => {
+    try {
+      if (!engine.hasModel(req.params.id)) return res.status(404).json({ error: `未知模型：${req.params.id}` });
+      return res.json(await engine.deleteModel(req.params.id, req.body?.quant));
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/load', requireAdmin, async (req, res) => {
+    try {
+      const { id, quant, contextTokens, gpuLayers } = req.body || {};
+      const status = await engine.load(id, { quant, contextTokens, gpuLayers });
+      return res.json(status);
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/unload', requireAdmin, async (_req, res) => {
+    try {
+      return res.json(await engine.unload());
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  // ---- Hugging Face 桥接：搜索 → 拉取 → 点击使用（小白模式） ----
+  // 搜索与详情只需网站登录（只读 Hub 公开信息）；下载/转换/云端登记/Token 需管理员。
+
+  app.get('/api/native/hf/search', requireSession, async (req, res) => {
+    try {
+      const q = typeof req.query.q === 'string' ? req.query.q : '';
+      const repo = parseHfRepoInput(q);
+      if (repo) {
+        // 粘贴的是仓库链接/owner-repo：直接给详情，不用再搜
+        const info = await engine.hfInfo(repo);
+        return res.json({ direct: repo, results: [{ repo, name: info.name, author: info.author, downloads: info.downloads, likes: info.likes, formats: info.formats }] });
+      }
+      const results = await engine.searchHf(q, { limit: req.query.limit, sort: req.query.sort });
+      return res.json({ results });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.get('/api/native/hf/model', requireSession, async (req, res) => {
+    try {
+      const repo = parseHfRepoInput(req.query.repo);
+      if (!repo) return res.status(400).json({ error: '请提供有效的 Hugging Face 仓库（owner/repo 或完整链接）。' });
+      const info = await engine.hfInfo(repo);
+      return res.json({
+        repo: info.repo,
+        name: info.name,
+        downloads: info.downloads,
+        likes: info.likes,
+        pipeline: info.pipeline,
+        formats: info.formats,
+        variants: info.variants,
+        route: info.route,
+        totalGB: Math.round((info.totalBytes / 1e9) * 10) / 10,
+        files: info.files.slice(0, 60).map((f) => ({ path: f.path, size: f.size })),
+      });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/hf/use', requireAdmin, async (req, res) => {
+    try {
+      const repo = parseHfRepoInput(req.body?.repo);
+      if (!repo) return res.status(400).json({ error: '请提供有效的 Hugging Face 仓库（owner/repo 或完整链接）。' });
+      const mode = ['auto', 'local', 'python', 'cloud'].includes(req.body?.mode) ? req.body.mode : 'auto';
+      const out = await engine.useRepo(repo, mode);
+      return res.status(202).json(out);
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/hf/python', requireAdmin, async (req, res) => {
+    try {
+      const id = typeof req.body?.id === 'string' ? req.body.id : '';
+      const job = await engine.loadPython(id);
+      return res.status(202).json({ id: job.id, state: job.state });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/hf/prepare-runner', requireAdmin, async (_req, res) => {
+    try {
+      const job = await engine.prepareRunnerTool();
+      return res.status(202).json({ state: job.state });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/hf/convert', requireAdmin, async (req, res) => {
+    try {
+      const id = typeof req.body?.id === 'string' ? req.body.id : '';
+      const job = await engine.convert(id);
+      return res.status(202).json({ id: job.id, state: job.state });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/hf/prepare-converter', requireAdmin, async (_req, res) => {
+    try {
+      const job = await engine.prepareConverterTool();
+      return res.status(202).json({ state: job.state });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/hf/token', requireAdmin, async (req, res) => {
+    try {
+      if (typeof req.body?.token !== 'string') return res.status(400).json({ error: 'token 必须是字符串（留空表示清除）。' });
+      return res.json(await engine.setHfToken(req.body.token));
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+}
