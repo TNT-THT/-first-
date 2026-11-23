@@ -57,7 +57,7 @@ export function parseRepoInput(text) {
 }
 
 /** 浏览器直连 HF 仓库元信息（与服务端 fetchModelInfo 取的是同一个接口）。 */
-export async function fetchRepoMetaViaBrowser(repo, { fetchImpl = fetch, timeoutMs = 30000 } = {}) {
+export async function fetchRepoMetaViaBrowser(repo, { fetchImpl = defaultFetch, timeoutMs = 30000 } = {}) {
   const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
     ? AbortSignal.timeout(timeoutMs)
     : undefined;
@@ -83,7 +83,7 @@ export async function fetchRepoMetaViaBrowser(repo, { fetchImpl = fetch, timeout
 }
 
 /** 浏览器取数 + 本地判定：HF 搜索（关键词）和粘贴仓库链接两种输入都走这里。 */
-export async function searchHfViaBrowser(query, token, { fetchImpl = fetch } = {}) {
+export async function searchHfViaBrowser(query, token, { fetchImpl = defaultFetch } = {}) {
   const q = String(query || '').trim();
   const direct = parseRepoInput(q);
   if (direct) {
@@ -128,7 +128,7 @@ export async function searchHfViaBrowser(query, token, { fetchImpl = fetch } = {
 }
 
 /** 浏览器取数 + 本地判定：HF 仓库详情（格式路线 + 量化清单）。 */
-export async function fetchModelInfoViaBrowser(repo, token, { fetchImpl = fetch } = {}) {
+export async function fetchModelInfoViaBrowser(repo, token, { fetchImpl = defaultFetch } = {}) {
   const [meta, files] = await Promise.all([
     fetchRepoMetaViaBrowser(repo, { fetchImpl }),
     fetchRepoTreeViaBrowser(repo, { fetchImpl }),
@@ -152,7 +152,7 @@ export async function fetchModelInfoViaBrowser(repo, token, { fetchImpl = fetch 
  * 浏览器取数失败抛错，调用方回退服务端直连的 /use。
  * @returns {Promise<{out: object, downloadState: 'browser'|'fallback'|'none'}>}
  */
-export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetchImpl = fetch, onStatus } = {}) {
+export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetchImpl = defaultFetch, onStatus } = {}) {
   const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
   note('正在经浏览器读取仓库信息（和网页版同一条网络路）…');
   const [meta, files] = await Promise.all([
@@ -218,8 +218,18 @@ export async function fetchNativeQuants(id, token, { timeoutMs = 40000 } = {}) {
 
 const HF_WEB_BASE = 'https://huggingface.co';
 
+/**
+ * 浏览器原生 fetch 有个著名的大坑：它必须以 window 的身份被调用。一旦被
+ * “拎出来”当普通函数经对象转手调用（比如 ctx.fetchImpl(...)），Chrome 就
+ * 当场抛 “Failed to execute 'fetch' on 'Window': Illegal invocation”。
+ * 浏览器通道真实浏览器里每次拉权重文件都死在这一步，而 Node 的 fetch
+ * 没有这道身份检查、自动化测试一直测不出来。统一用箭头转发：内部做裸
+ * 调用 fetch(...)，身份永远是 window，怎么转手都不怕。
+ */
+const defaultFetch = (...args) => fetch(...args);
+
 /** 浏览器直连 HF 文件树，归一化为与服务端 fetchRepoFiles 一致的清单。 */
-export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = fetch, timeoutMs = 60000 } = {}) {
+export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = defaultFetch, timeoutMs = 60000 } = {}) {
   const url = `${HF_WEB_BASE}/api/models/${repo}/tree/main?recursive=true`;
   let res;
   let lastErr = null;
@@ -288,7 +298,7 @@ function slimFiles(files, { ggufOnly = false } = {}) {
 }
 
 /** 量化列表（浏览器通道）：浏览器取文件树 → 本地服务分组 → 返回量化列表。 */
-export async function fetchQuantsViaBrowser({ id, repo, token, fetchImpl = fetch, timeoutMs = 60000 } = {}) {
+export async function fetchQuantsViaBrowser({ id, repo, token, fetchImpl = defaultFetch, timeoutMs = 60000 } = {}) {
   const files = slimFiles(await fetchRepoTreeViaBrowser(repo, { fetchImpl, timeoutMs }), { ggufOnly: true });
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
@@ -474,7 +484,7 @@ export async function downloadModelViaBrowser({
   id, repo, quant, adminToken, onStatus,
   // 一块 2MB：足够大到不让本地请求次数爆炸，又足够细——慢网下也几秒就跳一次进度，
   // 不至于攒 8MB 才出现第一个百分比，用户误以为“没有下载进度”。
-  fetchImpl = fetch, treeTimeoutMs = 60000, chunkBytes = 2 * 1024 * 1024, retryDelayMs,
+  fetchImpl = defaultFetch, treeTimeoutMs = 60000, chunkBytes = 2 * 1024 * 1024, retryDelayMs,
 } = {}) {
   const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
   note('正在经浏览器读取仓库文件列表（和网页版同一条网络路）…');
