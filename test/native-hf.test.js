@@ -242,3 +242,119 @@ test('HF 桥接：搜索、GGUF 一键下载并聊天、ONNX 云端、Safetensor
   const chat3 = await (await fetch(`${base}/api/native/chat`, { method: 'POST', headers: auth(session), body: JSON.stringify({ model: use4.id, messages: [{ role: 'user', content: 'hi' }], stream: false }) })).json();
   assert.equal(chat3.choices[0].message.content, '本地回答');
 });
+
+/** 直连 HF 必失败的引擎（模拟用户电脑的真实情况）：搜索/详情/使用必须全走浏览器通道。 */
+async function setupOffline(t) {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-hf-off-'));
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    fetchImpl: async () => { throw new TypeError('fetch failed'); },
+    env: {},
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const cfg = loadConfig({
+    APP_PASSWORD: PASSWORD,
+    SESSION_SECRET: 'test-secret-test-secret',
+    API_ADMIN_PASSWORD: ADMIN,
+    API_KEYS_FILE: path.join(dir, 'keys.json'),
+    API_SETTINGS_FILE: path.join(dir, 'settings.json'),
+    USAGE_STATS_FILE: path.join(dir, 'usage.json'),
+  });
+  const app = createApp(cfg, { nativeEngine: engine });
+  const server = await new Promise((resolve) => {
+    const srv = app.listen(0, '127.0.0.1', () => resolve(srv));
+  });
+  t.after(async () => {
+    await new Promise((r) => server.close(r));
+    await rm(dir, { recursive: true, force: true });
+  });
+  return { base: `http://127.0.0.1:${server.address().port}`, engine };
+}
+
+test('HF 浏览器通道：服务端连不上 HF 时，搜索/详情/一键使用仍可走完', { timeout: 60000 }, async (t) => {
+  const { base } = await setupOffline(t);
+  const session = await login(base, '/api/login', PASSWORD);
+  const admin = await login(base, '/api/admin/api-keys/login', ADMIN);
+
+  // 对照：服务端直连搜索在这个环境下必然失败（用户实测原样）
+  const directSearch = await fetch(`${base}/api/native/hf/search?q=Tiny`, { headers: auth(session) });
+  assert.equal(directSearch.status, 500);
+  assert.match((await directSearch.json()).error, /无法连接 Hugging Face/);
+
+  // 浏览器已取回搜索结果 → 本地只做格式粗判定
+  const meta = await fetch(`${base}/api/native/hf/search-meta`, {
+    method: 'POST', headers: auth(session),
+    body: JSON.stringify({
+      results: [
+        { repo: 'acme/Tiny-GGUF', name: 'Tiny-GGUF', author: 'acme', downloads: 5, likes: 1, tags: ['gguf'] },
+        { repo: 'acme/Tiny-Plain', name: 'Tiny-Plain', author: 'acme', downloads: 3, likes: 0, tags: [] },
+        { repo: 'not-a-repo', name: 'x' },
+      ],
+    }),
+  });
+  assert.equal(meta.status, 200);
+  const metaData = await meta.json();
+  assert.equal(metaData.results.length, 2); // 非法仓库被清洗掉
+  assert.deepEqual(metaData.results[0].formats, ['gguf']);
+
+  // 浏览器取回详情 → 本地判定路线 + 量化清单（类型/可直接使用）
+  const files = [
+    { path: 'Tiny-Q4_K_M.gguf', size: 5 },
+    { path: 'README.md', size: 3 },
+  ];
+  const info = await (await fetch(`${base}/api/native/hf/model-meta`, {
+    method: 'POST', headers: auth(session),
+    body: JSON.stringify({ repo: 'acme/Tiny-GGUF', meta: { author: 'acme', tags: ['gguf'] }, files }),
+  })).json();
+  assert.equal(info.route.route, 'local');
+  assert.equal(info.quants.length, 1);
+  assert.equal(info.quants[0].quant, 'Q4_K_M');
+  assert.equal(info.quants[0].directUse, true);
+  assert.match(info.quants[0].typeLabel, /GGUF/);
+
+  // 一键使用（带浏览器预载信息）：只登记并给出推荐量化，不触发服务端直连下载
+  const use = await fetch(`${base}/api/native/hf/use`, {
+    method: 'POST', headers: auth(admin),
+    body: JSON.stringify({ repo: 'acme/Tiny-GGUF', mode: 'local', viaBrowser: true, info: { meta: { author: 'acme', tags: ['gguf'] }, files } }),
+  });
+  assert.equal(use.status, 202);
+  const useData = await use.json();
+  assert.equal(useData.action, 'download');
+  assert.equal(useData.via, 'browser');
+  assert.equal(useData.quant, 'Q4_K_M');
+  const st1 = await (await fetch(`${base}/api/native/status`)).json();
+  const m1 = st1.models.find((m) => m.id === useData.id);
+  assert.ok(m1, '自定义模型应已登记');
+  assert.equal((m1.downloads || []).length, 0, '浏览器路线不应偷偷开服务端下载任务');
+
+  // 浏览器接力把字节传完 → 落盘并出现在已下载里
+  const idPath = encodeURIComponent(useData.id);
+  const prep = await (await fetch(`${base}/api/native/models/${idPath}/browser-download/prepare`, {
+    method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M', files }),
+  })).json();
+  assert.equal(prep.state, 'downloading');
+  const chunk = await fetch(`${base}/api/native/models/${idPath}/browser-download/chunk`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${admin}`, 'content-type': 'application/octet-stream',
+      'x-bd-quant': 'Q4_K_M', 'x-bd-file': encodeURIComponent('Tiny-Q4_K_M.gguf'), 'x-bd-offset': '0',
+    },
+    body: Buffer.from('XXXXX'),
+  });
+  assert.equal(chunk.status, 200);
+  const finish = await fetch(`${base}/api/native/models/${idPath}/browser-download/finish`, {
+    method: 'POST', headers: auth(admin), body: JSON.stringify({ quant: 'Q4_K_M' }),
+  });
+  assert.equal(finish.status, 200);
+  const st2 = await (await fetch(`${base}/api/native/status`)).json();
+  const m2 = st2.models.find((m) => m.id === useData.id);
+  assert.deepEqual((m2.downloaded || []).map((d) => d.quant), ['Q4_K_M']);
+  assert.equal(m2.downloaded[0].directUse, true);
+
+  // 不带预载信息仍走服务端直连（保留回退语义），在这个环境下如实失败
+  const useDirect = await fetch(`${base}/api/native/hf/use`, {
+    method: 'POST', headers: auth(admin),
+    body: JSON.stringify({ repo: 'acme/Tiny-GGUF', mode: 'local' }),
+  });
+  assert.equal(useDirect.status, 500);
+});

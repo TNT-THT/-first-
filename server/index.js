@@ -118,6 +118,10 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', cfg.trustProxy);
+  // 本机大模型的浏览器通道要回传整个仓库文件树（大仓库可达数千个文件），
+  // 单独放宽这一组接口的请求体上限；其余接口维持 256kb 收紧不变。
+  // 必须排在全局 parser 之前：body-parser 解析过后全局 parser 会自动跳过。
+  app.use('/api/native', express.json({ limit: '8mb' }));
   app.use(express.json({ limit: '256kb' }));
   app.use(['/api/admin/api-keys', '/api/admin/settings', '/api/admin/usage-stats'], (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -160,8 +164,11 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
   // 本机桥接模式下，网页要在浏览器里编译 WebAssembly 并从 Hugging Face 下载模型权重，
   // 因此仅在该模式放行 'wasm-unsafe-eval' 与模型下载域名，否则网页模型根本加载不了。
   const scriptSrc = browserBridge ? "script-src 'self' 'wasm-unsafe-eval'" : "script-src 'self'";
+  // 浏览器要能直连 Hugging Face 取数：桥接模式（网页模型）与本机大模型
+  // （浏览器通道：软件直连不通时由浏览器取文件树/权重字节）都需要放行。
+  // 只在启用了这两类功能时放行，不扩大纯静态/纯 API 部署的连接面。
   const connectSrc = `'self'${cfg.cspConnectSrc ? ` ${cfg.cspConnectSrc}` : ''}${
-    browserBridge ? ' https://huggingface.co https://*.huggingface.co https://*.hf.co' : ''
+    browserBridge || nativeEngine ? ' https://huggingface.co https://*.huggingface.co https://*.hf.co' : ''
   }`;
   app.use((req, res, next) => {
     res.setHeader(

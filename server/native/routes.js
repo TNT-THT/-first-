@@ -13,10 +13,70 @@
  * 另导出 streamNativeToHttp / nativeCompletionJson 供 /v1 与 /api/chat 复用。
  */
 import { randomUUID } from 'node:crypto';
-import { estimateRamGB } from './catalog.js';
+import { describeQuant, estimateRamGB } from './catalog.js';
 import { parseHfRepoInput } from './formats.js';
 import { createThinkFolder, foldMessageReasoning } from './llama.js';
 import { validateMessages } from '../chat.js';
+
+/** 量化档位的展示视图：名字之外还要有类型、是否可直接使用，别让用户猜。 */
+function quantView(g) {
+  return {
+    quant: g.quant,
+    files: g.files.length,
+    totalBytes: g.totalBytes,
+    sizeGB: Math.round((g.totalBytes / 1e9) * 10) / 10,
+    ramGB: estimateRamGB(g.totalBytes),
+    ...describeQuant(g.quant),
+  };
+}
+
+/** 浏览器通道回传的搜索结果清洗：只留判定需要的字段，非法仓库丢弃。 */
+function cleanSearchResults(list) {
+  const out = [];
+  for (const r of Array.isArray(list) ? list.slice(0, 50) : []) {
+    const repo = parseHfRepoInput(r?.repo || r?.id);
+    if (!repo) continue;
+    out.push({
+      repo,
+      name: typeof r.name === 'string' ? r.name : repo.split('/').pop(),
+      author: typeof r.author === 'string' ? r.author : repo.split('/')[0],
+      downloads: Math.max(0, Number(r.downloads) || 0),
+      likes: Math.max(0, Number(r.likes) || 0),
+      pipeline: typeof r.pipeline === 'string' ? r.pipeline : '',
+      library: typeof r.library === 'string' ? r.library : '',
+      tags: Array.isArray(r.tags) ? r.tags.filter((t) => typeof t === 'string').slice(0, 30) : [],
+      gated: !!r.gated,
+      updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
+    });
+  }
+  return out;
+}
+
+/** 仓库详情的展示视图（服务端直连与浏览器通道共用，保证两条路看到的一样）。 */
+function infoView(info) {
+  return {
+    repo: info.repo,
+    name: info.name,
+    downloads: info.downloads,
+    likes: info.likes,
+    pipeline: info.pipeline,
+    formats: info.formats,
+    variants: info.variants,
+    route: info.route,
+    totalGB: Math.round((info.totalBytes / 1e9) * 10) / 10,
+    files: info.files.slice(0, 60).map((f) => ({ path: f.path, size: f.size })),
+    quants: (info.quants || []).map((q) => ({
+      quant: q.quant,
+      totalBytes: q.totalBytes,
+      sizeGB: Math.round((q.totalBytes / 1e9) * 10) / 10,
+      typeLabel: q.typeLabel,
+      bitsPerWeight: q.bitsPerWeight,
+      directUse: q.directUse,
+      useNote: q.useNote,
+      qualityNote: q.qualityNote,
+    })),
+  };
+}
 
 function errJson(res, err, fallback = '本机大模型服务出错') {
   const status = Number.isInteger(err?.status) ? err.status : 500;
@@ -110,16 +170,7 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
       const model = engine.resolveModel(req.params.id);
       if (!model) return res.status(404).json({ error: `未知模型：${req.params.id}` });
       const grouped = await engine.availableQuants(req.params.id);
-      return res.json({
-        id: model.id,
-        quants: grouped.map((g) => ({
-          quant: g.quant,
-          files: g.files.length,
-          totalBytes: g.totalBytes,
-          sizeGB: Math.round((g.totalBytes / 1e9) * 10) / 10,
-          ramGB: estimateRamGB(g.totalBytes),
-        })),
-      });
+      return res.json({ id: model.id, quants: grouped.map(quantView) });
     } catch (err) {
       return errJson(res, err);
     }
@@ -180,16 +231,7 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
       if (!model) return res.status(404).json({ error: `未知模型：${req.params.id}` });
       const files = Array.isArray(req.body?.files) ? req.body.files : [];
       const grouped = engine.groupQuantsFromFiles(req.params.id, files);
-      return res.json({
-        id: model.id,
-        quants: grouped.map((g) => ({
-          quant: g.quant,
-          files: g.files.length,
-          totalBytes: g.totalBytes,
-          sizeGB: Math.round((g.totalBytes / 1e9) * 10) / 10,
-          ramGB: estimateRamGB(g.totalBytes),
-        })),
-      });
+      return res.json({ id: model.id, quants: grouped.map(quantView) });
     } catch (err) {
       return errJson(res, err);
     }
@@ -305,18 +347,30 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
       const repo = parseHfRepoInput(req.query.repo);
       if (!repo) return res.status(400).json({ error: '请提供有效的 Hugging Face 仓库（owner/repo 或完整链接）。' });
       const info = await engine.hfInfo(repo);
-      return res.json({
-        repo: info.repo,
-        name: info.name,
-        downloads: info.downloads,
-        likes: info.likes,
-        pipeline: info.pipeline,
-        formats: info.formats,
-        variants: info.variants,
-        route: info.route,
-        totalGB: Math.round((info.totalBytes / 1e9) * 10) / 10,
-        files: info.files.slice(0, 60).map((f) => ({ path: f.path, size: f.size })),
-      });
+      return res.json(infoView(info));
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  // 浏览器通道（与普通网页版同一条网络路）：搜索与详情由浏览器从 Hub 取数，
+  // 本地服务只做格式识别、路线判定、登记等本地计算，不再要求软件直连 HF。
+  // 浏览器取数失败时前端才回退上面的服务端直连接口。
+  app.post('/api/native/hf/search-meta', requireSession, async (req, res) => {
+    try {
+      const results = engine.searchFromMeta(cleanSearchResults(req.body?.results));
+      return res.json({ results });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  app.post('/api/native/hf/model-meta', requireSession, async (req, res) => {
+    try {
+      const repo = parseHfRepoInput(req.body?.repo);
+      if (!repo) return res.status(400).json({ error: '请提供有效的 Hugging Face 仓库（owner/repo 或完整链接）。' });
+      const info = engine.hfInfoFromMeta(repo, req.body?.meta || {}, req.body?.files);
+      return res.json(infoView(info));
     } catch (err) {
       return errJson(res, err);
     }
@@ -327,7 +381,10 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
       const repo = parseHfRepoInput(req.body?.repo);
       if (!repo) return res.status(400).json({ error: '请提供有效的 Hugging Face 仓库（owner/repo 或完整链接）。' });
       const mode = ['auto', 'local', 'python', 'cloud'].includes(req.body?.mode) ? req.body.mode : 'auto';
-      const out = await engine.useRepo(repo, mode);
+      // 浏览器已取到详情时优先用本地判定，不再为判定而直连 HF
+      const pre = req.body?.info && typeof req.body.info === 'object' ? req.body.info : null;
+      const info = pre ? engine.hfInfoFromMeta(repo, pre.meta || {}, pre.files) : null;
+      const out = await engine.useRepo(repo, mode, { info, viaBrowser: !!info || req.body?.viaBrowser === true });
       return res.status(202).json(out);
     } catch (err) {
       return errJson(res, err);

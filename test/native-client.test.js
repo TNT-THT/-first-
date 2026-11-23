@@ -2,7 +2,7 @@
 // 不能点了按钮后无声无息（用户感知为“没反应”）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { downloadModelViaBrowser, fetchNativeQuants, fetchQuantsViaBrowser } from '../web/src/engines/native-client.js';
+import { downloadModelViaBrowser, fetchModelInfoViaBrowser, fetchNativeQuants, fetchQuantsViaBrowser, parseRepoInput, searchHfViaBrowser, useRepoViaBrowser } from '../web/src/engines/native-client.js';
 
 function withFetch(impl, fn) {
   const orig = globalThis.fetch;
@@ -163,4 +163,119 @@ test('downloadModelViaBrowser：断点被忽略（已有偏移却回 200）时�
   );
   assert.equal(state.failed, true);
   assert.equal(state.finished, false);
+});
+
+test('parseRepoInput：关键词不是仓库，owner/repo 与完整链接才是', () => {
+  assert.equal(parseRepoInput('Qwen 3'), null);
+  assert.equal(parseRepoInput('someone/Tiny-GGUF'), 'someone/Tiny-GGUF');
+  assert.equal(parseRepoInput('https://huggingface.co/someone/Tiny-GGUF/tree/main'), 'someone/Tiny-GGUF');
+});
+
+test('searchHfViaBrowser：浏览器取搜索结果，本地服务只做格式判定', async () => {
+  const seen = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    seen.push(u);
+    if (u.startsWith('https://huggingface.co/api/models?')) {
+      assert.match(u, /search=Tiny/);
+      return new Response(JSON.stringify([
+        { id: 'acme/Tiny-GGUF', author: 'acme', downloads: 5, likes: 1, pipeline_tag: 'text-generation', library_name: '', tags: ['gguf'], gated: false },
+        { id: 'acme/Secret', private: true },
+      ]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === '/api/native/hf/search-meta') {
+      const body = JSON.parse(opts.body);
+      assert.equal(body.results.length, 1); // 私有仓库已在浏览器侧过滤
+      assert.equal(body.results[0].pipeline, 'text-generation'); // 字段已归一化
+      return new Response(JSON.stringify({ results: [{ ...body.results[0], formats: ['gguf'] }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('意外请求：' + u);
+  };
+  const out = await searchHfViaBrowser('Tiny', 'tok', { fetchImpl });
+  assert.equal(out.results.length, 1);
+  assert.deepEqual(out.results[0].formats, ['gguf']);
+  assert.equal(seen.length, 2);
+});
+
+test('searchHfViaBrowser：粘贴仓库链接时直接取详情并给一条结果', async () => {
+  const fetchImpl = async (url) => {
+    const u = String(url);
+    if (u === 'https://huggingface.co/api/models/acme/Tiny-GGUF') {
+      return new Response(JSON.stringify({ author: 'acme', downloads: 5, likes: 1, tags: ['gguf'] }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify([{ type: 'file', path: 'Tiny-Q4_K_M.gguf', lfs: { size: 10 } }]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === '/api/native/hf/model-meta') {
+      return new Response(JSON.stringify({ repo: 'acme/Tiny-GGUF', name: 'Tiny-GGUF', downloads: 5, likes: 1, formats: ['gguf'], route: { route: 'local' }, files: [], totalGB: 0 }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('意外请求：' + u);
+  };
+  const out = await searchHfViaBrowser('https://huggingface.co/acme/Tiny-GGUF', 'tok', { fetchImpl });
+  assert.equal(out.direct, 'acme/Tiny-GGUF');
+  assert.equal(out.results.length, 1);
+  assert.deepEqual(out.results[0].formats, ['gguf']);
+});
+
+test('fetchModelInfoViaBrowser：meta 与文件树分开取回，回传本地判定时文件清单已瘦身', async () => {
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === 'https://huggingface.co/api/models/acme/Tiny-GGUF') {
+      return new Response(JSON.stringify({ author: 'acme', downloads: 5, likes: 1, tags: ['gguf'] }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify([
+        { type: 'file', path: 'Tiny-Q4_K_M.gguf', lfs: { size: 10, oid: 'deadbeef' } },
+        { type: 'file', path: 'config.json', size: 3 },
+      ]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === '/api/native/hf/model-meta') {
+      const body = JSON.parse(opts.body);
+      assert.equal(body.files.length, 2); // 格式判定需要全树，不能只留 gguf
+      assert.equal(body.files[0].sha256, undefined); // 但哈希等冗余字段不回传
+      assert.equal(body.files[0].size, 10);
+      return new Response(JSON.stringify({ repo: 'acme/Tiny-GGUF', name: 'Tiny-GGUF', formats: ['gguf'], route: { route: 'local' }, quants: [{ quant: 'Q4_K_M', directUse: true }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('意外请求：' + u);
+  };
+  const info = await fetchModelInfoViaBrowser('acme/Tiny-GGUF', 'tok', { fetchImpl });
+  assert.equal(info.quants[0].directUse, true);
+});
+
+test('useRepoViaBrowser：判定走浏览器取数，GGUF 接着走浏览器下载传完字节', async () => {
+  const fileUrl = 'https://huggingface.co/acme/Tiny-GGUF/resolve/main/Tiny-Q4_K_M.gguf';
+  const { state, apiFetch } = fakeLocalApi({
+    prepFiles: [{ path: 'Tiny-Q4_K_M.gguf', size: 10, url: fileUrl, offset: 0, done: false }],
+  });
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u === 'https://huggingface.co/api/models/acme/Tiny-GGUF') {
+      return new Response(JSON.stringify({ author: 'acme', tags: ['gguf'] }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify([{ type: 'file', path: 'Tiny-Q4_K_M.gguf', lfs: { size: 10 } }]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === fileUrl) {
+      return new Response('0123456789', { status: 200 });
+    }
+    if (u === '/api/native/hf/use') {
+      const body = JSON.parse(opts.body);
+      assert.equal(body.viaBrowser, true);
+      assert.equal(body.files, undefined); // info 嵌套传递
+      assert.equal(body.info.files.length, 1);
+      return new Response(JSON.stringify({ id: 'hf/acme/Tiny-GGUF', action: 'download', via: 'browser', quant: 'Q4_K_M' }), { status: 202, headers: { 'content-type': 'application/json' } });
+    }
+    return apiFetch(url, opts);
+  };
+  const { out, downloadState } = await useRepoViaBrowser({ repo: 'acme/Tiny-GGUF', mode: 'local', adminToken: 'adm', fetchImpl });
+  assert.equal(out.action, 'download');
+  assert.equal(downloadState, 'browser');
+  assert.equal(state.finished, true);
+  const joined = Buffer.concat(state.chunks.map((c) => Buffer.from(c))).toString();
+  assert.equal(joined, '0123456789');
+});
+
+test('searchHfViaBrowser：浏览器连不上 HF 时抛中文错，交给上层回退直连', async () => {
+  const fetchImpl = async () => { throw new TypeError('fetch failed'); };
+  await assert.rejects(() => searchHfViaBrowser('Tiny', 'tok', { fetchImpl }), /无法连接 Hugging Face/);
 });

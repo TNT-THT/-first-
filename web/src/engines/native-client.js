@@ -46,6 +46,138 @@ export async function hfSearch(query, token) {
   return data;
 }
 
+/** 把用户输入（关键词、owner/repo、完整 HF 链接）解析成仓库 id；不是仓库返回 null。 */
+export function parseRepoInput(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return null;
+  const urlMatch = raw.match(/huggingface\.co\/([A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*)/);
+  if (urlMatch) return urlMatch[1];
+  if (/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(raw)) return raw;
+  return null;
+}
+
+/** 浏览器直连 HF 仓库元信息（与服务端 fetchModelInfo 取的是同一个接口）。 */
+export async function fetchRepoMetaViaBrowser(repo, { fetchImpl = fetch, timeoutMs = 30000 } = {}) {
+  const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
+    ? AbortSignal.timeout(timeoutMs)
+    : undefined;
+  let res;
+  try {
+    res = await fetchImpl(`${HF_WEB_BASE}/api/models/${repo}`, {
+      headers: { accept: 'application/json' },
+      cache: 'no-store',
+      signal,
+    });
+  } catch (err) {
+    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+      throw new Error('浏览器连接 Hugging Face 超时，请检查网络/代理后重试。');
+    }
+    throw new Error(`浏览器无法连接 Hugging Face（${err?.message || '网络错误'}）。`);
+  }
+  if (!res.ok) {
+    throw new Error(res.status === 404 ? `仓库不存在：${repo}` : `读取仓库 ${repo} 失败（HTTP ${res.status}）。`);
+  }
+  const meta = await res.json().catch(() => null);
+  if (!meta || typeof meta !== 'object') throw new Error(`仓库 ${repo} 返回了无法识别的信息。`);
+  return meta;
+}
+
+/** 浏览器取数 + 本地判定：HF 搜索（关键词）和粘贴仓库链接两种输入都走这里。 */
+export async function searchHfViaBrowser(query, token, { fetchImpl = fetch } = {}) {
+  const q = String(query || '').trim();
+  const direct = parseRepoInput(q);
+  if (direct) {
+    // 粘贴的是仓库：直接取详情，结果列表里给一条，与原服务端行为一致
+    const info = await fetchModelInfoViaBrowser(direct, token, { fetchImpl });
+    return { direct, results: [{ repo: direct, name: info.name, author: info.repo.split('/')[0] || '', downloads: info.downloads, likes: info.likes, formats: info.formats }] };
+  }
+  const params = new URLSearchParams({ limit: '24', sort: 'downloads', direction: '-1' });
+  if (q) params.set('search', q);
+  let res;
+  try {
+    res = await fetchImpl(`${HF_WEB_BASE}/api/models?${params}`, { headers: { accept: 'application/json' }, cache: 'no-store' });
+  } catch (err) {
+    throw new Error(`浏览器无法连接 Hugging Face（${err?.message || '网络错误'}）。`);
+  }
+  if (!res.ok) throw new Error(`Hugging Face 搜索失败（HTTP ${res.status}），请检查网络后重试。`);
+  const list = await res.json().catch(() => null);
+  if (!Array.isArray(list)) throw new Error('Hugging Face 搜索返回了无法识别的结果。');
+  const results = list
+    .filter((m) => m && typeof m.id === 'string' && !m.private)
+    .map((m) => ({
+      repo: m.id,
+      name: m.id.split('/').pop() || m.id,
+      author: m.author || m.id.split('/')[0] || '',
+      downloads: Number(m.downloads) || 0,
+      likes: Number(m.likes) || 0,
+      pipeline: m.pipeline_tag || '',
+      library: m.library_name || '',
+      tags: Array.isArray(m.tags) ? m.tags.slice(0, 30) : [],
+      gated: !!m.gated,
+      updatedAt: m.lastModified || '',
+    }));
+  // 格式粗判定在本地服务做，与服务端直连搜索同一套口径
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const judge = await fetchImpl('/api/native/hf/search-meta', {
+    method: 'POST', headers, body: JSON.stringify({ results }), cache: 'no-store',
+  });
+  const data = await judge.json().catch(() => ({}));
+  if (!judge.ok) throw new Error(data.error || `本地判定失败（HTTP ${judge.status}）`);
+  return { results: data.results || [] };
+}
+
+/** 浏览器取数 + 本地判定：HF 仓库详情（格式路线 + 量化清单）。 */
+export async function fetchModelInfoViaBrowser(repo, token, { fetchImpl = fetch } = {}) {
+  const [meta, files] = await Promise.all([
+    fetchRepoMetaViaBrowser(repo, { fetchImpl }),
+    fetchRepoTreeViaBrowser(repo, { fetchImpl }),
+  ]);
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  const res = await fetchImpl('/api/native/hf/model-meta', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ repo, meta, files: slimFiles(files) }),
+    cache: 'no-store',
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `本地判定失败（HTTP ${res.status}）`);
+  return data;
+}
+
+/**
+ * 使用 HF 仓库（浏览器通道优先）：浏览器取详情 → 本地登记与路线判定 →
+ * GGUF 本地路线直接走浏览器下载；其余路线（转换/Python/云端）沿用服务端流程。
+ * 浏览器取数失败抛错，调用方回退服务端直连的 /use。
+ * @returns {Promise<{out: object, downloadState: 'browser'|'fallback'|'none'}>}
+ */
+export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetchImpl = fetch, onStatus } = {}) {
+  const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
+  note('正在经浏览器读取仓库信息（和网页版同一条网络路）…');
+  const [meta, files] = await Promise.all([
+    fetchRepoMetaViaBrowser(repo, { fetchImpl }),
+    fetchRepoTreeViaBrowser(repo, { fetchImpl }),
+  ]);
+  const out = await adminJson(fetchImpl, '/api/native/hf/use', {
+    token: adminToken,
+    body: { repo, mode, viaBrowser: true, info: { meta, files: slimFiles(files) } },
+  });
+  if (out.action !== 'download' || out.via !== 'browser') return { out, downloadState: 'none' };
+  // 如果下载已在服务端完成（已下载过），downloadModelViaBrowser 会在 prepare 秒回 done
+  try {
+    await downloadModelViaBrowser({ id: out.id, repo, quant: out.quant || undefined, adminToken, fetchImpl, onStatus: note });
+    return { out, downloadState: 'browser' };
+  } catch {
+    // 浏览器传字节失败：回退服务端直连（量化分组缓存已在 /use 时写入，选档不必再列树）
+    await adminJson(fetchImpl, `/api/native/models/${encodeURIComponent(out.id)}/download`, {
+      token: adminToken,
+      body: { quant: out.quant || undefined },
+    });
+    return { out, downloadState: 'fallback' };
+  }
+}
+
 /** HF 仓库详情（格式与运行路线）。 */
 export async function hfModelInfo(repo, token) {
   const headers = {};
@@ -133,9 +265,19 @@ async function adminJson(fetchImpl, path, { token, body } = {}) {
   return data;
 }
 
+/**
+ * 瘦身文件树：回传本地服务时只留判定/分组需要的字段。
+ * 量化分组只需要 GGUF 文件的路径与大小；全量回传会让大仓库请求体膨胀。
+ */
+function slimFiles(files, { ggufOnly = false } = {}) {
+  return (Array.isArray(files) ? files : [])
+    .filter((f) => f && typeof f.path === 'string' && (!ggufOnly || /\.gguf$/i.test(f.path)))
+    .map((f) => ({ path: f.path, size: Math.max(0, Number(f.size) || 0) }));
+}
+
 /** 量化列表（浏览器通道）：浏览器取文件树 → 本地服务分组 → 返回量化列表。 */
 export async function fetchQuantsViaBrowser({ id, repo, token, fetchImpl = fetch, timeoutMs = 30000 } = {}) {
-  const files = await fetchRepoTreeViaBrowser(repo, { fetchImpl, timeoutMs });
+  const files = slimFiles(await fetchRepoTreeViaBrowser(repo, { fetchImpl, timeoutMs }), { ggufOnly: true });
   const headers = { 'content-type': 'application/json' };
   if (token) headers.authorization = `Bearer ${token}`;
   const res = await fetchImpl(`/api/native/models/${encodeURIComponent(id)}/quants-preview`, {
@@ -271,7 +413,7 @@ export async function downloadModelViaBrowser({
 } = {}) {
   const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
   note('正在经浏览器读取仓库文件列表（和网页版同一条网络路）…');
-  const files = await fetchRepoTreeViaBrowser(repo, { fetchImpl, timeoutMs: treeTimeoutMs });
+  const files = slimFiles(await fetchRepoTreeViaBrowser(repo, { fetchImpl, timeoutMs: treeTimeoutMs }), { ggufOnly: true });
   const prep = await adminJson(fetchImpl, `/api/native/models/${encodeURIComponent(id)}/browser-download/prepare`, {
     token: adminToken,
     body: { quant, files },

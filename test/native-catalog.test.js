@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { gzipSync } from 'node:zlib';
 import {
+  describeQuant,
   NATIVE_MODELS,
   estimateRamGB,
   extractQuant,
@@ -33,6 +34,32 @@ test('目录：id 唯一、包含 27B 与 100~1000B 梯队、仓库地址合法'
   assert.ok(Math.max(...NATIVE_MODELS.map((m) => m.paramsB)) >= 600, '应包含 600B+ 旗舰');
   assert.ok(isNativeModelId('DeepSeek-R1-671B'));
   assert.ok(!isNativeModelId('Qwen3-8B-q4f16_1-MLC'), 'WebLLM 模型不能混进本机目录');
+});
+
+test('describeQuant：标明类型、位宽与“下载后可直接使用”，让小白不用猜', () => {
+  const q4 = describeQuant('Q4_K_M');
+  assert.equal(q4.format, 'GGUF');
+  assert.match(q4.typeLabel, /GGUF/);
+  assert.equal(q4.bitsPerWeight, 4);
+  assert.equal(q4.directUse, true); // GGUF 是本机引擎原生格式，不需要再转换
+  assert.match(q4.useNote, /直接加载/);
+  assert.match(q4.qualityNote, /推荐/);
+  assert.equal(describeQuant('Q8_0').bitsPerWeight, 8);
+  assert.match(describeQuant('Q8_0').qualityNote, /无损/);
+  assert.equal(describeQuant('BF16').bitsPerWeight, 16);
+  const ud = describeQuant('UD-Q4_K_XL');
+  assert.equal(ud.dynamic, true);
+  assert.equal(ud.bitsPerWeight, 4);
+  assert.match(ud.typeLabel, /动态量化/);
+  const iq = describeQuant('IQ2_XXS');
+  assert.equal(iq.bitsPerWeight, 2);
+  assert.match(iq.typeLabel, /i-quant/);
+  assert.match(iq.qualityNote, /损失明显/);
+  // 叫不出名字的档位也要给说法，且仍是 GGUF 可直接使用
+  const odd = describeQuant('SOMETHING_ELSE');
+  assert.equal(odd.bitsPerWeight, null);
+  assert.equal(odd.directUse, true);
+  assert.ok(odd.qualityNote.length > 0);
 });
 
 test('extractQuant：兼容根目录文件、点分隔、按量化分子目录三种布局', () => {

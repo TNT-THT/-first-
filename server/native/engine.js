@@ -15,6 +15,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  describeQuant,
   groupFilesByQuant,
   nativeModelById,
   pickDefaultQuant,
@@ -27,6 +28,12 @@ import { findConverter, prepareConverter, runConvert } from './convert.js';
 import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python-runner.js';
 
 const QUANT_CACHE_MS = 10 * 60 * 1000;
+/**
+ * 浏览器通道任务“已中断”判定：超过这个时长没有收到任何新数据块，就认为
+ * 浏览器页面已关/已断（关页面时客户端的失败通知发不出来，服务端不能干等）。
+ * 中断后任务转为 error，前端按钮随之恢复可点，重新点下载会按偏移续传。
+ */
+const BROWSER_JOB_STALE_MS = 180 * 1000;
 export const HF_ROUTER_URL = 'https://router.huggingface.co/v1/chat/completions';
 
 export class NativeEngine {
@@ -193,7 +200,7 @@ export class NativeEngine {
           break;
         }
       }
-      if (ok) out.push({ quant, totalBytes: manifest.totalBytes, files: manifest.files.length });
+      if (ok) out.push({ quant, totalBytes: manifest.totalBytes, files: manifest.files.length, ...describeQuant(quant) });
     }
     return out;
   }
@@ -238,12 +245,36 @@ export class NativeEngine {
     return value;
   }
 
+  /**
+   * 把“浏览器页面已关/已断但失败通知没发出来”的浏览器通道任务转成中断状态。
+   * 不处理服务端直连任务（它有自己的后台流程会给出成败）。
+   */
+  _expireStaleBrowserJobs() {
+    const now = Date.now();
+    for (const job of this.downloads.values()) {
+      if (job.via !== 'browser' || job.state !== 'downloading') continue;
+      const last = job.lastChunkAt || job.startedAt || 0;
+      if (now - last > BROWSER_JOB_STALE_MS) {
+        job.state = 'error';
+        job.error = '下载已中断（页面关闭或网络断开超过 3 分钟），重新点下载会从断点续传。';
+      }
+    }
+  }
+
   async status() {
+    this._expireStaleBrowserJobs();
     const binary = findLlamaBinary({ env: this.env, dataDir: this.dataDir });
     const models = [];
     for (const m of this.listModels()) {
       const downloaded = await this.downloadedQuants(m.id);
-      const dl = [...this.downloads.values()].filter((d) => d.id === m.id);
+      // 只下发展示需要的字段：内部 entry（含整份文件清单）、receivedByFile（Map）不外传
+      const dl = [...this.downloads.values()]
+        .filter((d) => d.id === m.id)
+        .map((d) => ({
+          id: d.id, quant: d.quant, state: d.state,
+          downloaded: d.downloaded, total: d.total, error: d.error || '',
+          via: d.via || 'server',
+        }));
       models.push({
         id: m.id,
         name: m.name,
@@ -308,23 +339,73 @@ export class NativeEngine {
     return this.binaryJob.promise;
   }
 
-  /** HF 搜索（桥接 Hub API）。 */
-  async searchHf(query, opts = {}) {
-    const results = await searchModels({ query, ...opts, fetchImpl: this.fetchImpl });
-    return results.map((r) => {
+  /** 给搜索结果粗判定格式（标签/库名/仓库名级别，详情时再按真实文件确认）。 */
+  _annotateSearchResults(results) {
+    return (Array.isArray(results) ? results : []).map((r) => {
       const guess = detectFormats([], { tags: [...(r.tags || []), String(r.repo || '').toLowerCase().includes('gguf') ? 'gguf' : ''], library_name: r.library });
       return { ...r, formats: guess };
     });
   }
 
-  /** HF 仓库详情 + 格式路线（点开/一键使用时）。 */
-  async hfInfo(repo) {
-    const info = await fetchModelInfo(repo, { fetchImpl: this.fetchImpl });
+  /** HF 搜索（桥接 Hub API，服务端直连；浏览器通道不可用时的回退）。 */
+  async searchHf(query, opts = {}) {
+    const results = await searchModels({ query, ...opts, fetchImpl: this.fetchImpl });
+    return this._annotateSearchResults(results);
+  }
+
+  /**
+   * HF 搜索（浏览器通道）：浏览器已从 Hub 取回搜索结果，这里只在本地做
+   * 格式粗判定，与普通网页版同一条网络路，不再要求软件直连 huggingface.co。
+   */
+  searchFromMeta(results) {
+    return this._annotateSearchResults(results);
+  }
+
+  /** 把仓库元信息拼成详情（格式/路线/可运行方式/量化清单）。 */
+  _buildInfo(repo, meta, files) {
+    const cleanFiles = (Array.isArray(files) ? files : [])
+      .filter((f) => f && typeof f.path === 'string')
+      .slice(0, 50000)
+      .map((f) => ({ path: f.path, size: Math.max(0, Number(f.size) || 0), sha256: typeof f.sha256 === 'string' ? f.sha256 : '' }));
+    const info = {
+      repo,
+      name: repo.split('/').pop() || repo,
+      author: meta?.author || repo.split('/')[0] || '',
+      downloads: Number(meta?.downloads) || 0,
+      likes: Number(meta?.likes) || 0,
+      pipeline: meta?.pipeline_tag || '',
+      library: meta?.library_name || '',
+      tags: Array.isArray(meta?.tags) ? meta.tags : [],
+      gated: !!meta?.gated,
+      files: cleanFiles,
+      totalBytes: cleanFiles.reduce((n, f) => n + (f.size || 0), 0),
+    };
     const formats = detectFormats(info.files, info);
     const variants = detectVariants(info.files, info);
     const route = routeForFormats(formats, variants);
     const options = optionsForFormats(formats, variants);
-    return { ...info, formats, variants, route, options };
+    // GGUF 仓库顺带给出量化清单（类型/是否可直接使用），供详情页选档
+    let quants = [];
+    if (formats.includes('gguf')) {
+      quants = groupFilesByQuant(cleanFiles).map((g) => ({
+        quant: g.quant,
+        files: g.files.length,
+        totalBytes: g.totalBytes,
+        ...describeQuant(g.quant),
+      }));
+    }
+    return { ...info, formats, variants, route, options, quants };
+  }
+
+  /** HF 仓库详情 + 格式路线（服务端直连；浏览器通道不可用时的回退）。 */
+  async hfInfo(repo) {
+    const info = await fetchModelInfo(repo, { fetchImpl: this.fetchImpl });
+    return this._buildInfo(repo, info, info.files);
+  }
+
+  /** HF 仓库详情（浏览器通道）：浏览器取回的 meta+文件树在本地判定。 */
+  hfInfoFromMeta(repo, meta, files) {
+    return this._buildInfo(repo, meta || {}, files);
   }
 
   /** 把一个 HF 仓库登记为自定义模型（幂等），返回模型 id。 */
@@ -356,9 +437,18 @@ export class NativeEngine {
    * - mode='cloud'：云端使用（需 HF Token，不下载）。
    * 任何格式都保证有本地路线（见 formats.optionsForFormats）。
    */
-  async useRepo(repo, mode = 'auto') {
-    const info = await this.hfInfo(repo);
+  /**
+   * @param {{info?: object, viaBrowser?: boolean}} [opts]
+   *   info：浏览器通道已取回并在本地判定好的详情（有它就不再直连 HF）；
+   *   viaBrowser：下载路线改由浏览器负责传字节，这里只登记与推荐量化。
+   */
+  async useRepo(repo, mode = 'auto', { info: preloaded = null, viaBrowser = false } = {}) {
+    const info = preloaded || await this.hfInfo(repo);
     const id = await this.registerCustom(repo, { formats: info.formats, name: info.name });
+    // 浏览器通道顺手把 GGUF 量化分组写入缓存：后续下载/回退直连选档不必再列树
+    if (preloaded && (info.formats || []).includes('gguf') && Array.isArray(info.files) && info.files.length) {
+      try { this.groupQuantsFromFiles(id, info.files); } catch { /* 无 GGUF 文件时不阻塞使用流程 */ }
+    }
     const { route, options } = info;
     const want = ['auto', 'local', 'python', 'cloud'].includes(mode) ? mode : 'auto';
 
@@ -377,6 +467,13 @@ export class NativeEngine {
     }
     // local / auto / python 回落：按默认路线走本地
     if (route.route === 'local') {
+      if (viaBrowser) {
+        // 浏览器通道：只返回推荐量化，字节由浏览器逐块传（和网页版同一条路）；
+        // 不在这里触发服务端直连下载，否则用户电脑上又变成立即失败。
+        const grouped = this.quantCache.get(repo)?.grouped || [];
+        const entry = this._pickQuantEntry(grouped, undefined);
+        return { id, action: 'download', via: 'browser', route, options, quant: entry?.quant || null, formats: info.formats };
+      }
       const job = await this.download(id);
       return { id, action: 'download', route, options, quant: job.quant, formats: info.formats };
     }
@@ -582,7 +679,13 @@ export class NativeEngine {
       || grouped.find((g) => g.quant === pickDefaultQuant(grouped));
     if (!entry) throw Object.assign(new Error(`仓库里没有量化：${quant}`), { status: 400 });
     const key = `${id}@${entry.quant}`;
+    this._expireStaleBrowserJobs();
     const existing = this.downloads.get(key);
+    if (existing?.state === 'downloading' && existing.via === 'browser') {
+      // 浏览器通道还在活跃传数据：不能同时再开一条直连（会互相写坏 .part）。
+      // 注意不能把浏览器任务原样返回假装直连已开始——那会显示假“下载中”。
+      throw Object.assign(new Error('该量化正在经浏览器通道下载中，等它完成或中断后再试；急用可先关掉正在下载的页面。'), { status: 409 });
+    }
     if (existing?.state === 'downloading') return existing;
     const already = await this.downloadedQuants(id);
     if (already.some((d) => d.quant === entry.quant)) {
@@ -713,12 +816,17 @@ export class NativeEngine {
       throw Object.assign(new Error(`磁盘空间不足：该量化需要约 ${(entry.totalBytes / 1e9).toFixed(1)} GB，可用约 ${(free / 1e9).toFixed(1)} GB。`), { status: 507 });
     }
     const dir = this.modelDir(id, entry.quant);
+    this._expireStaleBrowserJobs();
     const job = existing?.via === 'browser' && existing.state === 'downloading'
       ? existing
       : {
           id, quant: entry.quant, state: 'downloading', downloaded: 0, total: entry.totalBytes,
           error: '', via: 'browser', entry, receivedByFile: new Map(),
+          startedAt: Date.now(), lastChunkAt: Date.now(),
         };
+    // 新一轮 prepare 说明浏览器还活着并在续传：刷新活跃时间，避免被陈旧清理误杀
+    job.lastChunkAt = Date.now();
+    job.startedAt = job.startedAt || job.lastChunkAt;
     job.entry = entry;
     if (!(job.receivedByFile instanceof Map)) job.receivedByFile = new Map();
     this.downloads.set(key, job);
