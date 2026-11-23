@@ -295,7 +295,9 @@ export async function fetchQuantsViaBrowser({ id, repo, token, fetchImpl = fetch
 
 /** 向软件写入一块权重字节；返回软件确认的落盘情况。 */
 async function postDownloadChunk({ fetchImpl, id, quant, filePath, offset, data, adminToken }) {
-  const res = await fetchImpl(`/api/native/models/${encodeURIComponent(id)}/browser-download/chunk`, {
+  let res;
+  try {
+    res = await fetchImpl(`/api/native/models/${encodeURIComponent(id)}/browser-download/chunk`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${adminToken}`,
@@ -304,9 +306,12 @@ async function postDownloadChunk({ fetchImpl, id, quant, filePath, offset, data,
       'x-bd-file': encodeURIComponent(filePath),
       'x-bd-offset': String(offset),
     },
-    body: data,
-    cache: 'no-store',
-  });
+      body: data,
+      cache: 'no-store',
+    });
+  } catch (err) {
+    throw new Error(`把数据写入软件时连接中断（${err?.message || '网络错误'}），已落盘部分保留，重新点下载会续传。`);
+  }
   const out = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error(out.error || `写入软件失败（HTTP ${res.status}）`);
@@ -340,16 +345,36 @@ function mergeParts(parts, totalBytes) {
 }
 
 /** 浏览器通道下载单个文件：Range 续传、分块上传、失败按落盘偏移重开（最多 3 次尝试）。 */
+/**
+ * 把浏览器/网络层的英文裸错（fetch failed、Failed to fetch、NetworkError…）
+ * 归一化成小白能看懂的中文。用户两次反馈都只看到 fetch failed，就是因为这类
+ * 裸错从某一层原样漏到了界面上；所有上抛前都过这一道。
+ */
+function friendlyDownloadError(err, filePath) {
+  const raw = String(err?.message || err || '').trim();
+  if (/fetch failed|failed to fetch|networkerror|network error|load failed|err_network|connection.*(reset|refused|closed)|socket/i.test(raw)) {
+    return new Error(`下载 ${filePath || '文件'} 时网络中断（${raw}）：多半是网络抖动或代理不稳，已下载的部分都保留着，重新点下载会从断点续传，不会从头来。`);
+  }
+  return err instanceof Error ? err : new Error(raw || '下载失败，请重试。');
+}
+
 async function downloadOneFileViaBrowser(ctx) {
   const { file, onProgress } = ctx;
   let sent = Math.max(0, Number(file.offset) || 0);
   let lastError = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  // 大文件要传很久：重试放宽到 5 次、间隔指数拉长扛网络抖动；每次都按已落盘偏移续传
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     let reader = null;
     try {
       const headers = {};
       if (sent > 0) headers.range = `bytes=${sent}-`;
-      const res = await ctx.fetchImpl(file.url, { headers, cache: 'no-store' });
+      let res;
+      try {
+        res = await ctx.fetchImpl(file.url, { headers, cache: 'no-store' });
+      } catch (err) {
+        // 浏览器底层只给英文裸错（Failed to fetch 之类）：换成用户能看懂的中文再上抛
+        throw new Error(`从 Hugging Face 拉取 ${file.path} 时网络中断（${err?.message || '网络错误'}），已传部分保留，重新点下载会续传。`);
+      }
       if (sent > 0 && res.status === 200) {
         throw new Error('模型文件没有按断点返回内容（Range 被忽略），浏览器通道不可用。');
       }
@@ -397,15 +422,15 @@ async function downloadOneFileViaBrowser(ctx) {
       if (ctx.shouldStop?.()) throw err;
       if (Number.isFinite(err?.received)) {
         sent = err.received;
-      } else if (attempt < 2) {
+      } else if (attempt < 4) {
         try {
           sent = await probeDownloadOffset(ctx, ctx.quant, file.path, sent);
         } catch { /* 探不到就按原偏移重试 */ }
-        await new Promise((r) => setTimeout(r, 800));
+        await new Promise((r) => setTimeout(r, ctx.retryDelayMs ?? Math.min(5000, 800 * (2 ** attempt))));
       }
     }
   }
-  throw lastError || new Error(`下载 ${file.path} 失败。`);
+  throw friendlyDownloadError(lastError, file.path);
 }
 
 /**
@@ -417,7 +442,7 @@ export async function downloadModelViaBrowser({
   id, repo, quant, adminToken, onStatus,
   // 一块 2MB：足够大到不让本地请求次数爆炸，又足够细——慢网下也几秒就跳一次进度，
   // 不至于攒 8MB 才出现第一个百分比，用户误以为“没有下载进度”。
-  fetchImpl = fetch, treeTimeoutMs = 30000, chunkBytes = 2 * 1024 * 1024,
+  fetchImpl = fetch, treeTimeoutMs = 30000, chunkBytes = 2 * 1024 * 1024, retryDelayMs,
 } = {}) {
   const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
   note('正在经浏览器读取仓库文件列表（和网页版同一条网络路）…');
@@ -430,7 +455,7 @@ export async function downloadModelViaBrowser({
     note('这个量化已经下载完成，可以直接点“加载”使用。');
     return prep;
   }
-  const ctx = { fetchImpl, id, quant: prep.quant, adminToken, chunkBytes };
+  const ctx = { fetchImpl, id, quant: prep.quant, adminToken, chunkBytes, retryDelayMs };
   let moved = (prep.files || []).reduce((n, f) => n + (Number(f.offset) || 0), 0);
   // 还没传第一个字节就先给个 0%：别让界面停在“正在读取文件列表”，误以为卡住
   note(`正在下载（浏览器通道）：${(moved / 1e9).toFixed(2)} / ${((prep.total || 0) / 1e9).toFixed(2)} GB（${prep.total ? Math.floor((moved / prep.total) * 100) : 0}%），关掉这个页面会中断，重新点下载可续传。`);
@@ -476,13 +501,14 @@ export async function downloadModelViaBrowser({
     note('下载完成（浏览器通道）：现在可以点“加载”使用这个模型。');
     return out;
   } catch (err) {
-    // 尽力通知软件标记失败（保留 .part 续传），失败也无妨
+    const friendly = friendlyDownloadError(err);
+    // 尽力通知软件标记失败（保留 .part 续传），失败也无妨；标的也是归一化后的中文
     try {
       await adminJson(fetchImpl, `/api/native/models/${encodeURIComponent(id)}/browser-download/fail`, {
         token: adminToken,
-        body: { quant: prep.quant, error: err?.message || '浏览器通道下载中断' },
+        body: { quant: prep.quant, error: friendly.message },
       });
     } catch { /* 忽略 */ }
-    throw err;
+    throw friendly;
   }
 }

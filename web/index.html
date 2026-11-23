@@ -50,6 +50,7 @@
             <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
             <button id="usageBtn" type="button" class="btn ghost small" title="查看各模型的调用次数与 Token 用量（只保存在本机）">用量统计</button>
             <button id="apiAccessBtn" type="button" class="btn ghost small" title="查看 API 地址、申请 Key 和生成分享链接" hidden>API 接入</button>
+            <button id="modelDownloadBtn" type="button" class="btn ghost small" title="打开模型下载面板：在本机下载、加载大模型（独立面板，不用先进 API 接入）" hidden>模型下载</button>
             <button id="adminPanelBtn" type="button" class="btn ghost small" title="API 管理员控制台：参数、API Key 与调试台（需要管理口令）" hidden>API 管理</button>
             <span id="roleBadge" class="role-badge" title="当前权限">访客</span>
             <button id="roleBtn" type="button" class="btn ghost small" title="打开本机管理员面板" aria-expanded="false">管理员面板</button>
@@ -294,6 +295,75 @@
         </div>
       </form>
     </dialog>
+    <dialog id="modelDownloadDialog" class="api-access-dialog model-download-dialog" aria-labelledby="modelDownloadTitle">
+      <div class="api-access-panel">
+        <div class="api-access-head">
+          <div>
+            <h2 id="modelDownloadTitle">模型下载</h2>
+            <p class="muted small">27B～671B 级大模型下载到本机运行的地方（与 API 接入无关）。在下面选量化点下载即可；下载有大号进度条，看得见速度；中断了重新点会接着下，不用从头来。</p>
+          </div>
+          <button id="modelDownloadClose" type="button" class="btn ghost small" aria-label="关闭">关闭</button>
+        </div>
+        <p id="modelDownloadUnavailable" class="muted" hidden>当前部署没有启用本机大模型引擎：请用软件版（或带服务端的网站包）打开本页面，浏览器直接打开的静态网页版没有下载功能。</p>
+        <section id="apiNativeSection" class="api-access-section" aria-labelledby="apiNativeTitle" hidden>
+          <h3 id="apiNativeTitle">选择模型与量化下载</h3>
+          <p class="muted small">27B～671B 级开源大模型在本机运行。权重按需从 Hugging Face 下载到本机、不包含在安装包里；电脑内存（内存+显存合计）不够时请选更小的一档量化。每档都标了类型、大小和“下载后能不能直接用”，照着选就行；下载、加载、删除前需要验证一次管理员口令（见下方提示），看进度和聊天不用。</p>
+          <p id="apiNativeAdminGate" class="api-key-new" hidden>
+            <span>下载和加载需要管理员验证（口令是安装时设的 API 管理员口令，只验证这一次）。</span>
+            <button id="apiNativeGotoAdmin" type="button" class="btn primary small">去验证管理员口令</button>
+          </p>
+          <p id="apiNativeBinaryStatus" class="muted small" role="status"></p>
+          <div class="api-access-actions">
+            <button id="apiNativeBinaryBtn" type="button" class="btn ghost small">准备 llama.cpp 运行库</button>
+            <label class="api-access-label">上下文
+              <select id="apiNativeCtx" aria-label="上下文长度">
+                <option value="4096">4096</option>
+                <option value="8192" selected>8192</option>
+                <option value="16384">16384</option>
+                <option value="32768">32768</option>
+              </select>
+            </label>
+            <label class="api-access-label">GPU 卸载层数
+              <input id="apiNativeGpuLayers" type="number" min="0" max="999" value="0" aria-label="GPU 卸载层数" />
+            </label>
+            <button id="apiNativeUnloadBtn" type="button" class="btn ghost small">卸载当前模型</button>
+          </div>
+          <p id="apiNativeHint" class="muted small"></p>
+          <div class="hf-bridge">
+            <h4>找更多模型（从 Hugging Face 搜索）</h4>
+            <p class="muted small">上面列表里没有想要的模型时，在这里搜名字（或粘贴 Hugging Face 链接），点“一键使用”就行，不用懂格式：能直接下到本机用的会自动下载；Safetensors 等格式会自动转成本机能用的；实在转不了的也可以改走云端使用。下载好的模型会同步出现在聊天页的模型选择里。</p>
+            <div class="api-access-actions">
+              <input id="apiHfSearchInput" type="text" placeholder="搜模型，如 Qwen / Llama / DeepSeek，或粘贴 HF 链接" aria-label="搜索 Hugging Face 模型" />
+              <select id="apiHfFilter" aria-label="格式筛选">
+                <option value="all">全部格式</option>
+                <option value="local">可直接运行（GGUF）</option>
+                <option value="convert">可转换（Transformers）</option>
+                <option value="cloud">云端可用（其他格式）</option>
+              </select>
+              <button id="apiHfSearchBtn" type="button" class="btn primary small">搜索</button>
+            </div>
+            <div class="api-access-actions">
+              <input id="apiHfTokenInput" type="password" placeholder="HF Token（可选，云端模型用，去 huggingface.co/settings/tokens 免费创建）" aria-label="Hugging Face Token" />
+              <button id="apiHfTokenBtn" type="button" class="btn ghost small">保存 Token</button>
+              <span id="apiHfTokenStatus" class="muted small" role="status"></span>
+            </div>
+            <div class="api-access-actions">
+              <button id="apiHfConvertToolBtn" type="button" class="btn ghost small">一键准备格式转换工具</button>
+              <span id="apiHfConvertToolStatus" class="muted small" role="status"></span>
+            </div>
+            <div class="api-access-actions">
+              <button id="apiHfRunnerBtn" type="button" class="btn ghost small">一键准备本地运行时（特殊格式用）</button>
+              <span id="apiHfRunnerStatus" class="muted small" role="status"></span>
+            </div>
+            <p class="muted small">每个模型都可以切换：下载到本地运行，或云端使用（不下载、需 Token）。特殊格式（ONNX/AWQ 等）也能下载到本地用 Python 运行时跑，只是 CPU 上会慢一些。</p>
+            <p id="apiHfSearchStatus" class="muted small" role="status"></p>
+            <div id="apiHfResults" class="native-model-list"></div>
+          </div>
+          <div id="apiNativeList" class="native-model-list"></div>
+          <p id="apiNativeError" class="error small" role="alert"></p>
+
+      </div>
+    </dialog>
     <dialog id="apiAccessDialog" class="api-access-dialog" aria-labelledby="apiAccessTitle">
       <div class="api-access-card">
         <header class="api-access-head">
@@ -351,58 +421,6 @@
             <button id="shareIframeCopy" type="button" class="btn ghost small">复制 iframe 代码</button>
           </details>
         </section>
-        <section id="apiNativeSection" class="api-access-section" aria-labelledby="apiNativeTitle" hidden>
-          <h3 id="apiNativeTitle">本机大模型（llama.cpp 独立引擎）</h3>
-          <p class="muted small">27B～671B 级开源大模型在本机原生运行（浏览器 WebGPU 跑不了这么大的模型）。权重按需从 Hugging Face 下载到本机、不包含在安装包里；内存（内存+显存合计）不足时请选更小的量化。下载、加载、删除需要先在下方验证管理员口令（只验证一次，之后不用重复验证）；查看状态与聊天不需要。</p>
-          <p id="apiNativeBinaryStatus" class="muted small" role="status"></p>
-          <div class="api-access-actions">
-            <button id="apiNativeBinaryBtn" type="button" class="btn ghost small">准备 llama.cpp 运行库</button>
-            <label class="api-access-label">上下文
-              <select id="apiNativeCtx" aria-label="上下文长度">
-                <option value="4096">4096</option>
-                <option value="8192" selected>8192</option>
-                <option value="16384">16384</option>
-                <option value="32768">32768</option>
-              </select>
-            </label>
-            <label class="api-access-label">GPU 卸载层数
-              <input id="apiNativeGpuLayers" type="number" min="0" max="999" value="0" aria-label="GPU 卸载层数" />
-            </label>
-            <button id="apiNativeUnloadBtn" type="button" class="btn ghost small">卸载当前模型</button>
-          </div>
-          <p id="apiNativeHint" class="muted small"></p>
-          <div class="hf-bridge">
-            <h4>Hugging Face 模型桥接（搜索 → 拉取 → 点击使用）</h4>
-            <p class="muted small">不用懂仓库和格式：在下面搜模型名（或粘贴 Hugging Face 链接），点“一键使用”即可。GGUF 格式下载到本机运行；Safetensors 等 Transformers 格式自动转成 GGUF 后运行；ONNX/MLX 等本机跑不了的格式，在填好 HF Token 后走云端推理。下载好的模型会出现在聊天页的模型选择里（原有下拉框不变）。</p>
-            <div class="api-access-actions">
-              <input id="apiHfSearchInput" type="text" placeholder="搜模型，如 Qwen / Llama / DeepSeek，或粘贴 HF 链接" aria-label="搜索 Hugging Face 模型" />
-              <select id="apiHfFilter" aria-label="格式筛选">
-                <option value="all">全部格式</option>
-                <option value="local">可直接运行（GGUF）</option>
-                <option value="convert">可转换（Transformers）</option>
-                <option value="cloud">云端可用（其他格式）</option>
-              </select>
-              <button id="apiHfSearchBtn" type="button" class="btn primary small">搜索</button>
-            </div>
-            <div class="api-access-actions">
-              <input id="apiHfTokenInput" type="password" placeholder="HF Token（可选，云端模型用，去 huggingface.co/settings/tokens 免费创建）" aria-label="Hugging Face Token" />
-              <button id="apiHfTokenBtn" type="button" class="btn ghost small">保存 Token</button>
-              <span id="apiHfTokenStatus" class="muted small" role="status"></span>
-            </div>
-            <div class="api-access-actions">
-              <button id="apiHfConvertToolBtn" type="button" class="btn ghost small">一键准备格式转换工具</button>
-              <span id="apiHfConvertToolStatus" class="muted small" role="status"></span>
-            </div>
-            <div class="api-access-actions">
-              <button id="apiHfRunnerBtn" type="button" class="btn ghost small">一键准备本地运行时（特殊格式用）</button>
-              <span id="apiHfRunnerStatus" class="muted small" role="status"></span>
-            </div>
-            <p class="muted small">每个模型都可以切换：下载到本地运行，或云端使用（不下载、需 Token）。特殊格式（ONNX/AWQ 等）也能下载到本地用 Python 运行时跑，只是 CPU 上会慢一些。</p>
-            <p id="apiHfSearchStatus" class="muted small" role="status"></p>
-            <div id="apiHfResults" class="native-model-list"></div>
-          </div>
-          <div id="apiNativeList" class="native-model-list"></div>
-          <p id="apiNativeError" class="error small" role="alert"></p>
         </section>
         <section id="apiAdminLoginSection" class="api-access-section" aria-labelledby="apiAdminLoginTitle">
           <h3 id="apiAdminLoginTitle">管理员控制面板</h3>

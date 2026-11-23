@@ -162,7 +162,7 @@ test('downloadModelViaBrowser：断点被忽略（已有偏移却回 200）时�
   await assert.rejects(
     () => downloadModelViaBrowser({
       id: 'hf/someone/Tiny-GGUF', repo: 'someone/Tiny-GGUF', quant: 'Q4_K_M',
-      adminToken: 'adm', fetchImpl: hfFetch, chunkBytes: 4,
+      adminToken: 'adm', fetchImpl: hfFetch, chunkBytes: 4, retryDelayMs: 1,
     }),
     /Range 被忽略/,
   );
@@ -334,6 +334,53 @@ test('downloadModelViaBrowser：多个分片并行上传，字节仍各自完整
     const joined = Buffer.concat(received.get(f.path).map((c) => Buffer.from(c))).toString();
     assert.equal(joined, contents[f.path]);
   }
+});
+
+test('downloadModelViaBrowser：权重拉取中途断流时给中文原因，不许漏英文裸错', async () => {
+  const fileUrl = 'https://huggingface.co/acme/Tiny-GGUF/resolve/main/Tiny-Q4_K_M.gguf';
+  let weightAttempts = 0;
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify([{ type: 'file', path: 'Tiny-Q4_K_M.gguf', lfs: { size: 10 } }]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === fileUrl) {
+      weightAttempts += 1;
+      // 先吐 4 字节再把连接掐断：模拟下载大文件途中网络抖动
+      const stream = new ReadableStream({
+        pull(c) {
+          c.enqueue(new TextEncoder().encode('0123'));
+          c.error(new TypeError('fetch failed'));
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }
+    if (u.includes('/browser-download/prepare')) {
+      return new Response(JSON.stringify({ id: 'm', quant: 'Q4_K_M', state: 'downloading', total: 10, files: [{ path: 'Tiny-Q4_K_M.gguf', size: 10, url: fileUrl, offset: 0, done: false }] }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/browser-download/chunk')) {
+      // probe 空包与真实块都按“已收 0 字节”回（4 字节还没 flush 就断了）
+      return new Response(JSON.stringify({ received: 0, downloaded: 0, total: 10 }), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('/browser-download/fail')) {
+      const body = JSON.parse(opts.body);
+      assert.match(body.error, /网络中断/); // 标记到服务端的失败原因也是中文
+      return new Response(JSON.stringify({ ok: true }), { headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error('意外请求：' + u);
+  };
+  await assert.rejects(
+    () => downloadModelViaBrowser({
+      id: 'hf/acme/Tiny-GGUF', repo: 'acme/Tiny-GGUF', quant: 'Q4_K_M',
+      adminToken: 'adm', fetchImpl, chunkBytes: 8, retryDelayMs: 1,
+    }),
+    (err) => {
+      assert.match(err.message, /网络中断/);
+      assert.doesNotMatch(err.message, /^fetch failed$/);
+      return true;
+    },
+  );
+  assert.equal(weightAttempts, 5); // 放宽到 5 次重试扛抖动（每次都续传，不从头）
 });
 
 test('useRepoViaBrowser：浏览器下载失败时回退直连且带回真实原因，不许只剩 fetch failed', async () => {

@@ -172,6 +172,10 @@ const els = {
   accessDocsLink: $('#accessDocsLink'),
   apiAccessBtn: $('#apiAccessBtn'),
   adminPanelBtn: $('#adminPanelBtn'),
+  modelDownloadBtn: $('#modelDownloadBtn'),
+  modelDownloadDialog: $('#modelDownloadDialog'),
+  modelDownloadClose: $('#modelDownloadClose'),
+  modelDownloadUnavailable: $('#modelDownloadUnavailable'),
   apiAccessDialog: $('#apiAccessDialog'),
   apiAccessClose: $('#apiAccessClose'),
   apiAdminLoginSection: $('#apiAdminLoginSection'),
@@ -245,6 +249,8 @@ const els = {
   apiKeyAdminLogout: $('#apiKeyAdminLogout'),
   apiNativeSection: $('#apiNativeSection'),
   apiNativeBinaryStatus: $('#apiNativeBinaryStatus'),
+  apiNativeAdminGate: $('#apiNativeAdminGate'),
+  apiNativeGotoAdmin: $('#apiNativeGotoAdmin'),
   apiNativeBinaryBtn: $('#apiNativeBinaryBtn'),
   apiNativeCtx: $('#apiNativeCtx'),
   apiNativeGpuLayers: $('#apiNativeGpuLayers'),
@@ -3147,6 +3153,8 @@ async function refreshBridgeStatus() {
 // ---------- 本机大模型（llama.cpp 原生引擎） ----------
 
 let nativeRefreshTimer = null;
+// 下载速度采样：<模型@量化> 上次状态刷新时的已下载字节与时刻，用差值估算速度/剩余时间
+const dlSpeedSamples = new Map();
 
 /** 拉取本机大模型状态并刷新下拉框与管理面板；静态版没有该接口，自动保持隐藏。 */
 async function refreshNativeStatus() {
@@ -3155,6 +3163,8 @@ async function refreshNativeStatus() {
   const wasEnabled = !!nativeStatus;
   nativeStatus = data;
   if (els.apiNativeSection) els.apiNativeSection.hidden = !data;
+  // 独立模型下载面板里给一句明确说法，不能打开后一片空白
+  if (els.modelDownloadUnavailable) els.modelDownloadUnavailable.hidden = !!data;
   if (data) {
     renderNativePanel();
     renderBridgeModelOptions();
@@ -3202,14 +3212,34 @@ function buildNativeModelRow(m, admin) {
   const dl = (m.downloads || []).find((d) => d.state === 'downloading');
   if (dl) {
     const pct = dl.total ? Math.floor((dl.downloaded / dl.total) * 100) : 0;
+    // 大号进度条：填充 + 条内百分比数字，必须一眼能看见下了多少
     const bar = document.createElement('div');
     bar.className = 'native-progress';
+    bar.setAttribute('role', 'progressbar');
+    bar.setAttribute('aria-valuenow', String(pct));
     const fill = document.createElement('i');
     fill.style.width = `${pct}%`;
-    bar.append(fill);
+    const pctText = document.createElement('b');
+    pctText.className = 'native-progress-pct';
+    pctText.textContent = `${pct}%`;
+    bar.append(fill, pctText);
+    // 速度/剩余时间：用相邻两次状态采样估算（面板每 2 秒刷新一次，天然是采样点）
+    let speedText = '';
+    const sampleKey = `${m.id}@${dl.quant}`;
+    const nowMs = Date.now();
+    const prev = dlSpeedSamples.get(sampleKey);
+    if (prev && nowMs - prev.at >= 400 && dl.downloaded >= prev.downloaded) {
+      const speed = (dl.downloaded - prev.downloaded) / ((nowMs - prev.at) / 1000);
+      if (speed > 0) {
+        const etaSec = dl.total > dl.downloaded ? Math.round((dl.total - dl.downloaded) / speed) : 0;
+        const eta = etaSec >= 90 ? `约 ${Math.round(etaSec / 60)} 分钟` : `约 ${etaSec} 秒`;
+        speedText = ` · 速度约 ${(speed / 1e6).toFixed(1)} MB/s · 还剩${eta}`;
+      }
+    }
+    dlSpeedSamples.set(sampleKey, { downloaded: dl.downloaded, at: nowMs });
     const label = document.createElement('p');
-    label.className = 'muted small';
-    label.textContent = `正在下载 ${dl.quant}：${(dl.downloaded / 1e9).toFixed(2)} / ${(dl.total / 1e9).toFixed(2)} GB（${pct}%），断网后重新点下载可续传。`;
+    label.className = 'native-progress-label';
+    label.textContent = `正在下载 ${dl.quant}：${(dl.downloaded / 1e9).toFixed(2)} / ${(dl.total / 1e9).toFixed(2)} GB（${pct}%）${speedText}，断网后重新点下载可续传。`;
     row.append(bar, label);
   }
   const dlError = (m.downloads || []).find((d) => d.state === 'error');
@@ -3263,6 +3293,18 @@ function buildNativeModelRow(m, admin) {
   }
   controls.append(quantSelect);
 
+  // 选中一档时在行里单独说明“这是什么、能不能直接用”，不用回下拉里找小字
+  let rowQuants = [];
+  quantSelect.addEventListener('change', () => {
+    const q = rowQuants.find((x) => x.quant === quantSelect.value)
+      || (m.downloaded || []).find((x) => x.quant === quantSelect.value);
+    if (!q) return;
+    const bits = q.bitsPerWeight ? `，每权重约 ${q.bitsPerWeight} 位` : '';
+    const size = q.totalBytes ? ` · ${(q.totalBytes / 1e9).toFixed(1)} GB` : (q.sizeGB ? ` · ${q.sizeGB} GB` : '');
+    const use = q.directUse === false ? '需要转换后才能用' : '下载后可直接使用';
+    setQuantStatus(`已选 ${q.quant}：${q.typeLabel || 'GGUF 量化'}${bits}${size} · ${use}。${q.qualityNote || ''}确认就点“下载所选量化”。`);
+  });
+
   const mkBtn = (text, onClick, { disabled = false } = {}) => {
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -3297,6 +3339,7 @@ function buildNativeModelRow(m, admin) {
       } catch {
         quants = await fetchNativeQuants(m.id, getToken());
       }
+      rowQuants = quants || [];
       placeholder.textContent = '选择量化（已下载的排在前面）';
       quantSelect.replaceChildren(placeholder, ...(m.downloaded || []).map((d) => {
         const opt = document.createElement('option');
@@ -3458,6 +3501,8 @@ async function nativeAction(fn) {
 function renderNativePanel() {
   if (!els.apiNativeList || !nativeStatus) return;
   const admin = !!state.apiKeyAdminToken;
+  // 未验证时在下载面板顶部给明确入口，别让用户对着置灰的按钮猜
+  if (els.apiNativeAdminGate) els.apiNativeAdminGate.hidden = admin;
   const running = nativeStatus.running || {};
   if (els.apiNativeBinaryStatus) {
     els.apiNativeBinaryStatus.textContent = nativeStatus.binaryReady
@@ -4209,6 +4254,18 @@ async function copyPlainText(value, button) {
 els.apiAccessBtn.addEventListener('click', () => openApiAccess());
 els.adminPanelBtn.addEventListener('click', () => openApiAccess({ focusAdmin: true }));
 els.apiAccessClose.addEventListener('click', () => els.apiAccessDialog.close());
+els.modelDownloadBtn?.addEventListener('click', () => {
+  // 独立“模型下载”面板：打开先刷一次状态，让进度条与任务状态立刻是最新的
+  if (els.modelDownloadDialog && typeof els.modelDownloadDialog.showModal === 'function' && !els.modelDownloadDialog.open) {
+    els.modelDownloadDialog.showModal();
+  }
+  void refreshNativeStatus();
+});
+els.modelDownloadClose?.addEventListener('click', () => els.modelDownloadDialog?.close());
+els.apiNativeGotoAdmin?.addEventListener('click', () => {
+  els.modelDownloadDialog?.close();
+  openApiAccess({ focusAdmin: true });
+});
 els.apiSelfApplyBtn?.addEventListener('click', async () => {
   els.apiSelfApplyError.textContent = '';
   els.apiSelfApplyBtn.disabled = true;
@@ -6480,6 +6537,7 @@ async function init() {
   if (MODE === 'remote' && els.accessDocsLink) els.accessDocsLink.hidden = false;
   if (MODE === 'remote' && els.apiAccessBtn) els.apiAccessBtn.hidden = false;
   if (MODE === 'remote' && els.adminPanelBtn) els.adminPanelBtn.hidden = false;
+  if (MODE === 'remote' && els.modelDownloadBtn) els.modelDownloadBtn.hidden = false;
   if (isEmbed) els.body.classList.add('embed');
   if (isEmbedded) els.body.classList.add('in-frame');
 

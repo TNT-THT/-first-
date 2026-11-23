@@ -1132,8 +1132,11 @@ body.embed .role-section { display: none !important; }
 .native-model-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 .native-model-row .api-access-actions { flex-wrap: wrap; }
 .native-model-row select { max-width: 100%; }
-.native-progress { height: 6px; margin: 6px 0 2px; background: var(--border); border-radius: 3px; overflow: hidden; }
+/* 下载进度条：刻意做粗、带条内百分比——下载几十 GB 时必须一眼看清进度 */
+.native-progress { position: relative; height: 18px; margin: 8px 0 4px; background: var(--border); border-radius: 9px; overflow: hidden; }
 .native-progress > i { display: block; height: 100%; background: var(--accent, #38bdf8); transition: width 0.4s ease; }
+.native-progress-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45); pointer-events: none; }
+.native-progress-label { margin: 2px 0 4px; font-size: 13px; font-weight: 600; }
 
 /* Hugging Face 桥接面板 */
 .hf-bridge { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border, #3a4a63); }
