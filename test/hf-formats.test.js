@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { detectFormats, detectVariants, hfModelId, optionsForFormats, parseHfRepoInput, routeForFormats, safeDirName } from '../server/native/formats.js';
-import { fetchModelInfo, searchModels } from '../server/native/hf.js';
+import { fetchModelInfo, fetchRepoFiles, searchModels } from '../server/native/hf.js';
 
 test('detectFormats：按文件与标签识别主流格式', () => {
   assert.deepEqual(detectFormats([{ path: 'model-Q4_K_M.gguf' }]), ['gguf']);
@@ -71,4 +71,28 @@ test('fetchModelInfo：文件树 + 总大小', async () => {
   const info = await fetchModelInfo('someone/Tiny-ST', { fetchImpl });
   assert.equal(info.totalBytes, 110);
   assert.equal(info.files.length, 2);
+});
+
+test('fetchRepoFiles：慢网络必须在超时后给中文说法，不能无限挂起', async () => {
+  const hangingFetch = (url, opts) => new Promise((_, reject) => {
+    const fail = () => {
+      const err = new Error('aborted');
+      err.name = 'TimeoutError';
+      reject(err);
+    };
+    opts.signal.addEventListener('abort', fail);
+    setTimeout(fail, 60); // 保底：既保活事件循环（AbortSignal.timeout 的定时器是 unref 的），也保证会 reject
+  });
+  await assert.rejects(
+    () => fetchRepoFiles('someone/Tiny-GGUF', { fetchImpl: hangingFetch, timeoutMs: 30 }),
+    /连接 Hugging Face 超时/,
+  );
+});
+
+test('fetchRepoFiles：网络层失败翻译成中文，而不是裸英文 fetch failed', async () => {
+  const deadFetch = async () => { throw new TypeError('fetch failed'); };
+  await assert.rejects(
+    () => fetchRepoFiles('someone/Tiny-GGUF', { fetchImpl: deadFetch }),
+    /无法连接 Hugging Face/,
+  );
 });
