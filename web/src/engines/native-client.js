@@ -180,6 +180,74 @@ export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetch
   }
 }
 
+/**
+ * 本地导入：把浏览器已下载到电脑的文件传进软件（全程只走本机，碰不到外网，
+ * 是三条下载路线里最稳的一条）。同一组文件会派生同一个导入编号，传一半
+ * 关掉页面后重新选同一组文件能接着传，不用从头来。
+ *
+ * @param {{entries: Array<{file: File, path: string}>, name?: string,
+ *          adminToken: string, onProgress?: (sent: number, total: number) => void,
+ *          fetchImpl?: Function, sliceBytes?: number}} opts
+ * @returns {Promise<{id: string, name: string, formats: string[], quants: string[], snapshot: boolean}>}
+ */
+export async function importLocalModel({ entries, name, adminToken, onProgress, fetchImpl = defaultFetch, sliceBytes = 8 * 1024 * 1024 } = {}) {
+  const list = (Array.isArray(entries) ? entries : []).filter((e) => e?.file && typeof e.path === 'string');
+  if (!list.length) throw new Error('没有选择要导入的文件。');
+  const totalBytes = list.reduce((n, e) => n + (e.file.size || 0), 0);
+  // 导入编号由文件清单派生：同一组文件永远同一个编号，天然断点续传
+  let hash = 0x811c9dc5;
+  const fingerprint = list.map((e) => `${e.path}:${e.file.size}`).join('|');
+  for (let i = 0; i < fingerprint.length; i += 1) {
+    hash ^= fingerprint.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  const importId = `imp-${hash.toString(16).padStart(8, '0')}`;
+  const begin = await adminJson(fetchImpl, '/api/native/import/begin', {
+    token: adminToken,
+    body: { importId, files: list.map((e) => ({ path: e.path, size: e.file.size || 0 })) },
+  });
+  const receivedByPath = new Map((begin.files || []).map((f) => [f.path, Math.max(0, Number(f.received) || 0)]));
+  let sentTotal = [...receivedByPath.values()].reduce((n, v) => n + v, 0);
+  const report = () => { try { onProgress?.(sentTotal, totalBytes); } catch { /* 忽略回调错误 */ } };
+  report();
+  for (const entry of list) {
+    let offset = receivedByPath.get(entry.path) || 0;
+    while (offset < entry.file.size) {
+      const slice = entry.file.slice(offset, Math.min(entry.file.size, offset + sliceBytes));
+      const data = await slice.arrayBuffer();
+      const res = await fetchImpl(`/api/native/import/${encodeURIComponent(importId)}/file`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${adminToken}`,
+          'content-type': 'application/octet-stream',
+          'x-import-path': encodeURIComponent(entry.path),
+          'x-import-offset': String(offset),
+        },
+        body: data,
+        cache: 'no-store',
+      });
+      const out = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (Number.isFinite(out.received)) {
+          // 与软件已落盘位置对齐后接着传（错位不会写坏文件）
+          sentTotal += Math.max(0, out.received - offset);
+          offset = out.received;
+          report();
+          continue;
+        }
+        throw new Error(out.error || `导入 ${entry.path} 失败（HTTP ${res.status}）。`);
+      }
+      sentTotal += data.byteLength;
+      offset = out.received;
+      report();
+    }
+  }
+  return adminJson(fetchImpl, `/api/native/import/${encodeURIComponent(importId)}/finish`, {
+    token: adminToken,
+    body: { name: name || undefined },
+  });
+}
+
 /** HF 仓库详情（格式与运行路线）。 */
 export async function hfModelInfo(repo, token) {
   const headers = {};

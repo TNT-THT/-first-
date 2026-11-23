@@ -224,6 +224,29 @@ export function groupFilesByQuant(files) {
  */
 export function describeQuant(quant) {
   const q = String(quant || '').toUpperCase();
+  // 两个特殊“量化名”是登记口径，不是真量化档位，单独给说法别误导
+  if (q === 'SNAPSHOT') {
+    return {
+      typeLabel: '原格式快照（还没转成 GGUF）',
+      format: 'Snapshot',
+      bitsPerWeight: null,
+      dynamic: false,
+      directUse: false,
+      useNote: '需要“转换并使用”转成 GGUF，或用“本地运行（Python）”原格式运行',
+      qualityNote: '仓库原始权重整包，体积通常最大。',
+    };
+  }
+  if (q === 'CONVERTED') {
+    return {
+      typeLabel: '已转换的 GGUF',
+      format: 'GGUF',
+      bitsPerWeight: null,
+      dynamic: false,
+      directUse: true,
+      useNote: '已在本地转成 GGUF，可直接加载使用',
+      qualityNote: '由原始权重本地转换而来。',
+    };
+  }
   const dynamic = q.startsWith('UD-');
   const base = dynamic ? q.slice(3) : q;
   let bits = null;
