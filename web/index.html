@@ -330,6 +330,10 @@
           </div>
           <p class="muted small">GPU 卸载层数说明：0 = 全部层放在 CPU 上跑（不吃显存，较慢）。每一层大约占用的显存 ≈ 该档权重文件大小 ÷ 总层数（选中已下载的量化后会在该行显示估算值，如“共 32 层，每层约 90 MB”）。层数填多了不会直接加载失败：显存装不下时软件会自动减少卸载层数重新加载，最后实际生效的层数会显示在下方状态中。</p>
           <p id="apiNativeHint" class="muted small"></p>
+          <details id="apiNativeLogWrap" hidden>
+            <summary class="muted small">llama-server 日志尾部（加载失败时看这里，复制发给开发者）</summary>
+            <pre id="apiNativeLogTail" class="native-log"></pre>
+          </details>
           <div class="hf-bridge">
             <h4>找更多模型（从 Hugging Face 搜索）</h4>
             <p class="muted small">上面列表里没有想要的模型时，在这里搜名字（或粘贴 Hugging Face 链接），点“一键使用”就行，不用懂格式：能直接下到本机用的会自动下载；Safetensors 等格式会自动转成本机能用的；实在转不了的也可以改走云端使用。下载好的模型会同步出现在聊天页的模型选择里。</p>

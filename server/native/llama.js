@@ -218,7 +218,9 @@ export class LlamaProcess {
         this.child = null;
         if (this.state === 'loading' || this.state === 'ready') {
           this.state = 'error';
-          this.error = `llama-server 已退出（代码 ${code}）。常见原因：内存不足、权重文件损坏或显卡驱动不支持。日志尾部见状态面板。`;
+          // Windows 崩溃码是大整数（如 3221225477 = 0xC0000005 内存访问冲突），附上十六进制便于识别
+          const hex = Number.isInteger(code) && code > 0xffff ? `，即 0x${(code >>> 0).toString(16).toUpperCase()}` : '';
+          this.error = `llama-server 已退出（代码 ${code}${hex}）。常见原因：内存不足、权重文件损坏或显卡驱动不支持。日志尾部见状态面板。`;
         }
       }
     });
