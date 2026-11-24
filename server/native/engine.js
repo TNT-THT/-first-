@@ -1510,7 +1510,6 @@ export class NativeEngine {
     return { deleted: true };
   }
 
-  /** 管理员/聊天自动：加载模型（已下载的量化；会先卸载当前模型）。 */
   /**
    * 记住“管理员上次显式加载时用的上下文/GPU 层数”。
    * 聊天自动加载（用户没点“加载”，直接发消息）以前一律按 8192/0 起，
@@ -1532,6 +1531,8 @@ export class NativeEngine {
    * “llama-server 已被停止或替换”，磁盘上还要把几十 GB 权重读两遍。
    * - 完全相同参数的加载：直接共享同一个 promise；
    * - 不同参数/不同模型：按顺序排队执行（后一个总会停掉前一个的进程）。
+   *
+   * 实际干活的是 _load（管理员/聊天自动共用：加载已下载的量化，必要时先卸载当前模型）。
    */
   load(id, opts = {}) {
     const key = `${id}|${opts.quant || ''}|${opts.contextTokens ?? ''}|${opts.gpuLayers ?? ''}`;
