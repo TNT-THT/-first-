@@ -174,3 +174,19 @@ test('LlamaProcess：非 Windows 启动时把 bin 目录加进 LD_LIBRARY_PATH/D
   assert.match(args[args.indexOf('-m') + 1], /-00001-of-00002\.gguf$/);
   assert.equal(args[args.indexOf('--flash-attn') + 1], 'on');
 });
+
+test('pickReleaseAsset：CUDA/Vulkan 也要按当前架构挑包（arm64 机器不能装 x64 包）', async () => {
+  const { pickReleaseAsset } = await import('../server/native/llama.js');
+  const assets = [
+    { name: 'llama-b1-bin-win-cuda-12.4-x64.zip' },
+    { name: 'llama-b1-bin-win-cuda-12.4-arm64.zip' },
+    { name: 'llama-b1-bin-ubuntu-cuda-12.8-x64.tar.gz' },
+    { name: 'llama-b1-bin-ubuntu-cuda-12.8-arm64.tar.gz' },
+    { name: 'llama-b1-bin-ubuntu-vulkan-x64.tar.gz' },
+  ];
+  assert.equal(pickReleaseAsset(assets, { platform: 'win32', arch: 'arm64', variant: 'cuda' }).name, 'llama-b1-bin-win-cuda-12.4-arm64.zip');
+  assert.equal(pickReleaseAsset(assets, { platform: 'linux', arch: 'arm64', variant: 'cuda' }).name, 'llama-b1-bin-ubuntu-cuda-12.8-arm64.tar.gz');
+  assert.equal(pickReleaseAsset(assets, { platform: 'linux', arch: 'x64', variant: 'vulkan' }).name, 'llama-b1-bin-ubuntu-vulkan-x64.tar.gz');
+  // 请求的变体不存在时回落到纯 CPU 包，而不是返回 null 让用户看到“没有预编译包”
+  assert.equal(pickReleaseAsset([{ name: 'llama-b1-bin-ubuntu-x64.tar.gz' }], { platform: 'linux', arch: 'x64', variant: 'cuda' }).name, 'llama-b1-bin-ubuntu-x64.tar.gz');
+});

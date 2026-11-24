@@ -355,13 +355,15 @@ export class NativeEngine {
     const model = this.resolveModel(id);
     if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
     const cached = this.quantCache.get(model.repo);
+    // 新鲜缓存直接返回：大仓库的文件树是分页拉取的（几千个文件、十几页），
+    // 状态面板每次刷新都重拉一遍会明显拖慢界面。缓存过期后再核对大小（见下）。
+    if (cached && Date.now() - cached.at < QUANT_CACHE_MS) return cached.grouped;
     // 带 Token：门控/私有仓库没有鉴权头连文件树都读不到（会误报“没有 GGUF”）。
     const files = await fetchRepoFiles(model.repo, { fetchImpl: this.fetchImpl, headers: this._hfAuthHeaders() });
     const grouped = groupFilesByQuant(files);
-    if (cached && Date.now() - cached.at < QUANT_CACHE_MS && sameQuantSizes(cached.grouped, grouped)) {
-      // 缓存仍与仓库一致：只刷新时间，仍按缓存返回（并顺手带上新拉到的树，保持新鲜）
+    if (cached && sameQuantSizes(cached.grouped, grouped)) {
+      // 仓库没变：沿用旧分组（顺序稳定），只更新时间
       cached.at = Date.now();
-      cached.grouped = grouped;
       return cached.grouped;
     }
     if (!grouped.length) {

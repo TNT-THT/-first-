@@ -48,17 +48,22 @@ export function pickReleaseAsset(assets, { platform = process.platform, arch = p
   const find = (re) => list.find((a) => re.test(a.name)) || null;
   const bits = arch === 'arm64' ? 'arm64' : 'x64';
   let hit = null;
+  // 只挑“当前架构”的包：以前 CUDA/Vulkan 的正则是 (x64|arm64)，在 arm64 机器上
+  // 可能先命中 x64 的包，装完一运行就是“可执行文件格式错误”。
+  const archRe = bits;
   if (platform === 'win32') {
-    if (variant === 'cuda') hit = find(/bin-win-cuda-[\d.]+-(x64|arm64)\.zip$/i);
-    else if (variant === 'vulkan') hit = find(/bin-win-vulkan-(x64|arm64)\.zip$/i);
+    if (variant === 'cuda') hit = find(new RegExp(`bin-win-cuda-[\\d.]+-${archRe}\\.zip$`, 'i'));
+    else if (variant === 'vulkan') hit = find(new RegExp(`bin-win-vulkan-${archRe}\\.zip$`, 'i'));
     hit = hit || find(new RegExp(`bin-win-cpu-${bits}\\.zip$`, 'i'))
       || find(new RegExp(`bin-win-.*-${bits}\\.zip$`, 'i'));
   } else if (platform === 'darwin') {
     hit = find(new RegExp(`bin-macos-${bits}\\.tar\\.gz$`, 'i'));
   } else {
-    if (variant === 'cuda') hit = find(new RegExp(`bin-ubuntu-cuda-[\\d.]+-${bits}\\.tar\\.gz$`, 'i'));
-    else if (variant === 'vulkan') hit = find(new RegExp(`bin-ubuntu-vulkan-${bits}\\.tar\\.gz$`, 'i'));
-    hit = hit || find(new RegExp(`bin-ubuntu-${bits}\\.tar\\.gz$`, 'i'));
+    if (variant === 'cuda') hit = find(new RegExp(`bin-ubuntu-cuda-[\\d.]+-${archRe}\\.tar\\.gz$`, 'i'));
+    else if (variant === 'vulkan') hit = find(new RegExp(`bin-ubuntu-vulkan-${archRe}\\.tar\\.gz$`, 'i'));
+    hit = hit || find(new RegExp(`bin-ubuntu-${bits}\\.tar\\.gz$`, 'i'))
+      // 有的发布只给 rocm/sycl 之类：仍要能挑到一个本架构的可用包，而不是“没有预编译包”
+      || find(new RegExp(`bin-ubuntu-(?!cuda|vulkan|rocm|sycl)[a-z0-9_.-]*-${bits}\\.tar\\.gz$`, 'i'));
   }
   return hit;
 }
