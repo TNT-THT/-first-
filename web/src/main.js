@@ -3696,6 +3696,15 @@ function renderNativePanel() {
       ? '下载/加载/删除会占用本机磁盘与内存，超大模型请先确认内存（内存+显存合计）足够。同一时间只运行一个大模型，加载新模型会自动卸载当前模型。'
       : '查看状态不需要验证；下载、加载、删除权重需要先在下方“管理员控制面板”验证口令（验证一次即可，之后不用重复验证，点“锁定管理面板”才退出）。';
     const gpuBits = [];
+  // 本机大模型运行库（llama-server）的状态：没准备好就别让用户先下几十 GB 权重
+  if (nativeStatus.enabled && !nativeStatus.binaryReady) {
+    const job = nativeStatus.binaryJob;
+    gpuBits.push(job?.state === 'downloading'
+      ? '正在下载 llama.cpp 运行库…'
+      : job?.state === 'error'
+        ? `运行库下载失败（${job.error || '未知原因'}）：点上方“准备 llama.cpp 运行库”重试；也可用 OJ_LLAMA_VARIANT=cpu 换个版本`
+        : '运行库尚未准备：先点上方“准备 llama.cpp 运行库”，否则下载好的权重也无法加载');
+  }
     if (running.state === 'ready' && running.gpuLayers !== null && running.gpuLayers !== undefined) {
       gpuBits.push(`当前模型实际卸载到 GPU 的层数：${running.gpuLayers} 层`);
     }
