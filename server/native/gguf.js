@@ -112,6 +112,112 @@ class ByteReader {
 }
 
 /**
+ * 从一段已读入内存的 GGUF 头字节里读完整元信息（架构/层数/分片）。
+ * 纯函数，便于测试与“本地导入”时对已读入的小文件做校验。
+ * @returns {{ok: true, version: number, architecture: string, blockCount: number|null,
+ *            contextLength: number|null, splitCount: number|null, splitNo: number|null,
+ *            fileType: number|null} | {ok: false, reason: string}}
+ */
+export function parseGgufMeta(buf) {
+  const r = new SyncReader(buf);
+  return {
+    ...readMetaSync(r),
+  };
+}
+
+/** 从 GGUF 文件读取完整元信息（只读元数据区，不碰张量）。读不到时给出原因。 */
+export async function readGgufMeta(filePath, { maxBytes = 512 * 1024 * 1024, chunkBytes = 1024 * 1024 } = {}) {
+  let handle = null;
+  try {
+    handle = await open(filePath, 'r');
+    const st = await handle.stat();
+    if (!st.size) return { ok: false, reason: '文件是空的（0 字节）' };
+    const reader = new ByteReader(handle, { chunkBytes, limitBytes: Math.min(maxBytes, st.size) });
+    const head = await reader.read(24);
+    if (!head || head.length < 24) return { ok: false, reason: '文件太小，读不出 GGUF 文件头' };
+    if (head.toString('latin1', 0, 4) !== 'GGUF') {
+      return { ok: false, reason: '文件头不是 GGUF（可能是没下载完的 .part、压缩包或其它格式）' };
+    }
+    return await walkMeta(reader, head);
+  } catch (err) {
+    return { ok: false, reason: `读取文件头失败：${err?.message || err}` };
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/** 元数据里我们要关心的几个键（其余整段跳过，词表再大也不读进内存）。 */
+const META_KEYS = new Set([
+  'general.architecture',
+  'general.file_type',
+  'split.count',
+  'split.no',
+]);
+
+/**
+ * GGUF 版本头合法值。v1 是旧的 32 位布局，本软件只解析 v2/v3（llama.cpp 现在也只产这两个）。
+ */
+function versionOk(v) {
+  return v === 2 || v === 3;
+}
+
+/**
+ * 遍历元数据（同步读取器），收集我们要的键。解析失败时返回原因，
+ * 不抛错——加载前的完整性检查要能把“文件坏了”如实告诉用户。
+ */
+function readMetaSync(r) {
+  const head = r.read(24);
+  if (!head || head.length < 24) return { ok: false, reason: '文件太小，读不出 GGUF 文件头' };
+  if (head.toString('latin1', 0, 4) !== 'GGUF') {
+    return { ok: false, reason: '文件头不是 GGUF（可能是没下载完的 .part、压缩包或其它格式）' };
+  }
+  const version = head.readUInt32LE(4);
+  if (!versionOk(version)) return { ok: false, reason: `不支持的 GGUF 版本 ${version}` };
+  const kvCount = Number(head.readBigUInt64LE(16));
+  if (!Number.isSafeInteger(kvCount) || kvCount < 0 || kvCount > MAX_KV) {
+    return { ok: false, reason: 'GGUF 元数据条目数异常（文件可能损坏）' };
+  }
+  return walkMetaSync(r, { version, kvCount });
+}
+
+function walkMetaSync(r, { version, kvCount }) {
+  const got = {};
+  for (let i = 0; i < kvCount; i += 1) {
+    const key = readStr(r);
+    if (key === null) return { ok: false, reason: '元数据读不完（文件可能被截断）' };
+    const tb = r.read(4);
+    if (!tb) return { ok: false, reason: '元数据读不完（文件可能被截断）' };
+    const type = tb.readUInt32LE(0);
+    if (key.endsWith('.block_count') || key.endsWith('.context_length') || key === 'general.file_type' || META_KEYS.has(key)) {
+      const value = readValue(r, type);
+      if (value === false) return { ok: false, reason: '元数据读不完（文件可能被截断）' };
+      got[key] = value;
+    } else if (skipValue(r, type) === false) {
+      return { ok: false, reason: '元数据读不完（文件可能被截断）' };
+    }
+  }
+  return metaFromKeys(got, version);
+}
+
+/** 把收集到的键整理成统一结构（缺失项为 null，不视为错误）。 */
+function metaFromKeys(got, version) {
+  const arch = typeof got['general.architecture'] === 'string' ? got['general.architecture'] : '';
+  const blocks = arch && Number.isInteger(got[`${arch}.block_count`]) ? got[`${arch}.block_count`] : null;
+  const ctxKey = arch ? `${arch}.context_length` : '';
+  const ctx = ctxKey && Number.isInteger(got[ctxKey]) ? got[ctxKey] : null;
+  return {
+    ok: true,
+    version,
+    architecture: arch,
+    blockCount: blocks,
+    contextLength: ctx,
+    fileType: Number.isInteger(got['general.file_type']) ? got['general.file_type'] : null,
+    splitCount: Number.isInteger(got['split.count']) ? got['split.count'] : null,
+    splitNo: Number.isInteger(got['split.no']) ? got['split.no'] : null,
+  };
+}
+
+/**
  * 从一段已读入内存的 GGUF 头字节里找 <架构>.block_count（层数）。找不到返回 null。
  * 纯函数，便于测试。只适合“整个头都在这一段字节里”的情况（测试与小文件）；
  * 大文件请用 readGgufBlockCount，它会按需分块读取。
@@ -189,6 +295,34 @@ function skipValue(r, type) {
   return true;
 }
 
+/**
+ * 读出一个元数据值（数组只做跳过、返回 true）。失败返回 undefined。
+ * 与 skipValue 的区别：布尔 false / 数值 0 都是合法值，不会被当成失败。
+ */
+function readValue(r, type) {
+  if (type === T.STRING) {
+    const s = readStr(r);
+    return s === null ? undefined : s;
+  }
+  if (type === T.ARRAY) return skipValue(r, type) === false ? undefined : true;
+  const size = FIXED_SIZE[type];
+  if (!size) return undefined;
+  const b = r.read(size);
+  if (!b) return undefined;
+  if (type === T.UINT32) return b.readUInt32LE(0);
+  if (type === T.INT32) return b.readInt32LE(0);
+  if (type === T.UINT64) return Number(b.readBigUInt64LE(0));
+  if (type === T.INT64) return Number(b.readBigInt64LE(0));
+  if (type === T.UINT16) return b.readUInt16LE(0);
+  if (type === T.INT16) return b.readInt16LE(0);
+  if (type === T.UINT8) return b.readUInt8(0);
+  if (type === T.INT8) return b.readInt8(0);
+  if (type === T.BOOL) return b.readUInt8(0) !== 0;
+  if (type === T.FLOAT32) return b.readFloatLE(0);
+  if (type === T.FLOAT64) return b.readDoubleLE(0);
+  return true;
+}
+
 /** 解析头部并返回 block_count；reader 只需实现 read(n)/skip(n)（同步）。 */
 function parseBlockCount(r) {
   const head = r.read(24);
@@ -231,6 +365,86 @@ export async function readGgufBlockCount(filePath, { maxBytes = 512 * 1024 * 102
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+/**
+ * 异步遍历元数据（readGgufMeta 用）：只把关心的键读进内存，其余整段跳过。
+ * head 是已经读过的 24 字节文件头。
+ */
+async function walkMeta(r, head) {
+  const version = head.readUInt32LE(4);
+  if (!versionOk(version)) return { ok: false, reason: `不支持的 GGUF 版本 ${version}` };
+  const kvCount = Number(head.readBigUInt64LE(16));
+  if (!Number.isSafeInteger(kvCount) || kvCount < 0 || kvCount > MAX_KV) {
+    return { ok: false, reason: 'GGUF 元数据条目数异常（文件可能损坏）' };
+  }
+  const readStrAsync = async () => {
+    const lb = await r.read(8);
+    if (!lb) return null;
+    const len = Number(lb.readBigUInt64LE(0));
+    if (!Number.isSafeInteger(len) || len < 0 || len > MAX_STRING) return null;
+    const b = await r.read(len);
+    return b ? b.toString('utf8') : null;
+  };
+  const readValueAsync = async (type) => {
+    if (type === T.STRING) {
+      const s = await readStrAsync();
+      return s === null ? undefined : s;
+    }
+    if (type === T.ARRAY) {
+      const h = await r.read(12);
+      if (!h) return undefined;
+      const elemType = h.readUInt32LE(0);
+      const count = Number(h.readBigUInt64LE(4));
+      if (!Number.isSafeInteger(count) || count < 0 || count > MAX_ARRAY) return undefined;
+      if (elemType === T.STRING) {
+        for (let i = 0; i < count; i += 1) if ((await readStrAsync()) === null) return undefined;
+        return true;
+      }
+      const size = FIXED_SIZE[elemType];
+      if (!size) return undefined;
+      return (await r.skip(size * count)) === false ? undefined : true;
+    }
+    const size = FIXED_SIZE[type];
+    if (!size) return undefined;
+    const b = await r.read(size);
+    if (!b) return undefined;
+    if (type === T.UINT32) return b.readUInt32LE(0);
+    if (type === T.INT32) return b.readInt32LE(0);
+    if (type === T.UINT64) return Number(b.readBigUInt64LE(0));
+    if (type === T.INT64) return Number(b.readBigInt64LE(0));
+    if (type === T.UINT16) return b.readUInt16LE(0);
+    if (type === T.INT16) return b.readInt16LE(0);
+    if (type === T.UINT8) return b.readUInt8(0);
+    if (type === T.INT8) return b.readInt8(0);
+    if (type === T.BOOL) return b.readUInt8(0) !== 0;
+    if (type === T.FLOAT32) return b.readFloatLE(0);
+    if (type === T.FLOAT64) return b.readDoubleLE(0);
+    return true;
+  };
+  const got = {};
+  for (let i = 0; i < kvCount; i += 1) {
+    const key = await readStrAsync();
+    if (key === null) return { ok: false, reason: '元数据读不完（文件可能被截断，或下载不完整）' };
+    const tb = await r.read(4);
+    if (!tb) return { ok: false, reason: '元数据读不完（文件可能被截断，或下载不完整）' };
+    const type = tb.readUInt32LE(0);
+    if (key.endsWith('.block_count') || key.endsWith('.context_length') || key === 'general.file_type' || META_KEYS.has(key)) {
+      const v = await readValueAsync(type);
+      if (v === undefined) return { ok: false, reason: '元数据读不完（文件可能被截断，或下载不完整）' };
+      got[key] = v;
+    } else if (type === T.STRING) {
+      if ((await readStrAsync()) === null) return { ok: false, reason: '元数据读不完（文件可能被截断，或下载不完整）' };
+    } else if (type === T.ARRAY) {
+      const skipped = await readValueAsync(type);
+      if (skipped === undefined) return { ok: false, reason: '元数据读不完（文件可能被截断，或下载不完整）' };
+    } else {
+      const size = FIXED_SIZE[type];
+      if (!size) return { ok: false, reason: `元数据类型未知（${type}），文件可能损坏` };
+      if ((await r.read(size)) === null) return { ok: false, reason: '元数据读不完（文件可能被截断，或下载不完整）' };
+    }
+  }
+  return metaFromKeys(got, version);
 }
 
 /** ByteReader 是异步的：把 parseBlockCount 的逻辑跑在异步读取器上。 */

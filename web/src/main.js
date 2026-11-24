@@ -3467,12 +3467,19 @@ function buildNativeModelRow(m, admin) {
       }
       rowQuants = quants || [];
       placeholder.textContent = '选择量化（已下载的排在前面）';
-      quantSelect.replaceChildren(placeholder, ...(m.downloaded || []).map((d) => {
+      // 未下完的档位排在最前并标出“还差什么”：用户点下载即可续传，
+      // 而不是看着下拉里没有它、去别处找原因。
+      quantSelect.replaceChildren(placeholder, ...(m.incomplete || []).map((d) => {
+        const opt = document.createElement('option');
+        opt.value = d.quant;
+        opt.textContent = `${d.quant}（未下完：${d.summary}）· 选中后点“下载所选量化”续传`;
+        return opt;
+      }), ...(m.downloaded || []).map((d) => {
         const opt = document.createElement('option');
         opt.value = d.quant;
         opt.textContent = `${d.quant}（${d.typeLabel || 'GGUF'} · 已下载 · ${(d.totalBytes / 1e9).toFixed(1)} GB · ${d.directUse === false ? '需转换后使用' : '可直接使用'}）`;
         return opt;
-      }), ...quants.filter((q) => !(m.downloaded || []).some((d) => d.quant === q.quant)).map((q) => {
+      }), ...quants.filter((q) => !(m.downloaded || []).some((d) => d.quant === q.quant) && !(m.incomplete || []).some((d) => d.quant === q.quant)).map((q) => {
         const opt = document.createElement('option');
         opt.value = q.quant;
         opt.textContent = `${q.quant}（${q.typeLabel || 'GGUF 量化'}）· ${q.sizeGB} GB · 内存约 ${q.ramGB} GB · ${q.directUse === false ? '需要转换后才能用' : '下载后可直接使用'}`;
@@ -3668,6 +3675,33 @@ async function nativeAction(fn) {
   await refreshNativeStatus();
 }
 
+/** 把一次加载实际生效的增强参数（fa / 缓存复用 / mmap / 批大小）写成一句人话。 */
+function describeFlags(flags) {
+  if (!flags || typeof flags !== 'object') return '';
+  const bits = [];
+  if (flags.flashAttn === 'off') bits.push('已关 flash-attention');
+  else if (flags.flashAttn === null) bits.push('未启用 flash-attention');
+  if (!flags.cacheReuse) bits.push('已关 KV 缓存复用');
+  if (flags.mmap === false) bits.push('已改为整块读入（--no-mmap）');
+  if (flags.batch) bits.push(`批大小 ${flags.batch}`);
+  return bits.length ? `；本次配置：${bits.join('、')}` : '';
+}
+
+/** 崩溃码 → 用户能直接照做的话（面板红字用）。 */
+function crashAdvice(exitCode, errText = '') {
+  const text = String(errText || '');
+  if (exitCode === 3221225477 || /0xC0000005|-1073741819|access violation/i.test(text)) {
+    return '（0xC0000005 = 程序访问了不该访问的内存：最常见是内存/显存不够，其次才是权重文件损坏或显卡驱动/运行库不匹配。软件已自动逐档回退；全部失败时请换更小的量化，或关掉其它占内存的程序后重试。）';
+  }
+  if (exitCode === 3221225725 || /0xC00000FD/i.test(text)) {
+    return '（0xC00000FD = 栈溢出：把上下文调小、或关掉其它占内存的程序后重试。）';
+  }
+  if (exitCode === 3221226505 || /0xC0000409/i.test(text)) {
+    return '（0xC0000409 = 程序内部安全检查失败：多为运行库/显卡驱动版本不匹配，点“准备运行库”重装，或把 OJ_LLAMA_VARIANT 设为 cpu。）';
+  }
+  return '';
+}
+
 function renderNativePanel() {
   if (!els.apiNativeList || !nativeStatus) return;
   const admin = !!state.apiKeyAdminToken;
@@ -3711,7 +3745,13 @@ function renderNativePanel() {
         : n.reason && Number(n.used) === Number(n.requested)
           // 只是上下文被模型上限截断（层数没动）：别写成“自动回退”，会被误读成显存不足
           ? `${n.reason}（实际上下文 ${n.contextTokens || n.used}）`
-          : `加载时已自动回退（GPU 层数 请求 ${n.requested} → 实际 ${n.used}${n.contextTokens ? `，上下文 ${n.contextTokens}` : ''}）：${n.reason || '疑似显存/内存不足'}`);
+          : `加载时已自动回退（GPU 层数 请求 ${n.requested} → 实际 ${n.used}${n.contextTokens ? `，上下文 ${n.contextTokens}` : ''}${describeFlags(n.flags)}）：${n.reason || '疑似显存/内存不足'}`);
+    }
+    // 内存体检：把“要多少 / 本机有多少”直接摆给用户看，别让他们对着 0xC0000005 猜
+    const mem = nativeStatus.memory;
+    if (mem && mem.neededGB) {
+      gpuBits.push(mem.summary
+        || `本次加载约需 ${mem.neededGB} GB 内存${mem.totalGB ? `，本机总内存 ${mem.totalGB} GB、当前可用 ${mem.freeGB} GB` : ''}`);
     }
     els.apiNativeHint.textContent = gpuBits.length ? `${base} ${gpuBits.join('；')}。` : base;
   }
@@ -3722,8 +3762,11 @@ function renderNativePanel() {
     els.apiNativeLogWrap.hidden = !show;
     if (show) {
       if (running.state === 'error') els.apiNativeLogWrap.open = true;
+      const advice = running.state === 'error' ? crashAdvice(running.exitCode, running.error) : '';
       els.apiNativeLogTail.textContent =
-        (running.error ? `错误：${running.error}\n` : '') + (lines.length ? lines.join('\n') : '（暂无日志输出）');
+        (running.error ? `错误：${running.error}\n` : '')
+        + (advice ? `说明：${advice}\n` : '')
+        + (lines.length ? lines.join('\n') : '（暂无日志输出）');
     }
   }
   if (els.apiHfTokenStatus) {
