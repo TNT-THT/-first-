@@ -246,7 +246,7 @@ export class LlamaProcess {
     return this.info?.apiKey || '';
   }
 
-  async start({ binary, modelFile, modelId, quant, contextTokens = 8192, gpuLayers = 0, port }) {
+  async start({ binary, modelFile, modelId, quant, contextTokens = 8192, gpuLayers = 0, port, extraArgs = [] }) {
     await this.stop();
     this.state = 'loading';
     this.error = '';
@@ -268,6 +268,8 @@ export class LlamaProcess {
       '--cache-reuse', '256',
       // flash attention：长上下文（超大模型常用 32K~256K）下省显存/内存的关键开关
       '--flash-attn', 'on',
+      // 调用方按模型追加的参数（目前是 MoE 的专家卸载；普通模型为空）
+      ...(Array.isArray(extraArgs) ? extraArgs.filter((a) => typeof a === 'string' && a) : []),
     ];
     this.info = { modelId, quant, port, apiKey, binary, contextTokens, gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0) };
     // CUDA 版的 cudart 运行库就放在二进制同目录（随包下载时平铺在一起）：

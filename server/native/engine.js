@@ -1644,6 +1644,10 @@ export class NativeEngine {
           contextTokens: attempt.contextTokens,
           gpuLayers: attempt.layers,
           port,
+          // 高级参数（可选）：MoE 模型常需要 --n-cpu-moe / --override-tensor 之类把专家张量
+          // 留在内存，否则 -ngl 拉满必然显存不足。不写死任何值，由管理员通过
+          // OJ_LLAMA_EXTRA_ARGS 显式指定，避免把大模型推到更慢的配置上。
+          extraArgs: String(this.env.OJ_LLAMA_EXTRA_ARGS || '').trim().split(/\s+/).filter(Boolean),
         });
         const reduced = attempt.layers < requested || attempt.contextTokens < ctx;
         this.loadNote = reduced

@@ -190,3 +190,28 @@ test('pickReleaseAsset：CUDA/Vulkan 也要按当前架构挑包（arm64 机器�
   // 请求的变体不存在时回落到纯 CPU 包，而不是返回 null 让用户看到“没有预编译包”
   assert.equal(pickReleaseAsset([{ name: 'llama-b1-bin-ubuntu-x64.tar.gz' }], { platform: 'linux', arch: 'x64', variant: 'cuda' }).name, 'llama-b1-bin-ubuntu-x64.tar.gz');
 });
+
+test('LlamaProcess：extraArgs 追加到 llama-server 参数末尾（MoE 专家卸载等高级用法）', async () => {
+  const { LlamaProcess } = await import('../server/native/llama.js');
+  const calls = [];
+  const server = new LlamaProcess({
+    spawnImpl: (bin, args, opts) => {
+      calls.push({ bin, args, opts });
+      return { stdout: { on() {} }, stderr: { on() {} }, once() {}, kill() {} };
+    },
+    fetchImpl: async () => { throw new Error('not listening'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const p = server.start({
+    binary: '/x/llama-server', modelFile: '/x/m.gguf', modelId: 'x', quant: 'Q4_K_M',
+    contextTokens: 8192, gpuLayers: 99, port: 18998,
+    extraArgs: ['--n-cpu-moe', '12', ''], // 空串必须被过滤掉，否则 llama-server 会把它当参数值
+  }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 30));
+  await server.stop();
+  await p;
+  const { args } = calls[0];
+  assert.deepEqual(args.slice(-2), ['--n-cpu-moe', '12']);
+  assert.ok(!args.includes(''));
+  assert.equal(args[args.indexOf('-ngl') + 1], '99');
+});
