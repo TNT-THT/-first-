@@ -3907,8 +3907,12 @@ async function hfUseRepoInner(repo, mode = 'auto') {
       out = via.out;
       downloadState = via.downloadState;
       downloadError = via.downloadError || '';
-    } catch {
-      // 浏览器通道不可用才回退软件直连（直连不通时错误会如实显示在下方）
+    } catch (browserErr) {
+      // 门控/私有仓库（401/403）或仓库改名/删档（404）：直连同样注定失败，
+      // 再回退一次只会把“需要 Token / 仓库不存在”换成一句更含糊的联网错误。
+      const reason = String(browserErr?.message || '');
+      if (/HTTP (401|403|404)|Token|仓库不存在|找不到/.test(reason)) throw browserErr;
+      // 其余情况（代理/网络抖动）才回退软件直连（直连不通时错误会如实显示在下方）
       out = await nativeAdminRequest('/api/native/hf/use', { token: state.apiKeyAdminToken, body: { repo, mode } });
     }
     if (out.action === 'download') {
