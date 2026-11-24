@@ -296,44 +296,77 @@ const HF_WEB_BASE = 'https://huggingface.co';
  */
 const defaultFetch = (...args) => fetch(...args);
 
-/** 浏览器直连 HF 文件树，归一化为与服务端 fetchRepoFiles 一致的清单。 */
-export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = defaultFetch, timeoutMs = 60000 } = {}) {
-  const url = `${HF_WEB_BASE}/api/models/${repo}/tree/main?recursive=true`;
-  let res;
-  let lastErr = null;
-  // 大仓库的文件树不小、慢代理下 30 秒经常不够：放宽到 60 秒，网络失败自动重试一次
-  for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
-    const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
-      ? AbortSignal.timeout(timeoutMs)
-      : undefined;
-    try {
-      res = await fetchImpl(url, {
-        headers: { accept: 'application/json' },
-        cache: 'no-store',
-        signal,
+/**
+ * 解析 Link 响应头里的 rel="next"（Hub 树接口按游标分页，每页最多 1000 条）。
+ * 与服务端 parseLinkNext 同一套口径。找不到返回 ''。
+ */
+export function parseLinkNext(linkHeader) {
+  for (const part of String(linkHeader || '').split(',')) {
+    const m = part.match(/<([^>]+)>\s*;\s*rel\s*=\s*"?([^";]+)"?/i);
+    if (m && String(m[2]).trim().toLowerCase() === 'next') return m[1];
+  }
+  return '';
+}
+
+/**
+ * 浏览器直连 HF 文件树，归一化为与服务端 fetchRepoFiles 一致的清单。
+ *
+ * 必须跟随 Link rel="next"：Hub 一次最多给 1000 条，超大模型仓库（几十个量化
+ * × 多个分片）轻松过千。以前只取第一页，于是量化列表少档、分片只下一部分，
+ * 加载时才报缺文件——浏览器通道是大多数用户的实际下载路径，这个坑影响最大。
+ */
+export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = defaultFetch, timeoutMs = 60000, maxPages = 100 } = {}) {
+  let url = `${HF_WEB_BASE}/api/models/${repo}/tree/main?recursive=true`;
+  const out = [];
+  const seen = new Set();
+  const visited = new Set();
+  for (let page = 0; url && page < maxPages; page += 1) {
+    if (visited.has(url)) break;
+    visited.add(url);
+    let res = null;
+    let lastErr = null;
+    // 大仓库的文件树不小、慢代理下 30 秒经常不够：放宽到 60 秒，网络失败自动重试一次
+    for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
+      const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
+        ? AbortSignal.timeout(timeoutMs)
+        : undefined;
+      try {
+        res = await fetchImpl(url, {
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+          signal,
+        });
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 1200));
+      }
+    }
+    if (!res) {
+      const err = lastErr;
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+        throw new Error('浏览器连接 Hugging Face 超时（仓库较大或网络较慢），请检查网络/代理后重试。');
+      }
+      throw new Error(`浏览器无法连接 Hugging Face（${err?.message || '网络错误'}）。`);
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`读取模型仓库 ${repo} 需要授权（HTTP ${res.status}）：该仓库是门控/私有仓库，请先在软件里保存 Hugging Face Token 再试。`);
+    }
+    if (!res.ok) throw new Error(`读取模型仓库 ${repo} 失败（HTTP ${res.status}）。`);
+    const tree = await res.json().catch(() => null);
+    if (!Array.isArray(tree)) throw new Error(`模型仓库 ${repo} 返回了无法识别的文件列表。`);
+    for (const e of tree) {
+      if (!e || e.type !== 'file' || typeof e.path !== 'string' || seen.has(e.path)) continue;
+      seen.add(e.path);
+      out.push({
+        path: e.path,
+        size: Math.max(0, Number(e?.lfs?.size ?? e?.size) || 0),
+        sha256: typeof e?.lfs?.oid === 'string' ? e.lfs.oid : '',
       });
-    } catch (err) {
-      lastErr = err;
-      if (attempt === 0) await new Promise((r) => setTimeout(r, 1200));
     }
+    const next = parseLinkNext(typeof res.headers?.get === 'function' ? res.headers.get('link') : '');
+    url = next && !visited.has(next) ? next : '';
   }
-  if (!res) {
-    const err = lastErr;
-    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
-      throw new Error('浏览器连接 Hugging Face 超时（仓库较大或网络较慢），请检查网络/代理后重试。');
-    }
-    throw new Error(`浏览器无法连接 Hugging Face（${err?.message || '网络错误'}）。`);
-  }
-  if (!res.ok) throw new Error(`读取模型仓库 ${repo} 失败（HTTP ${res.status}）。`);
-  const tree = await res.json().catch(() => null);
-  if (!Array.isArray(tree)) throw new Error(`模型仓库 ${repo} 返回了无法识别的文件列表。`);
-  return tree
-    .filter((e) => e && e.type === 'file' && typeof e.path === 'string')
-    .map((e) => ({
-      path: e.path,
-      size: Math.max(0, Number(e?.lfs?.size ?? e?.size) || 0),
-      sha256: typeof e?.lfs?.oid === 'string' ? e.lfs.oid : '',
-    }));
+  return out;
 }
 
 /** 管理员 JSON 请求（走指定 fetchImpl，便于整条浏览器通道统一替换/测试）。 */

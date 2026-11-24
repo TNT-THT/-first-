@@ -189,6 +189,32 @@ function splitIndex(filePath) {
   return m ? Number(m[1]) : 1;
 }
 
+/** 是否为 GGUF 分片文件（`...-00002-of-00005.gguf`）。 */
+export function isShardFile(filePath) {
+  return /-\d{1,5}-of-\d{1,5}\.gguf$/i.test(String(filePath || ''));
+}
+
+/**
+ * 在一档量化（或清单）里挑出“加载入口”文件——llama.cpp 的 `-m` 要指向第 1 个分片，
+ * 它自己会顺着 `#00002` 之类的顺序把其余分片拉起来。
+ *
+ * 以前调用方直接用 `files.sort()[0]`：字典序在两位以上分片号（`-00002-` 排在
+ * `-00001-` 后面没问题，但 `-10-of-` 会排到 `-2-of-` 前面）或按量化分子目录布局时
+ * 会挑到中段分片，超大模型于是“下载成功、加载即崩”。这里按分片号排序取值。
+ * mmproj（视觉投影）永远不能当入口文件。
+ */
+export function pickEntryFile(files) {
+  const list = (Array.isArray(files) ? files : [])
+    .filter((f) => f && typeof f.path === 'string' && /\.gguf$/i.test(f.path) && !/mmproj/i.test(f.path));
+  if (!list.length) return null;
+  const shards = list.filter((f) => isShardFile(f.path));
+  if (shards.length) {
+    // 只要编号最小的那一个；同号再按路径稳定排序
+    return [...shards].sort((a, b) => splitIndex(a.path) - splitIndex(b.path) || a.path.localeCompare(b.path))[0];
+  }
+  return [...list].sort((a, b) => a.path.localeCompare(b.path))[0];
+}
+
 /**
  * 把仓库文件列表按量化分组（只收 .gguf 权重，排除 mmproj 视觉投影文件）。
  * @param {Array<{path: string, size?: number}>} files

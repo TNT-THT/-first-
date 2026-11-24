@@ -19,6 +19,7 @@ import {
   groupFilesByQuant,
   nativeModelById,
   pickDefaultQuant,
+  pickEntryFile,
   NATIVE_MODELS,
 } from './catalog.js';
 import { detectFormats, detectVariants, hfModelId, optionsForFormats, routeForFormats, safeDirName } from './formats.js';
@@ -30,6 +31,23 @@ import { findConverter, prepareConverter, runConvert } from './convert.js';
 import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python-runner.js';
 
 const QUANT_CACHE_MS = 10 * 60 * 1000;
+
+/**
+ * 两份量化分组是否等价（档位名、分片路径、分片大小全一致）。
+ * 用来判断缓存能不能直接用：仓库重新上传过文件时大小会变，继续用缓存会让
+ * 下载端以旧的 expectedSize 校验，永远报“文件下载不完整”。
+ */
+function sameQuantSizes(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  const byQuant = new Map(b.map((g) => [g.quant, g]));
+  for (const g of a) {
+    const other = byQuant.get(g.quant);
+    if (!other || other.files.length !== g.files.length) return false;
+    const sizes = new Map(other.files.map((f) => [f.path, f.size]));
+    for (const f of g.files) if (sizes.get(f.path) !== f.size) return false;
+  }
+  return true;
+}
 /**
  * 浏览器通道任务“已中断”判定：超过这个时长没有收到任何新数据块，就认为
  * 浏览器页面已关/已断（关页面时客户端的失败通知发不出来，服务端不能干等）。
@@ -219,8 +237,12 @@ export class NativeEngine {
           quant,
           totalBytes: manifest.totalBytes,
           files: manifest.files.length,
-          // 层数（读 GGUF 文件头得到）：界面据此提示“每层约占多少显存”；读不到为 null
-          layers: quant === 'SNAPSHOT' || quant === 'CONVERTED' ? null : await this._ggufLayers(path.join(base, quant, manifest.files[0]?.path || ''), manifest.totalBytes),
+          // 层数（读 GGUF 文件头得到）：界面据此提示“每层约占多少显存”；读不到为 null。
+          // 分片模型必须读第 1 个分片的文件头（元数据只写在首片里），
+          // 以前读 manifest.files[0]，按量化分子目录布局时可能读到中段分片而显示“层数未知”。
+          layers: quant === 'SNAPSHOT' || quant === 'CONVERTED'
+            ? null
+            : await this._ggufLayers(path.join(base, quant, pickEntryFile(manifest.files)?.path || ''), manifest.totalBytes),
           ...describeQuant(quant),
         });
       }
@@ -256,9 +278,15 @@ export class NativeEngine {
     const model = this.resolveModel(id);
     if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
     const cached = this.quantCache.get(model.repo);
-    if (cached && Date.now() - cached.at < QUANT_CACHE_MS) return cached.grouped;
-    const files = await fetchRepoFiles(model.repo, { fetchImpl: this.fetchImpl });
+    // 带 Token：门控/私有仓库没有鉴权头连文件树都读不到（会误报“没有 GGUF”）。
+    const files = await fetchRepoFiles(model.repo, { fetchImpl: this.fetchImpl, headers: this._hfAuthHeaders() });
     const grouped = groupFilesByQuant(files);
+    if (cached && Date.now() - cached.at < QUANT_CACHE_MS && sameQuantSizes(cached.grouped, grouped)) {
+      // 缓存仍与仓库一致：只刷新时间，仍按缓存返回（并顺手带上新拉到的树，保持新鲜）
+      cached.at = Date.now();
+      cached.grouped = grouped;
+      return cached.grouped;
+    }
     if (!grouped.length) {
       throw new Error(`仓库 ${model.repo} 里没有找到可用的 GGUF 量化文件。`);
     }
@@ -386,7 +414,7 @@ export class NativeEngine {
 
   /** HF 搜索（桥接 Hub API，服务端直连；浏览器通道不可用时的回退）。 */
   async searchHf(query, opts = {}) {
-    const results = await searchModels({ query, ...opts, fetchImpl: this.fetchImpl });
+    const results = await searchModels({ query, ...opts, fetchImpl: this.fetchImpl, headers: this._hfAuthHeaders() });
     return this._annotateSearchResults(results);
   }
 
@@ -436,7 +464,7 @@ export class NativeEngine {
 
   /** HF 仓库详情 + 格式路线（服务端直连；浏览器通道不可用时的回退）。 */
   async hfInfo(repo) {
-    const info = await fetchModelInfo(repo, { fetchImpl: this.fetchImpl });
+    const info = await fetchModelInfo(repo, { fetchImpl: this.fetchImpl, headers: this._hfAuthHeaders() });
     return this._buildInfo(repo, info, info.files);
   }
 
@@ -541,7 +569,7 @@ export class NativeEngine {
   }
 
   async _downloadSnapshotTo(model, dir) {
-    const files = await fetchRepoFiles(model.repo, { fetchImpl: this.fetchImpl });
+    const files = await fetchRepoFiles(model.repo, { fetchImpl: this.fetchImpl, headers: this._hfAuthHeaders() });
     await mkdir(dir, { recursive: true });
     const saved = [];
     for (const file of files) {
@@ -718,6 +746,7 @@ export class NativeEngine {
       || grouped.find((g) => g.quant === pickDefaultQuant(grouped));
     if (!entry) throw Object.assign(new Error(`仓库里没有量化：${quant}`), { status: 400 });
     const key = `${id}@${entry.quant}`;
+    await this._dropMismatchedPartFiles(id, entry);
     this._expireStaleBrowserJobs();
     const existing = this.downloads.get(key);
     if (existing?.state === 'downloading' && existing.via === 'browser') {
@@ -733,10 +762,16 @@ export class NativeEngine {
       return done;
     }
     const free = await freeDiskBytes(this.modelsDir);
-    if (Number.isFinite(free) && free < entry.totalBytes * 1.05) {
-      throw Object.assign(new Error(`磁盘空间不足：该量化需要约 ${(entry.totalBytes / 1e9).toFixed(1)} GB，可用约 ${(free / 1e9).toFixed(1)} GB。`), { status: 507 });
+    // 续传场景下已落盘的字节不会再占新空间：可用空间只需覆盖“还没下完的部分”
+    const remaining = await this._remainingBytes(id, entry);
+    const needBytes = Math.max(0, entry.totalBytes - remaining);
+    if (Number.isFinite(free) && free < needBytes * 1.05) {
+      throw Object.assign(new Error(`磁盘空间不足：该量化还需下载约 ${(needBytes / 1e9).toFixed(1)} GB，可用约 ${(free / 1e9).toFixed(1)} GB。`), { status: 507 });
     }
-    const job = { id, quant: entry.quant, state: 'downloading', downloaded: 0, total: entry.totalBytes, error: '' };
+    const job = {
+      id, quant: entry.quant, state: 'downloading', downloaded: remaining, total: entry.totalBytes,
+      error: '', startedAt: Date.now(), updatedAt: Date.now(),
+    };
     this.downloads.set(key, job);
     const dir = this.modelDir(id, entry.quant);
     await mkdir(dir, { recursive: true });
@@ -746,8 +781,24 @@ export class NativeEngine {
         // 大模型通常有几十个分片：3 路并行一起拉，比排队逐个下快得多；
         // 并发只按文件分工，单个文件内部仍是一条流顺序写，不会写乱。
         // 已下完的分片由 downloadFile 按大小直接跳过，失败重试不从头来。
+        //
+        // perFile 必须按“下标”精确赋值：以前在文件完成时写的是
+        // Math.max(perFile[i], done.bytes)——而 done.bytes 是该文件的完整大小，
+        // 这样一个分片下完就把进度多算了一份，进度条会先涨到 150% 再回落。
         const perFile = new Array(entry.files.length).fill(0);
-        const bump = () => { job.downloaded = perFile.reduce((n, v) => n + v, 0); };
+        const bump = () => {
+          job.downloaded = perFile.reduce((n, v) => n + v, 0);
+          job.updatedAt = Date.now();
+        };
+        // 续传时先把已落盘的分片算进进度（重新打开面板也能看到真实起点，而不是 0%）
+        for (let i = 0; i < entry.files.length; i += 1) {
+          try {
+            const st = await stat(path.join(dir, entry.files[i].path));
+            if (entry.files[i].size && st.size === entry.files[i].size) perFile[i] = st.size;
+            else perFile[i] = Math.min(st.size, entry.files[i].size || st.size);
+          } catch { perFile[i] = 0; }
+        }
+        bump();
         let cursor = 0;
         let firstError = null;
         const worker = async () => {
@@ -769,7 +820,7 @@ export class NativeEngine {
                 expectedSize: file.size,
                 onProgress: ({ downloaded }) => { perFile[i] = downloaded; bump(); },
               });
-              perFile[i] = Math.max(perFile[i], Number(done?.bytes) || file.size);
+              perFile[i] = Number(done?.bytes) || file.size;
               bump();
             } catch (err) {
               if (!firstError) {
@@ -838,6 +889,94 @@ export class NativeEngine {
     return out;
   }
 
+  /** 已落盘的字节数（完整分片 + 各分片的 .part）：续传时用来算真实起点与剩余空间。 */
+  async _remainingBytes(id, entry) {
+    const dir = this.modelDir(id, entry.quant);
+    let sum = 0;
+    for (const file of entry.files) {
+      const want = Number(file.size) || 0;
+      let got = 0;
+      try {
+        const st = await stat(path.join(dir, file.path));
+        if (want && st.size === want) { sum += st.size; continue; }
+        got = st.size;
+      } catch { /* 完整文件不在，看 .part */ }
+      try {
+        const st = await stat(path.join(dir, `${file.path}.part`));
+        got = Math.max(got, st.size);
+      } catch { /* 没有 .part */ }
+      sum += want ? Math.min(got, want) : got;
+    }
+    return sum;
+  }
+
+  /**
+   * 从磁盘重建“浏览器通道”下载任务：软件重启、页面刷新导致内存任务丢失时，
+   * 只要该量化目录里还有 .part 或未完成的分片，就按磁盘现状恢复进度。
+   * 找不到任何半成品则返回 null（那就该走 prepare 正常开始）。
+   */
+  async _rebuildBrowserJob(id, quant) {
+    const model = this.resolveModel(id);
+    if (!model) return null;
+    const q = String(quant || '').toUpperCase();
+    let manifest = null;
+    try {
+      manifest = JSON.parse(await readFile(path.join(this.modelDir(id, q), 'manifest.json'), 'utf8'));
+    } catch { /* 没有清单就现列一次仓库文件树 */ }
+    let files = Array.isArray(manifest?.files) && manifest.files.length
+      ? manifest.files.map((f) => ({ path: f.path, size: Number(f.size) || 0 }))
+      : null;
+    if (!files) {
+      try {
+        const grouped = await this.availableQuants(id);
+        files = this._pickQuantEntry(grouped, q)?.files || null;
+      } catch { files = null; }
+    }
+    if (!Array.isArray(files) || !files.length) return null;
+    const dir = this.modelDir(id, q);
+    const received = new Map();
+    let anyProgress = false;
+    let total = 0;
+    for (const file of files) {
+      total += Number(file.size) || 0;
+      let got = 0;
+      try {
+        const st = await stat(path.join(dir, file.path));
+        if (!file.size || st.size === file.size) got = st.size;
+      } catch { /* 没有正式文件 */ }
+      if (!got) {
+        try { got = (await stat(path.join(dir, `${file.path}.part`))).size; } catch { got = 0; }
+      }
+      if (got > 0) anyProgress = true;
+      received.set(file.path, got);
+    }
+    if (!anyProgress) return null;
+    return {
+      id, quant: q, state: 'downloading', via: 'browser',
+      downloaded: [...received.values()].reduce((n, v) => n + v, 0),
+      total, error: '', files, entry: { quant: q, files, totalBytes: total },
+      receivedByFile: received, startedAt: Date.now(), lastChunkAt: Date.now(), updatedAt: Date.now(),
+    };
+  }
+
+  /**
+   * 仓库里的文件换了大小（作者重新上传/重新量化）后，本地 .part 是按旧大小写的，
+   * 续传会永远差一截或写超，最后卡在“文件下载不完整”。这里把“已落盘字节比新目标
+   * 还大”的 .part 直接丢掉，让下一次下载从头写这一片（其余分片不受影响）。
+   */
+  async _dropMismatchedPartFiles(id, entry) {
+    const dir = this.modelDir(id, entry.quant);
+    for (const file of entry.files) {
+      const size = Number(file.size) || 0;
+      if (!size) continue;
+      const part = path.join(dir, `${file.path}.part`);
+      try {
+        const st = await stat(part);
+        if (st.size > size) await rm(part, { force: true });
+      } catch { /* 没有 .part 就不用管 */ }
+    }
+  }
+
   /** 单个仓库相对路径是否安全（不逃出量化目录）。 */
   _isSafeRepoPath(p) {
     if (typeof p !== 'string' || !p || p.length > 512) return false;
@@ -864,15 +1003,23 @@ export class NativeEngine {
     const entry = this._pickQuantEntry(grouped, quant);
     if (!entry) throw Object.assign(new Error(`仓库里没有量化：${quant}`), { status: 400 });
     const key = `${id}@${entry.quant}`;
+    await this._dropMismatchedPartFiles(id, entry);
     const downloaded = await this.downloadedQuants(id);
     if (downloaded.some((d) => d.quant === entry.quant)) {
       const done = { id, quant: entry.quant, state: 'done', downloaded: entry.totalBytes, total: entry.totalBytes, error: '' };
       this.downloads.set(key, done);
       return { id, quant: entry.quant, state: 'done', total: entry.totalBytes, files: [] };
     }
-    const existing = this.downloads.get(key);
+    let existing = this.downloads.get(key);
     if (existing?.state === 'downloading' && existing.via !== 'browser') {
-      throw Object.assign(new Error('该量化已有软件直连下载在进行中，等它完成或失败后再试。'), { status: 409 });
+      // 只有“真的还在传”才拒绝；进程重启/中断留下的旧任务不能把续传永久卡死，
+      // 因为 .part 本身就是断点账本，下面会按磁盘上的实际字节重新对齐。
+      const quietMs = Date.now() - Number(existing.updatedAt || existing.startedAt || 0);
+      if (quietMs < 120000) {
+        throw Object.assign(new Error('该量化已有软件直连下载在进行中，等它完成或失败后再试。'), { status: 409 });
+      }
+      this.downloads.delete(key);
+      existing = null;
     }
     const free = await freeDiskBytes(this.modelsDir);
     if (Number.isFinite(free) && free < entry.totalBytes * 1.05) {
@@ -936,7 +1083,14 @@ export class NativeEngine {
     const model = this.resolveModel(id);
     if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
     const key = `${id}@${String(quant || '').toUpperCase()}`;
-    const job = this.downloads.get(key);
+    let job = this.downloads.get(key);
+    if (!job?.entry || job.state !== 'downloading' || job.via !== 'browser') {
+      // 软件重启/会话过期后内存里的任务没了，但磁盘上的 .part 还在：此时让用户
+      // “重新点下载”会重新走 prepare（多半又因为旧任务报 409），最后只能删了重下。
+      // 这里按磁盘上的真实文件清单重建任务，直接接着传。
+      job = await this._rebuildBrowserJob(id, quant);
+      if (job) this.downloads.set(key, job);
+    }
     if (!job || job.state !== 'downloading' || job.via !== 'browser' || !job.entry) {
       throw Object.assign(new Error('没有进行中的浏览器通道下载，请重新点下载。'), { status: 409 });
     }
@@ -957,6 +1111,7 @@ export class NativeEngine {
     job.receivedByFile.set(filePath, received);
     job.downloaded = [...job.receivedByFile.values()].reduce((n, v) => n + v, 0);
     job.lastChunkAt = Date.now();
+    job.updatedAt = job.lastChunkAt;
     return { received, downloaded: job.downloaded, total: job.total };
   }
 
@@ -1238,6 +1393,18 @@ export class NativeEngine {
       || (this.python.info?.modelId === id && this.python.state !== 'idle')) {
       throw Object.assign(new Error('该模型正在运行，请先卸载再删除权重。'), { status: 409 });
     }
+    // 正在下载的量化不许删：后台任务会继续往已被删除的目录里写，最后留下半截
+    // 文件与一条“下载失败”的怪错；浏览器通道任务更是会一直往空气里传字节。
+    const busyKeys = [...this.downloads.entries()]
+      .filter(([key, job]) => job?.state === 'downloading'
+        && (quant ? key === `${id}@${quant}` : key.startsWith(`${id}@`)))
+      .map(([key]) => key);
+    if (busyKeys.length) {
+      throw Object.assign(
+        new Error('该量化正在下载中，请等下载完成或中断后再删除（中断后重新点下载会续传）。'),
+        { status: 409 },
+      );
+    }
     if (quant) {
       await rm(this.modelDir(id, quant), { recursive: true, force: true });
       this.downloads.delete(`${id}@${quant}`);
@@ -1257,19 +1424,59 @@ export class NativeEngine {
   }
 
   /** 管理员/聊天自动：加载模型（已下载的量化；会先卸载当前模型）。 */
-  async load(id, { quant, contextTokens = 8192, gpuLayers = 0 } = {}) {
+  /**
+   * 记住“管理员上次显式加载时用的上下文/GPU 层数”。
+   * 聊天自动加载（用户没点“加载”，直接发消息）以前一律按 8192/0 起，
+   * 面板里设成 32768 或卸载 40 层完全不起作用，用户以为设置没生效。
+   */
+  _rememberLoadPrefs(id, { contextTokens, gpuLayers }) {
+    this.loadPrefs = {
+      contextTokens: Math.max(1024, Math.floor(contextTokens) || 8192),
+      gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0),
+    };
+    this.loadPrefsFor = id;
+  }
+
+  async load(id, { quant, contextTokens, gpuLayers, explicit = true } = {}) {
+    // 未显式给值时沿用上一次加载的参数（聊天自动加载走这条）
+    const prefs = this.loadPrefs || { contextTokens: 8192, gpuLayers: 0 };
+    if (!Number.isFinite(Number(contextTokens))) contextTokens = prefs.contextTokens;
+    if (!Number.isFinite(Number(gpuLayers))) gpuLayers = prefs.gpuLayers;
+    if (explicit) this._rememberLoadPrefs(id, { contextTokens, gpuLayers });
+    // 每次加载都重算说明：上一次加载的回退提示不能残留到这一次（否则界面上会
+    // 一直挂着一条与当前模型无关的“已自动回退”）。
+    this.loadNote = null;
     const model = this.resolveModel(id);
     if (!model) throw Object.assign(new Error(`未知模型：${id}`), { status: 404 });
     if (this.llama.info?.modelId === id && this.llama.state === 'ready') {
-      return this.llama.status();
+      // 同一模型、同一档、参数也没变：直接返回（重复点“加载”不折腾）
+      const sameQuant = !quant || String(this.llama.info.quant || '').toUpperCase() === String(quant).toUpperCase();
+      const sameCtx = Number(this.llama.info.contextTokens || 0) === Math.max(1024, Math.floor(contextTokens) || 8192);
+      const sameLayers = Number(this.llama.info.gpuLayers ?? -1) === Math.max(0, Math.floor(gpuLayers) || 0);
+      if (sameQuant && sameCtx && sameLayers) return this.llama.status();
+      // 换了量化/上下文/层数：必须重新加载，否则界面上选了 Q2_K、实际还在跑 Q4_K_M
+      await this.llama.stop().catch(() => {});
     }
     const downloaded = await this.downloadedQuants(id);
-    const pick = downloaded.find((d) => d.quant === String(quant || '').toUpperCase()) || downloaded[0];
-    if (!pick) {
+    // 只能加载 GGUF（SNAPSHOT 是原格式快照、CONVERTED 是本地转换产物）。
+    // 以前回落到 downloaded[0]：只下过快照的模型会被当成 GGUF 去加载，报一堆
+    // “不是 GGUF”的怪错；现在明确告诉用户该走转换/原格式运行。
+    const loadable = downloaded.filter((d) => d.quant !== 'SNAPSHOT');
+    const wanted = String(quant || '').toUpperCase();
+    // 指名要哪一档就必须加载哪一档：以前找不到会静默换成另一档已下载的量化，
+    // 用户以为跑的是 Q2_K、其实跑的是 Q4_K_M（显存/速度全对不上）。
+    if (wanted && loadable.length && !loadable.some((d) => d.quant === wanted)) {
       throw Object.assign(
-        new Error(`模型 ${model.name} 尚未下载。请在“API 接入 → 本机大模型”中先下载权重。`),
+        new Error(`量化 ${wanted} 还没有下载（已下载：${loadable.map((d) => d.quant).join('、')}）。请先下载这一档，或在“量化”下拉里改选已下载的档位。`),
         { status: 409 },
       );
+    }
+    const pick = loadable.find((d) => d.quant === wanted) || loadable[0];
+    if (!pick) {
+      const why = downloaded.length
+        ? `这个模型目前只下载了原格式权重（SNAPSHOT），请点“转换并使用”转成 GGUF，或用“本地运行（Python）”直接运行原格式。`
+        : `模型 ${model.name} 尚未下载。请在“API 接入 → 本机大模型”中先下载权重。`;
+      throw Object.assign(new Error(why), { status: 409 });
     }
     const binary = findLlamaBinary({ env: this.env, dataDir: this.dataDir });
     if (!binary) {
@@ -1279,10 +1486,30 @@ export class NativeEngine {
       );
     }
     const manifest = await this.readManifest(id, pick.quant);
-    const firstFile = manifest.files.map((f) => f.path).sort()[0];
-    const modelFile = path.join(this.modelDir(id, pick.quant), firstFile);
-    if (!existsSync(modelFile)) throw new Error(`权重文件缺失：${firstFile}`);
-    const ctx = Math.min(Math.max(1024, Math.floor(contextTokens) || 8192), model.context || 8192);
+    // 分片模型的入口文件必须是第 1 个分片（`...-00001-of-00005.gguf`）。
+    // 以前按字典序取第一个：`-00002-of-` 排在 `1-of-` 前面，或者按量化分子目录
+    // 布局时排到别的文件上，llama.cpp 会因为拿到中段分片而加载失败——这正是
+    // 超大模型（几十个分片）最常见的“下载都正常、一加载就崩”原因。
+    const entryFile = pickEntryFile(manifest.files);
+    if (!entryFile) {
+      throw Object.assign(new Error(`模型 ${model.name} 的权重清单是空的，请删除后重新下载。`), { status: 409 });
+    }
+    const modelFile = path.join(this.modelDir(id, pick.quant), entryFile.path);
+    if (!existsSync(modelFile)) throw new Error(`权重文件缺失：${entryFile.path}`);
+    // 分片必须齐全：缺片的模型让 llama.cpp 去加载只会得到一句含糊的崩溃/读取错误
+    const missing = manifest.files.filter((f) => !existsSync(path.join(this.modelDir(id, pick.quant), f.path)));
+    if (missing.length) {
+      throw Object.assign(
+        new Error(`权重文件不完整：缺少 ${missing.length} 个分片（如 ${missing[0].path}）。请重新点下载补齐（会从断点续传，不会从头下）。`),
+        { status: 409 },
+      );
+    }
+    const wantCtx = Math.max(1024, Math.floor(contextTokens) || 8192);
+    const maxCtx = Number(model.context) > 0 ? Number(model.context) : 8192;
+    const ctx = Math.min(wantCtx, maxCtx);
+    const contextNote = wantCtx > maxCtx
+      ? { requested: wantCtx, used: ctx, reason: `该模型最大上下文 ${maxCtx}，已按上限设置` }
+      : null;
     const port = 18100 + Math.floor(Math.random() * 800);
     const requested = Math.max(0, Math.floor(gpuLayers) || 0);
     // 加载失败时自动回退，不让用户手动试错：
@@ -1314,11 +1541,22 @@ export class NativeEngine {
               contextTokens: attempt.contextTokens,
               reason: '加载失败（疑似显存/内存不足或程序崩溃），已自动回退层数/上下文后加载成功',
             }
-          : null;
+          : contextNote;
         return this.llama.status();
       } catch (err) {
         lastErr = err;
-        const retryable = this._looksLikeMemoryFailure(err) || this._looksLikeCrash(err);
+        const kinds = this._looksLikeContextOrModelFailure(err);
+        // llama.cpp 的内存不足也印成 “error loading model: …”，别把它当权重损坏：
+        // 那种情况降层数就能跑，判成“文件坏了”会让用户白删白下几十 GB。
+        if (kinds.corrupt && this._looksLikeMemoryFailure(err)) kinds.corrupt = false;
+        if (kinds.corrupt) {
+          // 权重本身坏了：换层数/上下文都没用，直接给可执行的建议
+          throw Object.assign(
+            new Error(`${err.message}\n\n判断：模型文件不完整或已损坏（不是显存问题）。请回到模型列表删除该量化后重新下载；下载会保留已完成的分片，不会从头开始。`),
+            { status: 500, corrupt: true },
+          );
+        }
+        const retryable = kinds.context || this._looksLikeMemoryFailure(err) || this._looksLikeCrash(err);
         if (i === attempts.length - 1 || !retryable) throw err;
         this.logger.warn?.(`[native] 加载失败（${attempt.layers} 层 / 上下文 ${attempt.contextTokens}），自动回退重试：${err.message}`);
         await this.llama.stop().catch(() => {});
@@ -1330,7 +1568,7 @@ export class NativeEngine {
   /** 失败是否疑似显存/内存不足（决定要不要自动减少 GPU 卸载层数重试）。 */
   _looksLikeMemoryFailure(err) {
     const text = `${err?.message || ''}\n${(this.llama.logTail || []).join('\n')}`;
-    return /out of memory|failed to allocate|failed to load model|cuda error|vulkan.*(error|failed)|bad_alloc|内存不足|显存/i.test(text)
+    return /out of memory|failed to allocate|failed to load model|cuda error|vulkan.*(error|failed)|bad_alloc|内存不足|显存|not enough memory|cannot allocate/i.test(text)
       || /llama-server 已退出/.test(err?.message || '');
   }
 
@@ -1340,10 +1578,41 @@ export class NativeEngine {
     return /3221225477|0xC0000005|-1073741819|access violation|segmentation|segfault/i.test(text);
   }
 
+  /**
+   * 失败是否因为“上下文开太大”或“权重文件本身坏了/不完整”。
+   *
+   * 这两类以前完全没有识别（只认显存不足与崩溃），于是：
+   * - 超大模型把上下文设成 256K，llama.cpp 一启动就因 KV cache 分配失败退出，
+   *   降一半上下文本来就能跑起来，却直接把错误甩给用户；
+   * - 分片缺失/GGUF 截断，llama.cpp 报 "unknown model architecture"/"invalid magic"
+   *   之类，重试多少次都没用——应该明确告诉用户“重新下载补齐分片”，而不是
+   *   在层数/上下文阶梯里白白重试十几分钟。
+   */
+  _looksLikeContextOrModelFailure(err) {
+    const text = `${err?.message || ''}\n${(this.llama.logTail || []).join('\n')}`;
+    return {
+      context: /context (size|length).*(too|exceed)|n_ctx|KV cache|kv_cache|failed to create context|context shift/i.test(text),
+      corrupt: /invalid magic|unknown model architecture|unsupported model architecture|wrong magic|tensor.*(not found|missing)|failed to read (magic|tensor)|corrupted|truncated|invalid gguf|error loading model/i.test(text),
+    };
+  }
+
   async unload() {
+    // 加载中就点卸载：加载流程还在跑，卸载后它仍会把新进程拉起来，
+    // 用户看到“点了卸载，模型还在加载/最后又跑起来了”。这里明确拒绝。
+    if (this.llama.state === 'loading') {
+      throw Object.assign(
+        new Error('模型正在加载中，暂时不能卸载。等加载完成（或加载失败）后再点卸载，或直接点另一个模型的“加载”来替换它。'),
+        { status: 409 },
+      );
+    }
     await this.llama.stop();
     await this.python.stop();
     return this.llama.status();
+  }
+
+  /** 当前是否正在加载（路由层用它挡住会互相打架的操作）。 */
+  get loading() {
+    return this.llama.state === 'loading';
   }
 
   /** 云端聊天：走 Hugging Face Inference Providers（OpenAI 兼容），返回原始 Response。 */
@@ -1409,7 +1678,8 @@ export class NativeEngine {
       return res;
     }
     if (this.llama.info?.modelId !== model || this.llama.state === 'idle') {
-      await this.load(model, {});
+      // 自动加载沿用管理员上次显式设置的上下文/层数（不再固定 8192/0）
+      await this.load(model, { explicit: false });
     }
     try {
       await this.llama.whenReady();
@@ -1418,7 +1688,7 @@ export class NativeEngine {
       // 崩溃甩给用户——以安全配置（纯 CPU + 上下文 4096）自动重新加载一次再试。
       if (!this._looksLikeCrash(err) && !this._looksLikeMemoryFailure(err)) throw err;
       this.logger.warn?.(`[native] llama-server 加载失败，聊天自动以安全配置重新加载：${err.message}`);
-      await this.load(model, { contextTokens: 4096, gpuLayers: 0 });
+      await this.load(model, { contextTokens: 4096, gpuLayers: 0, explicit: false });
       await this.llama.whenReady();
     }
     const body = {

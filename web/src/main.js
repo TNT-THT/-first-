@@ -1431,7 +1431,8 @@ async function send(rawText) {
       messages: sentMessages,
       signal: controller.signal,
       // 本机版网页：带上聊天模型选择栏选中的模型（仅本条请求生效，API 的模型选择互不影响）
-      model: MODE === 'remote' && state.appConfig.localBrowserBridge ? localChatModelId || undefined : undefined,
+      // 本机版：把网页聊天选用的模型带上（桥接网页模型或本机大模型都靠它路由）
+      model: MODE === 'remote' ? localChatModelId || undefined : undefined,
       onLoop: () => {
         loopDetected = true;
       },
@@ -3124,10 +3125,15 @@ function chatModelIds() {
 }
 
 function apiDisplayModel() {
-  if (state.appConfig.localBrowserBridge) {
+  // 本机大模型（llama.cpp）不依赖浏览器桥接：即使没开 LOCAL_BROWSER_BRIDGE，
+  // 只要下载了本机大模型，调试台/示例也应该用它，而不是显示“服务端尚未配置模型”。
+  const hasNative = nativeModels().length > 0;
+  if (state.appConfig.localBrowserBridge || hasNative) {
     // 调试台/示例使用下拉框中选中的模型（每次请求可不同）；未选或已失效时用第一个
     const selected = els.apiPlaygroundModel?.value || '';
-    return chatModelIds().includes(selected) ? selected : apiBridgeModels[0]?.id || nativeModels()[0]?.id || '';
+    return chatModelIds().includes(selected)
+      ? selected
+      : apiBridgeModels[0]?.id || nativeModels()[0]?.id || state.appConfig.model || '';
   }
   return state.appConfig.model || '';
 }
@@ -3137,7 +3143,7 @@ function renderPlaygroundModelOptions() {
   const select = els.apiPlaygroundModel;
   if (!select) return;
   const prev = select.value;
-  const options = state.appConfig.localBrowserBridge
+  const options = state.appConfig.localBrowserBridge || nativeModels().length
     ? [
         ...apiBridgeModels,
         ...nativeModels().map((m) => ({ id: m.id, label: `${m.name}（本机大模型·${m.paramsB}B）` })),
@@ -3167,7 +3173,7 @@ function renderApiAccessInfo() {
   const apiBase = new URL(state.appConfig.apiBaseUrl || '/v1', `${base}/`).href.replace(/\/$/, '');
   if (els.apiAccessBase) els.apiAccessBase.textContent = apiBase;
   els.apiAccessEndpoint.textContent = `${apiBase}/chat/completions`;
-  if (state.appConfig.localBrowserBridge) {
+  if (state.appConfig.localBrowserBridge || nativeModels().length) {
     els.apiAccessModel.textContent = apiDisplayModel()
       ? `${apiDisplayModel()}（共 ${apiBridgeModels.length} 个网页模型${nativeModels().length ? ` + ${nativeModels().length} 个本机大模型` : ''}；API 以每次请求里的 model 为准，完整列表请求 GET /v1/models；下方调试台可切换这里显示的模型）`
       : '等待本机网页连接模型…';
@@ -3327,7 +3333,9 @@ function buildNativeModelRow(m, admin) {
     const sampleKey = `${m.id}@${dl.quant}`;
     const nowMs = Date.now();
     const prev = dlSpeedSamples.get(sampleKey);
-    if (prev && nowMs - prev.at >= 400 && dl.downloaded >= prev.downloaded) {
+    // 只用“新鲜”的采样：超过 15 秒没有增长就说明下载卡住或已切换到浏览器通道，
+    // 此时继续显示上一段的“还剩 3 分钟”是在骗用户
+    if (prev && nowMs - prev.at >= 400 && nowMs - prev.at < 15000 && dl.downloaded >= prev.downloaded) {
       const speed = (dl.downloaded - prev.downloaded) / ((nowMs - prev.at) / 1000);
       if (speed > 0) {
         const etaSec = dl.total > dl.downloaded ? Math.round((dl.total - dl.downloaded) / speed) : 0;
@@ -3484,32 +3492,51 @@ function buildNativeModelRow(m, admin) {
 
   // 本机导入的模型权重已经在本地，没有任何“下载”动作，别给会注定失败的按钮
   if (m.kind !== 'import') {
-    controls.append(mkBtn(isLoading ? '加载中…' : isRunning ? '运行中' : '下载所选量化', () => {
-      void nativeAction(async () => {
-        // 与普通网页版同一条网络路：浏览器负责从 Hugging Face 取数（自动走
-        // 浏览器/系统代理），软件只落盘。浏览器通道不可用时自动回退软件直连。
-        browserDlErrors.delete(m.id);
-        try {
-          await downloadModelViaBrowser({
-            id: m.id,
-            repo: m.repo,
-            quant: quantSelect.value || undefined,
-            adminToken: state.apiKeyAdminToken,
-            onStatus: (text) => setQuantStatus(text),
-          });
-        } catch (browserErr) {
-          // 原因常驻行内（browserDlErrors），状态刷新也不会冲掉；行内小字同步提示
-          browserDlErrors.set(m.id, browserErr?.message || '未知原因');
-          setQuantStatus(`浏览器通道下载失败（${browserErr?.message || '未知原因'}），已自动改用软件直连下载…`, true);
-          await nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
-            token: state.apiKeyAdminToken,
-            body: { quant: quantSelect.value || undefined },
-          });
-        }
-      });
-    // 浏览器通道的“下载中”是可接管的：再点一次就按断点续传（换页面/刷新后尤其
-    // 需要能点）；只有软件直连真在后台下载时才置灰，避免两条通道写同一文件。
-    }, { disabled: !admin || isRunning || isLoading || (!!dl && dl.via !== 'browser') }));
+    // 浏览器通道活跃下载中：按钮改成“继续下载（断点续传）”而不是一片灰。
+    // 用户换页面/刷新后再次点击就走续传，本来就是设计允许的。
+    const browserActive = !!dl && dl.via === 'browser' && dl.state === 'downloading';
+    controls.append(mkBtn(
+      isLoading ? '加载中…'
+        : isRunning ? '运行中'
+          : browserActive ? '继续下载（断点续传）'
+            : dl ? '下载中…（点此查看进度）'
+              : '下载所选量化',
+      () => {
+        void nativeAction(async () => {
+          // 与普通网页版同一条网络路：浏览器负责从 Hugging Face 取数（自动走
+          // 浏览器/系统代理），软件只落盘。浏览器通道不可用时自动回退软件直连。
+          browserDlErrors.delete(m.id);
+          try {
+            await downloadModelViaBrowser({
+              id: m.id,
+              repo: m.repo,
+              quant: quantSelect.value || undefined,
+              adminToken: state.apiKeyAdminToken,
+              onStatus: (text) => setQuantStatus(text),
+            });
+          } catch (browserErr) {
+            const reason = browserErr?.message || '未知原因';
+            // 原因常驻行内（browserDlErrors），状态刷新也不会冲掉；行内小字同步提示
+            browserDlErrors.set(m.id, reason);
+            // 权重文件本身拉不到（404/403/401：仓库改名、删档、门控仓库没填 Token）时，
+            // 再走软件直连同样注定失败，只会让用户看到第二句更含糊的报错。
+            const fatal = /HTTP (401|403|404)|需要授权|仓库不存在/.test(reason);
+            if (fatal) {
+              setQuantStatus(`浏览器通道下载失败（${reason}）。这个问题换用软件直连也不会成功：请确认仓库仍有该文件；门控/私有仓库请先保存 Hugging Face Token 再试。`, true);
+              return;
+            }
+            setQuantStatus(`浏览器通道下载失败（${reason}），已自动改用软件直连下载…`, true);
+            await nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}/download`, {
+              token: state.apiKeyAdminToken,
+              body: { quant: quantSelect.value || undefined },
+            });
+          }
+        });
+      },
+      // 浏览器通道的“下载中”是可接管的：再点一次就按断点续传（换页面/刷新后尤其
+      // 需要能点）；只有软件直连真在后台下载时才置灰，避免两条通道写同一文件。
+      { disabled: !admin || isRunning || isLoading || (!!dl && dl.via !== 'browser') },
+    ));
   }
 
   const hasLocalSnapshot = (m.downloaded || []).some((d) => d.quant === 'SNAPSHOT');
@@ -3575,6 +3602,23 @@ function buildNativeModelRow(m, admin) {
       });
     });
   }, { disabled: !admin || isRunning || isLoading || !(m.downloaded || []).length }));
+
+  // 只删选中的那一档：几十 GB 的量化常常下一档就够用，删全部会把另一档也一起清掉
+  const pickedQuant = () => quantSelect.value
+    || (m.downloaded || [])[0]?.quant
+    || (m.downloaded || []).find((d) => d.quant !== 'SNAPSHOT')?.quant;
+  controls.append(mkBtn('删除所选量化', () => {
+    const q = pickedQuant();
+    if (!q) return;
+    const info = (m.downloaded || []).find((d) => d.quant === q);
+    const size = info?.totalBytes ? `（约 ${(info.totalBytes / 1e9).toFixed(1)} GB）` : '';
+    if (!window.confirm(`只删除 ${m.name} 的 ${q} 权重${size}？其它量化保留，之后需要时可重新下载。`)) return;
+    void nativeAction(() => nativeAdminRequest(`/api/native/models/${encodeURIComponent(m.id)}`, {
+      token: state.apiKeyAdminToken,
+      method: 'DELETE',
+      body: { quant: q },
+    }));
+  }, { disabled: !admin || isRunning || !(m.downloaded || []).length || (m.downloaded || []).length <= 1 }));
 
   controls.append(mkBtn('删除权重', () => {
     if (!window.confirm(`删除 ${m.name} 已下载的全部权重？之后需要重新下载。`)) return;
@@ -3913,13 +3957,18 @@ function nativeStateText(m) {
 
 /** 把桥接可用模型填入聊天页的模型选择栏（侧边栏 + 窄屏各一个，始终同步）；本机大模型单独分组。 */
 function renderBridgeModelOptions() {
-  if (MODE !== 'remote' || !state.appConfig.localBrowserBridge) return;
+  // 只要求“本机版网页（remote）”：未开启网页模型桥接（LOCAL_BROWSER_BRIDGE≠1）但启用了
+  // 本机大模型的部署，以前这里直接 return，聊天页的模型下拉框整个不出现——下载好的
+  // GGUF 大模型在界面上根本选不到，只能通过 /v1 API 调用。现在只要有本机大模型就渲染。
+  if (MODE !== 'remote' || (!state.appConfig.localBrowserBridge && !nativeModels().length)) return;
   const ids = chatModelIds();
   if (!ids.length) {
     els.modelSelect.hidden = true;
     els.modelSelectCompact.hidden = true;
     els.modelLabel.hidden = false;
-    els.modelLabel.textContent = '模型：等待本机网页连接…';
+    els.modelLabel.textContent = state.appConfig.localBrowserBridge
+      ? '模型：等待本机网页连接…'
+      : '模型：尚未下载本机大模型（在“模型下载”里下载后可选）';
     return;
   }
   if (!ids.includes(localChatModelId)) {
@@ -4094,7 +4143,9 @@ async function submitApiPlayground(event) {
   if (!apiDisplayModel()) {
     els.apiPlaygroundStatus.textContent = state.appConfig.localBrowserBridge
       ? '本机模型网页尚未连接或尚未上报模型，请保持本网页打开后重试。'
-      : '服务器尚未配置模型，请联系站点所有者。';
+      : nativeModels().length === 0
+        ? '还没有可用的本机大模型：先到“模型下载”里下载一个 GGUF 模型，或联系站点所有者配置模型。'
+        : '服务器尚未配置模型，请联系站点所有者。';
     return;
   }
   const token = state.apiKeyAdminToken;
