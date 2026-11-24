@@ -259,6 +259,8 @@ const els = {
   apiNativeGpuLayers: $('#apiNativeGpuLayers'),
   apiNativeUnloadBtn: $('#apiNativeUnloadBtn'),
   apiNativeHint: $('#apiNativeHint'),
+  apiNativeLogWrap: $('#apiNativeLogWrap'),
+  apiNativeLogTail: $('#apiNativeLogTail'),
   apiNativeList: $('#apiNativeList'),
   apiNativeError: $('#apiNativeError'),
   apiHfSearchInput: $('#apiHfSearchInput'),
@@ -3652,8 +3654,24 @@ function renderNativePanel() {
     if (running.state === 'ready' && running.gpuLayers !== null && running.gpuLayers !== undefined) {
       gpuBits.push(`当前模型实际卸载到 GPU 的层数：${running.gpuLayers} 层`);
     }
-    if (nativeStatus.loadNote) gpuBits.push(nativeStatus.loadNote);
+    if (nativeStatus.loadNote) {
+      const n = nativeStatus.loadNote;
+      gpuBits.push(typeof n === 'string'
+        ? n
+        : `加载时已自动回退（GPU 层数 请求 ${n.requested} → 实际 ${n.used}${n.contextTokens ? `，上下文 ${n.contextTokens}` : ''}）`);
+    }
     els.apiNativeHint.textContent = gpuBits.length ? `${base} ${gpuBits.join('；')}。` : base;
+  }
+  // llama-server 自己的输出（日志尾部）：加载崩溃/失败时真正的死因写在这里，而不是聊天报错里
+  if (els.apiNativeLogWrap && els.apiNativeLogTail) {
+    const lines = Array.isArray(running.logTail) ? running.logTail : [];
+    const show = !!running.error || lines.length > 0;
+    els.apiNativeLogWrap.hidden = !show;
+    if (show) {
+      if (running.state === 'error') els.apiNativeLogWrap.open = true;
+      els.apiNativeLogTail.textContent =
+        (running.error ? `错误：${running.error}\n` : '') + (lines.length ? lines.join('\n') : '（暂无日志输出）');
+    }
   }
   if (els.apiHfTokenStatus) {
     els.apiHfTokenStatus.textContent = nativeStatus.hf?.hasToken

@@ -755,6 +755,7 @@ body.embed .role-section { display: none !important; }
 .usage-chip.is-ok { color: var(--accent); border-color: currentColor; }
 .usage-chip.is-error { color: #d33; border-color: currentColor; }
 .usage-empty { padding: 14px 10px; text-align: center; color: var(--muted); font-size: 12px; border: 1px dashed var(--border); border-radius: 10px; }
+.native-log { white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; font-size: 11px; line-height: 1.5; background: var(--panel, #f6f8fa); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 @media (max-width: 560px) {
   .usage-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

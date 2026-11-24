@@ -1285,29 +1285,42 @@ export class NativeEngine {
     const ctx = Math.min(Math.max(1024, Math.floor(contextTokens) || 8192), model.context || 8192);
     const port = 18100 + Math.floor(Math.random() * 800);
     const requested = Math.max(0, Math.floor(gpuLayers) || 0);
-    // GPU 卸载层数超过显存时自动回退：请求层数 → 一半 → 四分之一 → 0（纯 CPU+内存），
-    // 哪一档能装下就用哪一档，不让用户对着“显存不足”反复手改。
+    // 加载失败时自动回退，不让用户手动试错：
+    // GPU 卸载层数 请求值 → 一半 → 四分之一 → 0（纯 CPU+内存），每一档再附带一档
+    // 更小的上下文（4096）——崩溃（0xC0000005 等）或疑似内存/显存不足时逐档重试。
     const ladder = [...new Set([requested, Math.floor(requested / 2), Math.floor(requested / 4), 0])];
-    let lastErr = null;
+    const attempts = [];
     for (const layers of ladder) {
+      attempts.push({ layers, contextTokens: ctx });
+      if (ctx > 4096) attempts.push({ layers, contextTokens: 4096 });
+    }
+    let lastErr = null;
+    for (const [i, attempt] of attempts.entries()) {
       try {
         await this.llama.start({
           binary: binary.path,
           modelFile,
           modelId: id,
           quant: pick.quant,
-          contextTokens: ctx,
-          gpuLayers: layers,
+          contextTokens: attempt.contextTokens,
+          gpuLayers: attempt.layers,
           port,
         });
-        this.loadNote = layers < requested
-          ? { requested, used: layers, reason: '显存不足，已自动减少 GPU 卸载层数，其余层由 CPU 计算' }
+        const reduced = attempt.layers < requested || attempt.contextTokens < ctx;
+        this.loadNote = reduced
+          ? {
+              requested,
+              used: attempt.layers,
+              contextTokens: attempt.contextTokens,
+              reason: '加载失败（疑似显存/内存不足或程序崩溃），已自动回退层数/上下文后加载成功',
+            }
           : null;
         return this.llama.status();
       } catch (err) {
         lastErr = err;
-        if (layers === 0 || !this._looksLikeMemoryFailure(err)) throw err;
-        this.logger.warn?.(`[native] GPU 卸载 ${layers} 层加载失败（疑似显存不足），自动回退重试：${err.message}`);
+        const retryable = this._looksLikeMemoryFailure(err) || this._looksLikeCrash(err);
+        if (i === attempts.length - 1 || !retryable) throw err;
+        this.logger.warn?.(`[native] 加载失败（${attempt.layers} 层 / 上下文 ${attempt.contextTokens}），自动回退重试：${err.message}`);
         await this.llama.stop().catch(() => {});
       }
     }
@@ -1319,6 +1332,12 @@ export class NativeEngine {
     const text = `${err?.message || ''}\n${(this.llama.logTail || []).join('\n')}`;
     return /out of memory|failed to allocate|failed to load model|cuda error|vulkan.*(error|failed)|bad_alloc|内存不足|显存/i.test(text)
       || /llama-server 已退出/.test(err?.message || '');
+  }
+
+  /** 失败是否为原生程序崩溃（如 Windows 0xC0000005 内存访问冲突、段错误）。 */
+  _looksLikeCrash(err) {
+    const text = `${err?.message || ''}\n${(this.llama.logTail || []).join('\n')}`;
+    return /3221225477|0xC0000005|-1073741819|access violation|segmentation|segfault/i.test(text);
   }
 
   async unload() {
@@ -1392,7 +1411,16 @@ export class NativeEngine {
     if (this.llama.info?.modelId !== model || this.llama.state === 'idle') {
       await this.load(model, {});
     }
-    await this.llama.whenReady();
+    try {
+      await this.llama.whenReady();
+    } catch (err) {
+      // 加载途中 llama-server 崩溃/内存失败（如 0xC0000005）：聊天请求不要直接把
+      // 崩溃甩给用户——以安全配置（纯 CPU + 上下文 4096）自动重新加载一次再试。
+      if (!this._looksLikeCrash(err) && !this._looksLikeMemoryFailure(err)) throw err;
+      this.logger.warn?.(`[native] llama-server 加载失败，聊天自动以安全配置重新加载：${err.message}`);
+      await this.load(model, { contextTokens: 4096, gpuLayers: 0 });
+      await this.llama.whenReady();
+    }
     const body = {
       model: entry.id,
       messages,

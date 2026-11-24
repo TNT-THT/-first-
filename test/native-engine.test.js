@@ -59,6 +59,21 @@ http.createServer((req, res) => {
 }).listen(port, '127.0.0.1');
 `;
 
+// 第一次以大上下文启动时模拟原生崩溃（0xC0000005 类），之后正常：验证加载自动回退
+const STUB_LLAMA_CRASH_ONCE = STUB_LLAMA.replace(
+  "const http = require('node:http');",
+  `const fs = require('node:fs');
+const marker = require('node:path').join(__dirname, 'crashed-once');
+const _args0 = process.argv.slice(2);
+const _ctx0 = Number(_args0[_args0.indexOf('-c') + 1]);
+if (_ctx0 >= 8192 && !fs.existsSync(marker)) {
+  fs.writeFileSync(marker, '1');
+  console.error('mock llama-server: access violation while loading model');
+  process.exit(3);
+}
+const http = require('node:http');`,
+);
+
 const TREE = [
   { type: 'file', path: 'Qwen3-30B-A3B-Q4_K_M-00001-of-00002.gguf', size: 11, lfs: { oid: 'a'.repeat(64), size: 11 } },
   { type: 'file', path: 'Qwen3-30B-A3B-Q4_K_M-00002-of-00002.gguf', size: 12, lfs: { oid: 'b'.repeat(64), size: 12 } },
@@ -83,10 +98,10 @@ function stubFetch(realFetch = fetch) {
   };
 }
 
-async function setup(t) {
+async function setup(t, stubSource = STUB_LLAMA) {
   const dir = await mkdtemp(path.join(tmpdir(), 'oj-native-'));
   const stubBin = path.join(dir, 'llama-server');
-  await writeFile(stubBin, STUB_LLAMA);
+  await writeFile(stubBin, stubSource);
   await chmod(stubBin, 0o755);
   const fetchImpl = stubFetch();
   const engine = new NativeEngine({
@@ -309,4 +324,38 @@ test('直连下载：已下完的分片不再重复下载，.part 续传，多�
   }
   const downloaded = await engine.downloadedQuants(MODEL_ID);
   assert.deepEqual(downloaded.map((d) => d.quant), ['Q4_K_M']);
+});
+
+test('加载崩溃自动回退：大上下文崩溃后以小上下文加载成功，聊天可用', { timeout: 60000 }, async (t) => {
+  const { base, engine } = await setup(t, STUB_LLAMA_CRASH_ONCE);
+  const admin = await adminLogin(base);
+  const dl = await fetch(`${base}/api/native/models/${MODEL_ID}/download`, {
+    method: 'POST',
+    headers: auth(admin),
+    body: JSON.stringify({ quant: 'Q4_K_M' }),
+  });
+  assert.equal(dl.status, 202);
+  let downloaded = null;
+  for (let i = 0; i < 50 && !downloaded; i += 1) {
+    const s = await (await fetch(`${base}/api/native/status`)).json();
+    downloaded = s.models.find((m) => m.id === MODEL_ID).downloaded.find((d) => d.quant === 'Q4_K_M');
+    if (!downloaded) await new Promise((r) => setTimeout(r, 100));
+  }
+  assert.ok(downloaded);
+
+  // 聊天自动加载：第一次（上下文 8192）模拟崩溃，应自动回退到 4096 成功，而不是把崩溃甩给用户
+  const chat = await fetch(`${base}/api/native/chat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: MODEL_ID, messages: [{ role: 'user', content: '你好' }], stream: false }),
+  });
+  assert.equal(chat.status, 200);
+  await chat.text();
+  const status = engine.llama.status();
+  assert.equal(status.state, 'ready');
+  assert.ok(engine.loadNote, '应记录自动回退说明');
+  assert.equal(engine.loadNote.contextTokens, 4096);
+  // 状态接口带日志尾部，前端面板据此展示死因
+  const st = await (await fetch(`${base}/api/native/status`)).json();
+  assert.ok(Array.isArray(st.running.logTail));
 });
