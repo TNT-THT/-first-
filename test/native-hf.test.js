@@ -165,7 +165,7 @@ async function login(base, url, password) {
   return (await res.json()).token;
 }
 
-const auth = (token) => ({ authorization: `Bearer ${token}`, 'content-type': 'application/json' });
+const auth = (token) => (token ? { authorization: `Bearer ${token}`, 'content-type': 'application/json' } : { 'content-type': 'application/json' });
 
 async function waitFor(base, fn, timeoutMs = 15000) {
   const start = Date.now();
@@ -180,13 +180,13 @@ async function waitFor(base, fn, timeoutMs = 15000) {
 test('HF 桥接：搜索、GGUF 一键下载并聊天、ONNX 云端、Safetensors 转换', { timeout: 90000 }, async (t) => {
   const { base } = await setup(t);
   const admin = await login(base, '/api/admin/api-keys/login', ADMIN);
-  const session = await login(base, '/api/login', PASSWORD);
+  const session = null; // 入口登录已删除：普通接口匿名访问，auth(session) 仅保留 content-type
 
   // 搜索（桥接）
   const search = await (await fetch(`${base}/api/native/hf/search?q=tiny`, { headers: auth(session) })).json();
   assert.equal(search.results[0].repo, 'someone/Tiny-GGUF');
   const noAuth = await fetch(`${base}/api/native/hf/search?q=tiny`);
-  assert.equal(noAuth.status, 401);
+  assert.equal(noAuth.status, 200, '搜索匿名可读（入口锁已删除）');
 
   // GGUF：一键使用 → 下载 → 聊天
   const use1 = await (await fetch(`${base}/api/native/hf/use`, { method: 'POST', headers: auth(admin), body: JSON.stringify({ repo: 'someone/Tiny-GGUF' }) })).json();
@@ -273,7 +273,7 @@ async function setupOffline(t) {
 
 test('HF 浏览器通道：服务端连不上 HF 时，搜索/详情/一键使用仍可走完', { timeout: 60000 }, async (t) => {
   const { base } = await setupOffline(t);
-  const session = await login(base, '/api/login', PASSWORD);
+  const session = null; // 入口登录已删除：普通接口匿名访问，auth(session) 仅保留 content-type
   const admin = await login(base, '/api/admin/api-keys/login', ADMIN);
 
   // 对照：服务端直连搜索在这个环境下必然失败（用户实测原样）

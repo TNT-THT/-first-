@@ -164,6 +164,7 @@ export class LlamaProcess {
       state: this.state,
       modelId: this.info?.modelId || null,
       quant: this.info?.quant || null,
+      gpuLayers: this.info?.gpuLayers ?? null,
       error: this.state === 'error' ? this.error : '',
       logTail: this.logTail.slice(-20),
     };
@@ -194,7 +195,7 @@ export class LlamaProcess {
       '--reasoning-format', 'deepseek',
       '--api-key', apiKey,
     ];
-    this.info = { modelId, quant, port, apiKey, binary };
+    this.info = { modelId, quant, port, apiKey, binary, gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0) };
     const child = this.spawnImpl(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     this.child = child;
     const pushLog = (chunk) => {

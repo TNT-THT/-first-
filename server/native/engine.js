@@ -25,6 +25,7 @@ import { detectFormats, detectVariants, hfModelId, optionsForFormats, routeForFo
 import { downloadFile, fetchModelInfo, fetchRepoFiles, freeDiskBytes, resolveFileUrl, searchModels } from './hf.js';
 import { downloadLlamaBinary, findLlamaBinary, LlamaProcess } from './llama.js';
 import { extractZip } from './archive.js';
+import { readGgufBlockCount } from './gguf.js';
 import { findConverter, prepareConverter, runConvert } from './convert.js';
 import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python-runner.js';
 
@@ -213,9 +214,30 @@ export class NativeEngine {
           break;
         }
       }
-      if (ok) out.push({ quant, totalBytes: manifest.totalBytes, files: manifest.files.length, ...describeQuant(quant) });
+      if (ok) {
+        out.push({
+          quant,
+          totalBytes: manifest.totalBytes,
+          files: manifest.files.length,
+          // 层数（读 GGUF 文件头得到）：界面据此提示“每层约占多少显存”；读不到为 null
+          layers: quant === 'SNAPSHOT' || quant === 'CONVERTED' ? null : await this._ggufLayers(path.join(base, quant, manifest.files[0]?.path || ''), manifest.totalBytes),
+          ...describeQuant(quant),
+        });
+      }
     }
     return out;
+  }
+
+  /** GGUF 层数（按“文件+大小”缓存，避免状态刷新时反复读文件头）。 */
+  async _ggufLayers(filePath, totalBytes) {
+    if (!filePath) return null;
+    const key = `${filePath}|${totalBytes || 0}`;
+    if (this._layerCache?.has(key)) return this._layerCache.get(key);
+    const layers = await readGgufBlockCount(filePath).catch(() => null);
+    if (!this._layerCache) this._layerCache = new Map();
+    if (this._layerCache.size > 200) this._layerCache.clear();
+    this._layerCache.set(key, layers);
+    return layers;
   }
 
   async readManifest(id, quant) {
@@ -316,6 +338,8 @@ export class NativeEngine {
       binarySource: binary?.source || '',
       binaryJob: this.binaryJob ? { state: this.binaryJob.state, error: this.binaryJob.error || '' } : null,
       running: this.llama.status(),
+      // GPU 卸载自动回退的说明（请求层数装不下时降到了多少层），界面据此提示用户
+      loadNote: this.loadNote || null,
       pythonRunning: this.python.status(),
       models,
       hf: {
@@ -1260,16 +1284,41 @@ export class NativeEngine {
     if (!existsSync(modelFile)) throw new Error(`权重文件缺失：${firstFile}`);
     const ctx = Math.min(Math.max(1024, Math.floor(contextTokens) || 8192), model.context || 8192);
     const port = 18100 + Math.floor(Math.random() * 800);
-    await this.llama.start({
-      binary: binary.path,
-      modelFile,
-      modelId: id,
-      quant: pick.quant,
-      contextTokens: ctx,
-      gpuLayers,
-      port,
-    });
-    return this.llama.status();
+    const requested = Math.max(0, Math.floor(gpuLayers) || 0);
+    // GPU 卸载层数超过显存时自动回退：请求层数 → 一半 → 四分之一 → 0（纯 CPU+内存），
+    // 哪一档能装下就用哪一档，不让用户对着“显存不足”反复手改。
+    const ladder = [...new Set([requested, Math.floor(requested / 2), Math.floor(requested / 4), 0])];
+    let lastErr = null;
+    for (const layers of ladder) {
+      try {
+        await this.llama.start({
+          binary: binary.path,
+          modelFile,
+          modelId: id,
+          quant: pick.quant,
+          contextTokens: ctx,
+          gpuLayers: layers,
+          port,
+        });
+        this.loadNote = layers < requested
+          ? { requested, used: layers, reason: '显存不足，已自动减少 GPU 卸载层数，其余层由 CPU 计算' }
+          : null;
+        return this.llama.status();
+      } catch (err) {
+        lastErr = err;
+        if (layers === 0 || !this._looksLikeMemoryFailure(err)) throw err;
+        this.logger.warn?.(`[native] GPU 卸载 ${layers} 层加载失败（疑似显存不足），自动回退重试：${err.message}`);
+        await this.llama.stop().catch(() => {});
+      }
+    }
+    throw lastErr;
+  }
+
+  /** 失败是否疑似显存/内存不足（决定要不要自动减少 GPU 卸载层数重试）。 */
+  _looksLikeMemoryFailure(err) {
+    const text = `${err?.message || ''}\n${(this.llama.logTail || []).join('\n')}`;
+    return /out of memory|failed to allocate|failed to load model|cuda error|vulkan.*(error|failed)|bad_alloc|内存不足|显存/i.test(text)
+      || /llama-server 已退出/.test(err?.message || '');
   }
 
   async unload() {
@@ -1279,11 +1328,12 @@ export class NativeEngine {
   }
 
   /** 云端聊天：走 Hugging Face Inference Providers（OpenAI 兼容），返回原始 Response。 */
-  async remoteChatCompletion({ entry, messages, stream, temperature, maxTokens, signal }) {
+  async remoteChatCompletion({ entry, messages, stream, temperature, maxTokens, signal, thinking }) {
     if (!this.hfToken) {
       throw Object.assign(new Error('尚未配置 Hugging Face Token：请在“本机大模型”面板里填入 Token 后再使用云端模型（免费额度即可）。'), { status: 503 });
     }
     const body = { model: entry.repo, messages, stream: !!stream };
+    if (thinking === false) body.chat_template_kwargs = { enable_thinking: false };
     if (Number.isFinite(temperature)) body.temperature = temperature;
     if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
     if (stream) body.stream_options = { include_usage: true };
@@ -1304,23 +1354,27 @@ export class NativeEngine {
    * 对话转发：本地已下载 → llama.cpp；已登记云端 → HF 云端推理；
    * 都没有 → 交给 load() 抛出“尚未下载”的 409 提示。返回原始 Response。
    */
-  async chatCompletion({ model, messages, stream = false, temperature, maxTokens, signal } = {}) {
+  async chatCompletion({ model, messages, stream = false, temperature, maxTokens, signal, thinking } = {}) {
     const entry = this.resolveModel(model);
     if (!entry) throw Object.assign(new Error(`未知模型：${model}`), { status: 404 });
+    // 思考开关：明确关闭时才下发 enable_thinking=false（开启/未指定沿用模型模板默认，
+    // 不多塞参数，避免不认该字段的后端报错）。此前服务端从不下发这个开关，
+    // 界面开关关着也照样思考，就是这里缺了透传。
+    const thinkOff = thinking === false ? { chat_template_kwargs: { enable_thinking: false } } : {};
     const downloaded = await this.downloadedQuants(model);
     const hasGguf = downloaded.some((d) => d.quant !== 'SNAPSHOT');
     const hasSnapshot = downloaded.some((d) => d.quant === 'SNAPSHOT');
     // 用户明确切到云端时云端优先；否则本地优先（GGUF → 原格式 Python → 云端兜底）
     if (this.preferCloud.has(model) && this.remote.has(model)) {
-      return this.remoteChatCompletion({ entry, messages, stream, temperature, maxTokens, signal });
+      return this.remoteChatCompletion({ entry, messages, stream, temperature, maxTokens, signal, thinking });
     }
     if (!hasGguf && !hasSnapshot && this.remote.has(model)) {
-      return this.remoteChatCompletion({ entry, messages, stream, temperature, maxTokens, signal });
+      return this.remoteChatCompletion({ entry, messages, stream, temperature, maxTokens, signal, thinking });
     }
     // 原格式本地运行（Python）：只有快照、没有 GGUF 时走这条路
     if (!hasGguf && hasSnapshot) {
       await this._ensurePythonLoaded(model);
-      const body = { model: entry.repo, messages, stream: !!stream };
+      const body = { model: entry.repo, messages, stream: !!stream, ...thinkOff };
       if (Number.isFinite(temperature)) body.temperature = temperature;
       if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
       const res = await this.fetchImpl(`${this.python.baseUrl}/v1/chat/completions`, {
@@ -1343,6 +1397,7 @@ export class NativeEngine {
       model: entry.id,
       messages,
       stream: !!stream,
+      ...thinkOff,
     };
     if (Number.isFinite(temperature)) body.temperature = temperature;
     if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;

@@ -8,6 +8,7 @@ import {
   DEFAULT_RELEASE_REPO,
   SITE_PACKAGE_ASSETS,
   TRAINING_PACKAGE_ASSET,
+  SERVER_PACKAGE_ASSET,
   isReleaseAsset,
   isValidReleaseRepo,
   isValidReleaseTag,
@@ -69,7 +70,9 @@ test('releasePageUrl：latest 与固定版本', () => {
   assert.equal(releasePageUrl({ tag: 'v3.1.0' }), `https://github.com/${DEFAULT_RELEASE_REPO}/releases/tag/v3.1.0`);
 });
 
-test('isReleaseAsset：四平台网站包与训练包', () => {
+test('isReleaseAsset：四平台网站包、服务器包与训练包', () => {
+  assert.equal(isReleaseAsset(SERVER_PACKAGE_ASSET), true);
+  assert.equal(SERVER_PACKAGE_ASSET, 'server-win-x64.zip');
   for (const asset of SITE_PACKAGE_ASSETS) assert.equal(isReleaseAsset(asset), true);
   assert.equal(isReleaseAsset(TRAINING_PACKAGE_ASSET), true);
   assert.equal(isReleaseAsset('config.json'), false);

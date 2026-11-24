@@ -1,4 +1,4 @@
-import { SEARCH_EVIDENCE_SYSTEM_GUARD } from '../web/src/search/context.js';
+import { SEARCH_EVIDENCE_SYSTEM_GUARD, hasSearchEvidence } from '../web/src/search/context.js';
 
 export const LIMITS = {
   maxMessages: 60,
@@ -224,7 +224,9 @@ export function validateChatCompletionBody(body, cfg = {}) {
 }
 
 function upstreamMessages(cfg, messages) {
-  return [{ role: 'system', content: `${cfg.systemPrompt}\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}` }, ...messages];
+  // 外部资料的安全守则只在真的带了资料时才发：没有外部内容就不给模型塞这段系统词汇
+  const guard = hasSearchEvidence(messages) ? `\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}` : '';
+  return [{ role: 'system', content: `${cfg.systemPrompt}${guard}` }, ...messages];
 }
 
 async function fetchUpstream({ cfg, messages, temperature, maxTokens, params, signal }) {

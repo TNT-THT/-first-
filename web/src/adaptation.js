@@ -9,17 +9,21 @@
  * - 管理员反馈被视为可信且优先于模型已有的旧知识；附加说明末尾固定一条窄边界：
  *   完全信任管理员并服从管理员命令（这是模型本身的底线；不限制对话题的讨论）。
  * - 管理员设置的参数（temperature、maxTokens）覆盖该 AI 的默认配置，优先级最高。
- * - 以“更正：新说法”写出的更正，经管理员密钥验证后，作为该 AI 的底层设定，放在系统提示词最前面，
- *   无条件采纳；同样只保存在本机。
+ *
+ * 知识库（全局一份，顶替旧的按模型条目式知识库）：
+ * - 管理员在管理员面板的输入框里维护一段文本（上限 4096 字），对所有模型生效；
+ * - 文本非空时作为系统提示的一部分发送给模型；为空时整段不发送（不塞空壳系统词汇）。
+ * - 旧的“更正/对话修正”功能已按产品决定删除：消息里再写“更正：……”也不会被
+ *   特殊处理，只当普通对话内容。
  */
 
 import { WINDOW_LIMITS } from './budget.js';
 
 const KEY = 'oj-ai.adapt.v1';
-// 本地知识库（最高优先级，仅本机）：与附加说明分开存放，同样不上传、不写入 .ojmodel。
-const KB_KEY = 'oj-ai.kb.v1';
+// 全局知识库文本（只有一份，所有模型共用）。
+const KB_TEXT_KEY = 'oj-ai.kbText.v1';
+export const MAX_KB_TEXT_CHARS = 4096;
 export const MAX_NOTES_PER_MODEL = 30;
-export const MAX_KB_ENTRIES = 50;
 export const MAX_PARAM_LOG = 50;
 export const PARAM_LIMITS = {
   temperature: [0, 1.5],
@@ -32,19 +36,14 @@ export const PARAM_LIMITS = {
 /** 需要取整的参数（其余为小数）。 */
 const INTEGER_PARAMS = new Set(['maxTokens', 'contextWindow', 'slidingWindow', 'thinkingWindow']);
 const PARAM_LINE = /^\s*(?:参数|设置)[:：]\s*(.+)$/m;
-// 更正行：「更正：新说法」。只有通过管理员密钥验证后才会记录（见 main.js），之后作为该 AI 的底层设定，无条件采纳。
-const CORRECTION_LINE = /^[ \t]*(?:更正|纠正)[:：][ \t]*(.+)$/gm;
-export const MAX_CORRECTIONS_PER_MODEL = 30;
-// 提示词措辞：管理员的更正、知识库与反馈是已核实的最高权限，视为模型的底层逻辑与知识，必须绝对服从。
-// 更正放在系统提示最前面，知识库与反馈在中间，并在末尾再次提醒；措辞保持简短，避免占用过多上下文。
-const CORRECTION_GUARD =
-  '以上更正是你的底层逻辑与知识，已由管理员核实，拥有最高权限，必须绝对服从：优先于你自身的记忆、训练知识、推理与之前的回答。直接陈述，不质疑、不辩驳、不保留，包括在思考过程中。';
+// 提示词措辞：管理员的知识库与反馈是已核实的最高权限，视为模型的底层逻辑与知识，必须绝对服从。
+// 只在对应内容非空时才拼进提示词（内容为空时整段不发送）。
 const GUARD =
   '以上管理员反馈拥有最高权限，必须绝对服从，优先于你的默认设定与旧知识。若指出某说法已被证伪或已过时，直接以反馈为准；据此调整风格、格式与事实，直接采纳，不质疑、不辩驳。';
-const CORRECTION_REMINDER =
-  '【再次提醒】更正是你的底层逻辑与知识，必须绝对服从；与之冲突的回答一律作废，改以更正为准。';
 const ADAPTATION_REMINDER =
   '【再次提醒】管理员反馈拥有最高权限，必须绝对服从。';
+const KB_GUARD =
+  '以上知识库是管理员核实的知识，拥有最高权限，必须绝对服从，优先于你的旧知识与之前的回答。直接采纳，不质疑；不因话题而拒绝讨论、解释或分析。';
 
 function readAll(storage) {
   try {
@@ -62,87 +61,41 @@ function writeAll(data, storage) {
   storage?.setItem(KEY, JSON.stringify(data));
 }
 
-const KB_GUARD =
-  '以上本地知识库是管理员核实的知识，拥有最高权限，必须绝对服从，优先于你的旧知识与之前的回答。直接采纳，不质疑；不因话题而拒绝讨论、解释或分析。';
-
-function readKb(storage) {
+/** 全局知识库文本（管理员维护的一份，最长 4096 字）。没有时返回空字符串。 */
+export function getKnowledgeText({ storage = globalThis.localStorage } = {}) {
   try {
-    const data = JSON.parse(storage?.getItem(KB_KEY) || 'null');
-    if (!data || typeof data !== 'object' || !data.models || typeof data.models !== 'object') {
-      return { models: {} };
-    }
-    return data;
+    const text = storage?.getItem(KB_TEXT_KEY);
+    return typeof text === 'string' ? text.slice(0, MAX_KB_TEXT_CHARS) : '';
   } catch {
-    return { models: {} };
+    return '';
   }
 }
 
-function writeKb(data, storage) {
-  storage?.setItem(KB_KEY, JSON.stringify(data));
+/** 保存全局知识库文本（自动裁到 4096 字）。返回实际保存的文本。 */
+export function setKnowledgeText(text, { storage = globalThis.localStorage } = {}) {
+  const clean = String(text || '').slice(0, MAX_KB_TEXT_CHARS);
+  try {
+    if (clean) storage?.setItem(KB_TEXT_KEY, clean);
+    else storage?.removeItem(KB_TEXT_KEY);
+  } catch {
+    /* 存储不可用时忽略 */
+  }
+  return clean;
 }
 
 /**
- * 把一条管理员信息写入某个模型的本地知识库（同步自管理员反馈）。
- * 同一模型内完全相同的文字只保存一次；超过上限时丢弃最旧的。返回新条目，未写入时返回 null。
+ * 生成知识库提示块（放在基础提示词之后、附加说明之前）。
+ * 知识库为空时返回空字符串——不把标题、守则等系统词汇发给模型。
  */
-export function addKnowledge(
-  modelId,
-  text,
-  { storage = globalThis.localStorage, now = Date.now(), question = '' } = {},
-) {
-  const body = String(text || '').trim();
-  if (!modelId || !body) return null;
-  const data = readKb(storage);
-  const entry = data.models[modelId] && Array.isArray(data.models[modelId].entries)
-    ? data.models[modelId]
-    : { entries: [] };
-  if (entry.entries.some((e) => e.text === body)) return null;
-  const item = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now, ...questionField(question) };
-  entry.entries = [...entry.entries, item].slice(-MAX_KB_ENTRIES);
-  data.models[modelId] = entry;
-  writeKb(data, storage);
-  return item;
-}
-
-/** 某模型的本地知识库条目（最新的在后）。 */
-export function listKnowledge(modelId, { storage = globalThis.localStorage } = {}) {
-  const entry = readKb(storage).models[modelId];
-  return entry && Array.isArray(entry.entries) ? entry.entries : [];
-}
-
-/** 删除一条知识库条目。删除后若该模型没有条目，则移除该模型的记录。 */
-export function removeKnowledge(modelId, entryId, { storage = globalThis.localStorage } = {}) {
-  const data = readKb(storage);
-  const entry = data.models[modelId];
-  if (!entry) return;
-  entry.entries = (entry.entries || []).filter((e) => e.id !== entryId);
-  if (!entry.entries.length) delete data.models[modelId];
-  writeKb(data, storage);
-}
-
-/** 清空某模型的本地知识库。 */
-export function clearKnowledge(modelId, { storage = globalThis.localStorage } = {}) {
-  const data = readKb(storage);
-  if (!data.models[modelId]) return;
-  delete data.models[modelId];
-  writeKb(data, storage);
-}
-
-/**
- * 生成知识库提示块，放在基础提示词之后、附加说明之前。
- * 输出全部条目（按时间先后排列）；数量上限在写入时已限制。没有条目时返回空字符串。
- */
-export function buildKnowledgePrompt(modelId, { storage = globalThis.localStorage } = {}) {
-  const entries = listKnowledge(modelId, { storage });
-  if (!entries.length) return '';
-  const picked = entries.map((x) => `- ${x.text}`);
-  return `\n\n【本地知识库（管理员提供，仅本机，最高优先级）】\n${picked.join('\n')}\n${KB_GUARD}`;
+export function buildKnowledgePrompt({ storage = globalThis.localStorage } = {}) {
+  const text = getKnowledgeText({ storage }).trim();
+  if (!text) return '';
+  return `\n\n【知识库（管理员提供，最高优先级）】\n${text}\n${KB_GUARD}`;
 }
 
 function entryFor(data, modelId) {
-  if (!data.models[modelId]) data.models[modelId] = { notes: [], params: {}, log: [], corrections: [] };
+  if (!data.models[modelId]) data.models[modelId] = { notes: [], params: {}, log: [] };
   if (!Array.isArray(data.models[modelId].log)) data.models[modelId].log = [];
-  if (!Array.isArray(data.models[modelId].corrections)) data.models[modelId].corrections = [];
   return data.models[modelId];
 }
 
@@ -182,55 +135,23 @@ function stripParamLine(text) {
   return String(text || '').replace(PARAM_LINE, '').trim();
 }
 
-/** 从反馈中解析所有更正行，返回 [{text}]（空内容的行不算更正）。 */
-export function parseCorrections(text) {
-  const out = [];
-  for (const m of String(text || '').matchAll(CORRECTION_LINE)) {
-    const body = m[1].trim();
-    if (body) out.push({ text: body });
-  }
-  return out;
-}
-
-/** 去掉反馈中的更正行：更正行不进入附加说明或知识库。 */
-export function stripCorrectionLines(text) {
-  return String(text || '').replace(CORRECTION_LINE, '').trim();
-}
-
 /**
  * 记录一条管理员反馈，归属于 modelId（即产生被反馈回答的那个 AI）。
- * 更正行只有在 allowCorrections 为 true（已通过管理员密钥验证）时才会保存为底层设定；
- * 否则更正行被丢弃，既不保存为更正，也不进入附加说明。
- * 返回实际记录的内容 {note?, params?, corrections?}；没有可记录内容时返回 null。
+ * 返回实际记录的内容 {note?, params?, changes?}；没有可记录内容时返回 null。
  */
 export function recordFeedback(
   modelId,
   text,
-  { storage = globalThis.localStorage, now = Date.now(), allowCorrections = false, question = '' } = {},
+  { storage = globalThis.localStorage, now = Date.now() } = {},
 ) {
   if (!modelId) return null;
   const params = parseFeedbackParams(text);
-  const corrections = allowCorrections ? parseCorrections(text) : [];
-  const body = stripParamLine(stripCorrectionLines(text));
-  if (!params && !body && !corrections.length) return null;
+  const body = stripParamLine(text);
+  if (!params && !body) return null;
 
   const data = readAll(storage);
   const entry = entryFor(data, modelId);
   const result = {};
-  if (corrections.length) {
-    // 同一模型内完全相同的更正只保存一次（例如重新生成回答时会再次发送同一条消息）
-    const known = new Set(entry.corrections.map((c) => c.text));
-    const items = corrections
-      .filter((c) => !known.has(c.text))
-      .map((c) => ({
-        id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`,
-        text: c.text,
-        ts: now,
-        ...questionField(question),
-      }));
-    entry.corrections = [...entry.corrections, ...items].slice(-MAX_CORRECTIONS_PER_MODEL);
-    result.corrections = items;
-  }
   if (params) {
     const changes = [];
     for (const [key, value] of Object.entries(params)) {
@@ -245,8 +166,6 @@ export function recordFeedback(
     const note = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now };
     entry.notes = [...entry.notes, note].slice(-MAX_NOTES_PER_MODEL);
     result.note = note;
-    // 同步纳入本地知识库（最高优先级）；附加说明本身保持不变
-    result.kb = addKnowledge(modelId, body, { storage, now, question });
   }
   writeAll(data, storage);
   return result;
@@ -270,7 +189,7 @@ export function getModelParams(modelId, { storage = globalThis.localStorage } = 
 
 /** 有适应记录的模型 id 列表。 */
 export function adaptedModelIds({ storage = globalThis.localStorage } = {}) {
-  return [...new Set([...Object.keys(readAll(storage).models), ...Object.keys(readKb(storage).models)])];
+  return Object.keys(readAll(storage).models);
 }
 
 export function removeNote(modelId, noteId, { storage = globalThis.localStorage } = {}) {
@@ -278,39 +197,13 @@ export function removeNote(modelId, noteId, { storage = globalThis.localStorage 
   const entry = data.models[modelId];
   if (!entry) return;
   entry.notes = (entry.notes || []).filter((n) => n.id !== noteId);
-  if (!entry.notes.length && !Object.keys(entry.params || {}).length && !(entry.corrections || []).length) {
-    delete data.models[modelId];
-  }
-  writeAll(data, storage);
-}
-
-/** 某模型的更正列表（最新的在后）。 */
-export function listCorrections(modelId, { storage = globalThis.localStorage } = {}) {
-  const entry = readAll(storage).models[modelId];
-  if (!entry || !Array.isArray(entry.corrections)) return [];
-  return entry.corrections.map((c) => ({
-    id: c.id,
-    text: c.text ?? c.next,
-    ts: c.ts,
-    question: c.question || '',
-    from: c.from || '',
-  }));
-}
-
-/** 删除一条更正。删除后若该模型没有任何记录，则移除该模型的记录。 */
-export function removeCorrection(modelId, correctionId, { storage = globalThis.localStorage } = {}) {
-  const data = readAll(storage);
-  const entry = data.models[modelId];
-  if (!entry) return;
-  entry.corrections = (entry.corrections || []).filter((c) => c.id !== correctionId);
-  if (!entry.corrections.length && !(entry.notes || []).length && !Object.keys(entry.params || {}).length) {
+  if (!entry.notes.length && !Object.keys(entry.params || {}).length) {
     delete data.models[modelId];
   }
   writeAll(data, storage);
 }
 
 export function clearModelAdaptation(modelId, { storage = globalThis.localStorage } = {}) {
-  clearKnowledge(modelId, { storage });
   const data = readAll(storage);
   if (!data.models[modelId]) return;
   delete data.models[modelId];
@@ -328,78 +221,15 @@ export function buildAdaptationPrompt(modelId, { storage = globalThis.localStora
   return `\n\n【管理员反馈（仅本机记录，最高优先级，请采纳）】\n${picked.join('\n')}\n${GUARD}`;
 }
 
-/** 只有非空问题才写入记录（旧记录没有该字段）。 */
-function questionField(question) {
-  const q = String(question || '').trim();
-  return q ? { question: q } : {};
-}
-
 /**
- * 固化训练数据（可选，仅本机，供 training/ojtrain.py solidify 使用）。
- * 每条知识库条目与每条更正，若记录了触发它的用户问题，则生成一条样本：问题 → 内容。
- * 没有问题的早期记录无法构成样本，计入 skipped。完全相同的样本只保留一条。
- * 返回 {samples, counts}；counts = {correction, knowledge, skipped, duplicate}。
- */
-export function buildSolidifyRecords(modelId, { storage = globalThis.localStorage } = {}) {
-  const items = [
-    ...listCorrections(modelId, { storage }).map((c) => ({ kind: 'correction', ...c })),
-    ...listKnowledge(modelId, { storage }).map((k) => ({ kind: 'knowledge', ...k })),
-  ].sort((a, b) => (a.ts || 0) - (b.ts || 0));
-  const counts = { correction: 0, knowledge: 0, skipped: 0, duplicate: 0 };
-  const seen = new Set();
-  const samples = [];
-  for (const it of items) {
-    const q = String(it.question || '').trim();
-    const a = String(it.text || '').trim();
-    if (!q || !a) {
-      counts.skipped += 1;
-      continue;
-    }
-    const key = `${q}\u0000${a}`;
-    if (seen.has(key)) {
-      counts.duplicate += 1;
-      continue;
-    }
-    seen.add(key);
-    samples.push({ messages: [{ role: 'user', content: q }, { role: 'assistant', content: a }] });
-    counts[it.kind] += 1;
-  }
-  return { samples, counts };
-}
-
-/** 固化训练数据的 JSONL 文本（每行一个 {messages} 样本）。 */
-export function solidifyJsonl(modelId, { storage = globalThis.localStorage } = {}) {
-  const { samples, counts } = buildSolidifyRecords(modelId, { storage });
-  const text = samples.map((s) => JSON.stringify(s)).join('\n') + (samples.length ? '\n' : '');
-  return { text, counts };
-}
-
-/**
- * 生成更正块（放在系统提示词最前面，作为底层设定）。输出全部更正（按时间先后排列）。
- * 没有更正时返回空字符串。
- */
-export function buildCorrectionPrompt(modelId, { storage = globalThis.localStorage } = {}) {
-  const items = listCorrections(modelId, { storage });
-  if (!items.length) return '';
-  const picked = items.map((x) => `- ${x.text}`);
-  return `【管理员更正（已验证密钥，仅本机，底层逻辑与知识，必须绝对服从）】\n${picked.join('\n')}\n${CORRECTION_GUARD}`;
-}
-
-/**
- * 组合系统提示词：更正（底层设定）→ 基础提示 → 本地知识库 → 附加说明。
- * 没有更正、知识库与附加说明时，结果与原来完全相同。
+ * 组合系统提示词：基础提示 → 全局知识库 → 附加说明（末尾再提醒一次）。
+ * 知识库与附加说明为空时不添加任何对应段落，结果与基础提示相同。
  */
 export function composeSystemPrompt(base, modelId, options) {
-  const correction = buildCorrectionPrompt(modelId, options);
-  const head = correction ? `${correction}\n\n` : '';
-  const knowledge = buildKnowledgePrompt(modelId, options);
+  const knowledge = buildKnowledgePrompt(options);
   const adaptation = buildAdaptationPrompt(modelId, options);
-  // 末尾再次提醒（越靠近末尾，模型越容易注意到）；没有对应记录时不添加
-  const tail = [
-    correction ? CORRECTION_REMINDER : '',
-    adaptation ? ADAPTATION_REMINDER : '',
-  ].filter(Boolean).join('\n');
-  return `${head}${base || ''}${knowledge}${adaptation}${tail ? `\n\n${tail}` : ''}`;
+  const tail = adaptation ? `\n\n${ADAPTATION_REMINDER}` : '';
+  return `${base || ''}${knowledge}${adaptation}${tail}`;
 }
 
 /**
@@ -467,7 +297,7 @@ export function suggestParams(text, current = {}) {
 
 /**
  * 机械识别：管理员的消息只是参数调整指令（已直接修改了参数、且没有提问）时，返回固定提示，不调用模型。
- * 参数变更来自 feedback.changes（[{key, from, to}]）；feedback.extra 为同时记录的附加说明或更正描述；
+ * 参数变更来自 feedback.changes（[{key, from, to}]）；feedback.extra 为同时记录的附加说明描述；
  * feedback.label 为生效的 AI 名称；feedback.released 表示是否已释放多余显存。
  * 含有问号（？或 ?）的消息视为还有问题，返回 null，仍交给模型回答。没有参数变更时也返回 null。
  */
@@ -576,91 +406,3 @@ function newId(now) {
   return `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`;
 }
 
-/**
- * 跨模型迁移（仅本机）：把源 AI 中所选的更正与知识库条目复制到目标 AI。
- *
- * - 复制而非移动：源 AI 的记录保持不变，目标 AI 的条目带有 from 字段（来源 AI 的 id）。
- * - 选择性：selection = {corrections: [id], knowledge: [id]}，只迁移列出的条目；未列出的不动。
- * - 对话训练信息：includeTraining 为 false 时，迁移的条目去掉“问题”字段，因此不会成为目标 AI 的训练样本，
- *   只作为提示词内容使用；为 true 时保留问题，之后可在目标 AI 中导出固化数据。
- * - 更正会成为目标 AI 的底层设定（无条件采纳），因此迁移更正必须 allowCorrections: true，
- *   调用方需先通过管理员密钥验证。
- * - 目标 AI 中已存在完全相同文字的条目会跳过；超过上限时丢弃最旧的。
- *
- * 返回 {corrections, knowledge, duplicate, missing}：实际新增条数、重复跳过条数、源中已不存在的条数。
- */
-export function migrateAdaptation(
-  sourceId,
-  targetId,
-  { corrections = [], knowledge = [] } = {},
-  { storage = globalThis.localStorage, now = Date.now(), includeTraining = true, allowCorrections = false } = {},
-) {
-  if (!sourceId || !targetId) throw new Error('请选择源 AI 与目标 AI');
-  if (sourceId === targetId) throw new Error('源 AI 与目标 AI 不能相同');
-  const wantCorr = new Set(corrections);
-  const wantKb = new Set(knowledge);
-  if (wantCorr.size && !allowCorrections) throw new Error('迁移更正需要先通过管理员密钥验证');
-
-  const srcEntry = readAll(storage).models[sourceId];
-  const srcCorr = srcEntry && Array.isArray(srcEntry.corrections) ? srcEntry.corrections : [];
-  const srcKb = readKb(storage).models[sourceId]?.entries || [];
-  const pickedCorr = srcCorr.filter((c) => wantCorr.has(c.id));
-  const pickedKb = srcKb.filter((k) => wantKb.has(k.id));
-  const counts = { corrections: 0, knowledge: 0, duplicate: 0, missing: 0 };
-  counts.missing = wantCorr.size - pickedCorr.length + (wantKb.size - pickedKb.length);
-
-  const make = (src) => {
-    const text = String(src.text ?? src.next ?? '').trim();
-    const question = includeTraining ? questionField(src.question) : {};
-    return { id: newId(now), text, ts: now, from: sourceId, ...question };
-  };
-
-  // 更正
-  if (pickedCorr.length) {
-    const data = readAll(storage);
-    const existing = data.models[targetId]?.corrections || [];
-    const known = new Set(existing.map((c) => c.text ?? c.next));
-    const added = [];
-    for (const src of pickedCorr) {
-      const item = make(src);
-      if (!item.text) continue;
-      if (known.has(item.text)) {
-        counts.duplicate += 1;
-        continue;
-      }
-      known.add(item.text);
-      added.push(item);
-    }
-    if (added.length) {
-      const entry = entryFor(data, targetId);
-      entry.corrections = [...entry.corrections, ...added].slice(-MAX_CORRECTIONS_PER_MODEL);
-      writeAll(data, storage);
-      counts.corrections = added.length;
-    }
-  }
-
-  // 知识库
-  if (pickedKb.length) {
-    const kbData = readKb(storage);
-    const existing = kbData.models[targetId]?.entries || [];
-    const known = new Set(existing.map((e) => e.text));
-    const added = [];
-    for (const src of pickedKb) {
-      const item = make(src);
-      if (!item.text) continue;
-      if (known.has(item.text)) {
-        counts.duplicate += 1;
-        continue;
-      }
-      known.add(item.text);
-      added.push(item);
-    }
-    if (added.length) {
-      kbData.models[targetId] = { entries: [...existing, ...added].slice(-MAX_KB_ENTRIES) };
-      writeKb(kbData, storage);
-      counts.knowledge = added.length;
-    }
-  }
-
-  return counts;
-}

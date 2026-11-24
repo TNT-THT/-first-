@@ -28,6 +28,28 @@ export function checkPassword(expected, input) {
 }
 
 /**
+ * 账号令牌：u1.<账号id>.<过期时间戳ms>.<签名>，签名覆盖账号 id 与过期时间。
+ * 与上面的匿名会话令牌分开命名空间，互不能冒充。
+ */
+export function createUserToken(secret, userId, ttlMs, now = Date.now()) {
+  const exp = String(now + ttlMs);
+  const sig = createHmac('sha256', secret).update(`u1.${userId}.${exp}`).digest('hex');
+  return { token: `u1.${userId}.${exp}.${sig}`, expiresAt: Number(exp) };
+}
+
+/** 校验账号令牌，成功返回账号 id，失败返回 null。 */
+export function verifyUserToken(secret, token, now = Date.now()) {
+  if (typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 4 || parts[0] !== 'u1') return null;
+  const [, userId, exp, sig] = parts;
+  if (!userId || !/^\d+$/.test(exp)) return null;
+  if (Number(exp) <= now) return null;
+  const expected = createHmac('sha256', secret).update(`u1.${userId}.${exp}`).digest('hex');
+  return safeEqual(sig, expected) ? userId : null;
+}
+
+/**
  * 从请求中提取 Bearer 令牌：优先 Authorization: Bearer <token>，
  * 其次 x-api-key 头（方便不方便设置 Authorization 的调用方）。
  */

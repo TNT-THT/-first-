@@ -115,15 +115,14 @@ test('API Key 比较支持多个密钥且空白配置一律拒绝', () => {
   assert.equal(checkApiKey(['first-key'], ''), false);
 });
 
-test('API 管理员口令必须足够长且与网站口令不同', () => {
-  const base = { APP_PASSWORD: 'correct-horse-battery' };
-  const same = loadConfig({ ...base, API_ADMIN_PASSWORD: 'correct-horse-battery' });
-  assert.ok(validateConfig(same).some((error) => error.includes('必须与 APP_PASSWORD 不同')));
+test('API 管理员口令必须足够长；入口密码已删除，不再必填', () => {
+  // 不再要求 APP_PASSWORD：正常使用免登录，仅管理员口令保留长度要求
+  assert.deepEqual(validateConfig(loadConfig({})), []);
 
-  const weak = loadConfig({ ...base, API_ADMIN_PASSWORD: 'short' });
+  const weak = loadConfig({ API_ADMIN_PASSWORD: 'short' });
   assert.ok(validateConfig(weak).some((error) => error.includes('至少 16 位')));
 
-  const valid = loadConfig({ ...base, API_ADMIN_PASSWORD: 'another-long-secret-123' });
+  const valid = loadConfig({ API_ADMIN_PASSWORD: 'another-long-secret-123' });
   assert.deepEqual(validateConfig(valid), []);
 });
 

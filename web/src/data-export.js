@@ -11,9 +11,9 @@ export const DATA_EXPORT_VERSION = 1;
 
 export const DATA_SECTIONS = [
   { id: 'sessions', key: 'oj-ai.sessions.v1', label: '会话记录（对话历史）' },
-  { id: 'adaptation', key: 'oj-ai.adapt.v1', label: '管理员说明、参数与更正' },
-  { id: 'knowledge', key: 'oj-ai.kb.v1', label: '本地知识库' },
-  { id: 'imageAdmin', key: 'oj-ai.image.v1', label: '生图管理员参数、风格提示、更正与知识库' },
+  { id: 'adaptation', key: 'oj-ai.adapt.v1', label: '管理员说明与参数' },
+  { id: 'knowledge', key: 'oj-ai.kbText.v1', label: '全局知识库（文本）' },
+  { id: 'imageAdmin', key: 'oj-ai.image.v1', label: '生图管理员参数与风格提示' },
   { id: 'localModels', key: 'oj-ai.localModels', label: '新建AI清单（不含模型权重）' },
   { id: 'usage', key: 'oj-ai.usage.v1', label: '用量统计（仅汇总数字，不含对话内容）' },
 ];

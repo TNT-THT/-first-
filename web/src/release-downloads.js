@@ -16,6 +16,8 @@ export const SITE_PACKAGE_ASSETS = [
   'site-darwin-x64.zip',
   'site-linux-x64.zip',
 ];
+/** 局域网服务器包（Windows）的文件名，与 scripts/pack-server.mjs 一致。 */
+export const SERVER_PACKAGE_ASSET = 'server-win-x64.zip';
 /** 一站式训练包的文件名，与 scripts/pack-training.mjs 一致。 */
 export const TRAINING_PACKAGE_ASSET = 'oj-training.zip';
 /** 独立软件「LLM托管平台——天蓝色1.0」的文件名，与 standalone/build-standalone.mjs 一致。 */
@@ -67,7 +69,7 @@ export function releasePageUrl(release) {
     : `https://github.com/${repo}/releases/tag/${encodeURIComponent(tag)}`;
 }
 
-/** 是否为 Release 中发布的资源文件名（网站包、训练包或独立软件）。 */
+/** 是否为 Release 中发布的资源文件名（网站包、服务器包、训练包或独立软件）。 */
 export function isReleaseAsset(file) {
-  return SITE_PACKAGE_ASSETS.includes(file) || file === TRAINING_PACKAGE_ASSET || STANDALONE_ASSETS.includes(file);
+  return SITE_PACKAGE_ASSETS.includes(file) || file === SERVER_PACKAGE_ASSET || file === TRAINING_PACKAGE_ASSET || STANDALONE_ASSETS.includes(file);
 }

@@ -10,7 +10,8 @@ export function loadConfig(env = process.env) {
     port: Number(env.PORT || 3000),
     host: env.HOST || '0.0.0.0',
 
-    // 登录密码（必填）。留空则拒绝启动，避免被陌生人白嫖你的 API 额度。
+    // 旧版网站入口密码：已按产品决定删除入口锁，正常使用免登录。本字段仅为
+    // 兼容旧部署读取，不再参与任何校验（不要再依赖它做访问控制）。
     appPassword: env.APP_PASSWORD || '',
     // 用于签名令牌的密钥；未设置时每次启动随机生成（重启后需要重新登录）。
     sessionSecret: env.SESSION_SECRET || randomBytes(32).toString('hex'),
@@ -58,6 +59,8 @@ export function loadConfig(env = process.env) {
     apiAdminPassword: env.API_ADMIN_PASSWORD || '',
     // 网页创建的 API Key 只保存摘要；该文件/目录需要持久化备份，并限制仅服务器用户可读。
     apiKeysFile: path.resolve(env.API_KEYS_FILE || path.join(process.cwd(), 'data', 'api-keys.json')),
+    // 网页账号（注册/登录 + 每账号对话与设定）：密码只存 scrypt 摘要，0600 保存。
+    accountsFile: path.resolve(env.OJ_ACCOUNTS_FILE || path.join(process.cwd(), 'data', 'accounts.json')),
     // 服务版网页目录：独立软件/网站包启动器显式传入（OJ_WEB_DIST）。
     // 留空时服务端自动按 web/dist-api → web/dist 找现成构建产物，用户无需执行任何构建命令。
     webDist: env.OJ_WEB_DIST || '',
@@ -73,7 +76,7 @@ export function loadConfig(env = process.env) {
     corsOrigins: parseList(env.CORS_ORIGINS) || ['*'],
 
     // ---- 本机大模型（llama.cpp 原生引擎，运行 27B~671B 级 GGUF 模型）----
-    // 默认启用：模型管理接口要求 API 管理员令牌，聊天要求网站登录，不会匿名开放。
+    // 默认启用：模型管理接口要求 API 管理员令牌；普通聊天免登录（入口锁已删除），账号登录只用于按账号同步数据。
     // OJ_NATIVE_MODELS=0 关闭。权重与运行库都放在 nativeDataDir，不进安装包。
     nativeModelsEnabled: env.OJ_NATIVE_MODELS ? env.OJ_NATIVE_MODELS !== '0' : true,
     nativeDataDir: path.resolve(env.OJ_NATIVE_DATA_DIR || path.join(process.cwd(), 'data', 'native')),
@@ -114,13 +117,8 @@ function parseList(...values) {
 
 export function validateConfig(cfg) {
   const errors = [];
-  if (!cfg.appPassword) errors.push('缺少 APP_PASSWORD（登录密码）');
-  if (cfg.appPassword && cfg.appPassword.length < 8) errors.push('APP_PASSWORD 长度至少 8 位');
   if (cfg.apiAdminPassword && cfg.apiAdminPassword.length < 16) {
     errors.push('API_ADMIN_PASSWORD 长度至少 16 位（或者留空以禁用网页管理员控制台）');
-  }
-  if (cfg.apiAdminPassword && cfg.appPassword && cfg.apiAdminPassword === cfg.appPassword) {
-    errors.push('API_ADMIN_PASSWORD 必须与 APP_PASSWORD 不同');
   }
   if (!Number.isInteger(cfg.apiMaxTokens) || cfg.apiMaxTokens < 1 || cfg.apiMaxTokens > 1_000_000) {
     errors.push('API_MAX_TOKENS 必须是 1 到 1000000 之间的整数');

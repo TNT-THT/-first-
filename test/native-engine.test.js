@@ -115,16 +115,6 @@ async function setup(t) {
   return { base: `http://127.0.0.1:${server.address().port}`, engine };
 }
 
-async function login(base, password = PASSWORD) {
-  const res = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ password }),
-  });
-  assert.equal(res.status, 200);
-  return (await res.json()).token;
-}
-
 async function adminLogin(base) {
   const res = await fetch(`${base}/api/admin/api-keys/login`, {
     method: 'POST',
@@ -146,36 +136,35 @@ test('状态与量化：目录公开可读，量化按仓库文件解析且带�
   assert.equal(status.models.length, 11);
   assert.equal(status.models.find((m) => m.id === MODEL_ID).downloaded.length, 0);
 
-  const token = await login(base);
-  const res = await fetch(`${base}/api/native/models/${MODEL_ID}/quants`, { headers: auth(token) });
+  // 入口登录已删除：量化查询匿名可读
+  const res = await fetch(`${base}/api/native/models/${MODEL_ID}/quants`);
   assert.equal(res.status, 200);
   const { quants } = await res.json();
   assert.deepEqual(quants.map((q) => q.quant), ['Q2_K', 'Q4_K_M']); // 按体积升序，mmproj 被排除
   assert.equal(quants.find((q) => q.quant === 'Q4_K_M').files, 2);
   assert.ok(quants.every((q) => q.ramGB > 0));
 
-  const noAuth = await fetch(`${base}/api/native/models/${MODEL_ID}/quants`);
-  assert.equal(noAuth.status, 401, '量化查询需要网站登录');
 });
 
 test('下载→加载→聊天→/v1→用量：整条链路与权限边界', { timeout: 60000 }, async (t) => {
   const { base } = await setup(t);
   const admin = await adminLogin(base);
-  const session = await login(base);
+  // 普通聊天免登录（入口锁已删除）：用不带令牌的请求头代表匿名用户
+  const session = '';
 
   // 未下载时聊天应明确 409，而不是假装能跑
   const early = await fetch(`${base}/api/native/chat`, {
     method: 'POST',
-    headers: auth(session),
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: MODEL_ID, messages: [{ role: 'user', content: '你好' }] }),
   });
   assert.equal(early.status, 409);
   assert.match((await early.json()).error, /尚未下载/);
 
-  // 普通会话不能下载权重（需要 API 管理员）
+  // 匿名用户不能下载权重（需要 API 管理员）
   const forbidden = await fetch(`${base}/api/native/models/${MODEL_ID}/download`, {
     method: 'POST',
-    headers: auth(session),
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ quant: 'Q4_K_M' }),
   });
   assert.equal(forbidden.status, 401);
@@ -199,7 +188,7 @@ test('下载→加载→聊天→/v1→用量：整条链路与权限边界', { 
   // 网页聊天（流式）：思考被折叠为 <think>
   const chat = await fetch(`${base}/api/native/chat`, {
     method: 'POST',
-    headers: auth(session),
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: MODEL_ID, messages: [{ role: 'user', content: '你好' }], stream: true }),
   });
   assert.equal(chat.status, 200);
@@ -243,7 +232,7 @@ test('下载→加载→聊天→/v1→用量：整条链路与权限边界', { 
   // 未知模型 404
   const unknown = await fetch(`${base}/api/native/chat`, {
     method: 'POST',
-    headers: auth(session),
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ model: 'Nope-999B', messages: [{ role: 'user', content: 'x' }] }),
   });
   assert.equal(unknown.status, 404);

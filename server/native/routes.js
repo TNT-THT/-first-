@@ -88,8 +88,8 @@ function errJson(res, err, fallback = '本机大模型服务出错') {
  * reasoning_content 会折叠为 <think>…</think>，与网页端思考展示逻辑一致。
  * @returns {Promise<{content: string, usage: object|null}>}
  */
-export async function streamNativeToHttp(engine, { model, messages, temperature, maxTokens, signal, res, onText }) {
-  const upstream = await engine.chatCompletion({ model, messages, stream: true, temperature, maxTokens, signal });
+export async function streamNativeToHttp(engine, { model, messages, temperature, maxTokens, signal, res, onText, thinking }) {
+  const upstream = await engine.chatCompletion({ model, messages, stream: true, temperature, maxTokens, signal, thinking });
   res.status(200);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -140,8 +140,8 @@ export async function streamNativeToHttp(engine, { model, messages, temperature,
 }
 
 /** 非流式：返回 OpenAI 风格的完整响应对象。 */
-export async function nativeCompletionJson(engine, { model, messages, temperature, maxTokens, signal }) {
-  const upstream = await engine.chatCompletion({ model, messages, stream: false, temperature, maxTokens, signal });
+export async function nativeCompletionJson(engine, { model, messages, temperature, maxTokens, signal, thinking }) {
+  const upstream = await engine.chatCompletion({ model, messages, stream: false, temperature, maxTokens, signal, thinking });
   const data = await upstream.json();
   const choice = data.choices?.[0] || {};
   const message = foldMessageReasoning(choice.message || { role: 'assistant', content: '' });

@@ -65,7 +65,7 @@ async function login(base, url, password) {
   return (await res.json()).token;
 }
 
-const auth = (token) => ({ authorization: `Bearer ${token}`, 'content-type': 'application/json' });
+const auth = (token) => (token ? { authorization: `Bearer ${token}`, 'content-type': 'application/json' } : { 'content-type': 'application/json' });
 
 async function postChunk(base, admin, { offset, bytes }) {
   return fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/browser-download/chunk`, {
@@ -84,7 +84,7 @@ async function postChunk(base, admin, { offset, bytes }) {
 test('浏览器通道：清单分组、全链下载、续传、错位保护、收尾校验', { timeout: 60000 }, async (t) => {
   const { base, engine } = await setup(t);
   const admin = await login(base, '/api/admin/api-keys/login', ADMIN);
-  const session = await login(base, '/api/login', PASSWORD);
+  const session = null; // 入口登录已删除：普通接口匿名访问，auth(session) 仅保留 content-type
 
   // 量化清单：浏览器传文件树，本地分组；含逃逸路径的恶意文件被过滤
   const evilTree = [...TREE, { type: 'file', path: '../evil-Q8_0.gguf', size: 6, lfs: { size: 6 } }];
@@ -94,11 +94,11 @@ test('浏览器通道：清单分组、全链下载、续传、错位保护、�
   assert.equal(preview.status, 200);
   const previewData = await preview.json();
   assert.deepEqual(previewData.quants.map((q) => q.quant), ['Q4_K_M']);
-  // 未登录不能用清单预览
+  // 清单预览匿名可读（入口锁已删除后）
   const noAuth = await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/quants-preview`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ files: TREE }),
   });
-  assert.equal(noAuth.status, 401);
+  assert.equal(noAuth.status, 200, '清单预览匿名可读（入口锁已删除）');
   // 服务端直连清单（兜底）与浏览器通道结果一致
   const direct = await (await fetch(`${base}/api/native/models/${encodeURIComponent(MODEL_ID)}/quants`, { headers: auth(session) })).json();
   assert.deepEqual(direct.quants.map((q) => q.quant), previewData.quants.map((q) => q.quant));
@@ -162,7 +162,7 @@ test('浏览器通道：清单分组、全链下载、续传、错位保护、�
 
 test('浏览器通道：大仓库文件树不再被 256KB 上限拒绝，量化带类型与可直接使用标注', { timeout: 60000 }, async (t) => {
   const { base } = await setup(t);
-  const session = await login(base, '/api/login', PASSWORD);
+  const session = null; // 入口登录已删除：普通接口匿名访问，auth(session) 仅保留 content-type
   // 2500 个文件的仓库（请求体 > 300KB）：历史上这里被 express 256KB 上限直接 413，
   // 用户只能回退到连不通的软件直连，表现为“量化列表/下载都用不了”。
   const bigTree = [];
