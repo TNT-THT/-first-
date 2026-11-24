@@ -315,3 +315,35 @@ test('并发加载：同参数只启动一次 llama-server；不同参数按顺�
   assert.equal(engine.llama.info.contextTokens, 8192);
   void bin;
 });
+
+test('流式转发：llama.cpp 在流里报错时，网页/API 能收到明确原因而不是空回答', { timeout: 30000 }, async () => {
+  const { streamNativeToHttp } = await import('../server/native/routes.js');
+  const sse = [
+    'data: {"choices":[{"index":0,"delta":{"content":"前半段"},"finish_reason":null}]}',
+    '',
+    'data: {"error":{"message":"out of context"}}',
+    '',
+  ].join('\n');
+  const engine = {
+    async chatCompletion() {
+      return { ok: true, body: (async function* gen() { yield Buffer.from(sse, 'utf8'); })() };
+    },
+  };
+  const chunks = [];
+  const headers = {};
+  const res = {
+    status() {},
+    setHeader(k, v) { headers[k] = v; },
+    flushHeaders() {},
+    write(s) { chunks.push(s); },
+    end() {},
+  };
+  const out = await streamNativeToHttp(engine, {
+    model: 'Qwen3-32B', messages: [{ role: 'user', content: 'hi' }], res,
+  });
+  const text = chunks.join('');
+  assert.equal(out.content, '前半段');
+  assert.match(text, /llama\.cpp 生成失败：out of context/);
+  assert.match(text, /data: \[DONE\]/);
+  assert.equal(headers['Content-Type'], 'text/event-stream; charset=utf-8');
+});
