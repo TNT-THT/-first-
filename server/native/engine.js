@@ -1535,7 +1535,7 @@ export class NativeEngine {
    * 实际干活的是 _load（管理员/聊天自动共用：加载已下载的量化，必要时先卸载当前模型）。
    */
   load(id, opts = {}) {
-    const key = `${id}|${opts.quant || ''}|${opts.contextTokens ?? ''}|${opts.gpuLayers ?? ''}`;
+    const key = `${id}|${opts.quant || ''}|${opts.contextTokens ?? ''}|${opts.gpuLayers ?? ''}|${opts.safe ? 'safe' : ''}`;
     if (!this._loadPendingByKey) this._loadPendingByKey = new Map();
     const running = this._loadPendingByKey.get(key);
     if (running) return running;
@@ -1553,15 +1553,18 @@ export class NativeEngine {
     return promise;
   }
 
-  async _load(id, { quant, contextTokens, gpuLayers, explicit = true } = {}) {
+  async _load(id, { quant, contextTokens, gpuLayers, explicit = true, safe = false } = {}) {
     // 未显式给值时沿用“同一个模型上一次加载”的参数（聊天自动加载走这条）。
     // 只认同一个模型：把 70B 的 32K 上下文/40 层套到 8B 小模型上只会白白触发回退重试。
     const prefs = (this.loadPrefsFor === id && this.loadPrefs)
       ? this.loadPrefs
       : { contextTokens: 8192, gpuLayers: 0 };
-    if (!Number.isFinite(Number(contextTokens))) contextTokens = prefs.contextTokens;
-    if (!Number.isFinite(Number(gpuLayers))) gpuLayers = prefs.gpuLayers;
-    if (explicit) this._rememberLoadPrefs(id, { contextTokens, gpuLayers });
+    // safe：崩溃后的“救命加载”，不读也不写用户偏好，避免把安全值 4096/0 变成默认
+    if (!safe) {
+      if (!Number.isFinite(Number(contextTokens))) contextTokens = prefs.contextTokens;
+      if (!Number.isFinite(Number(gpuLayers))) gpuLayers = prefs.gpuLayers;
+      if (explicit) this._rememberLoadPrefs(id, { contextTokens, gpuLayers });
+    }
     // 每次加载都重算说明：上一次加载的回退提示不能残留到这一次（否则界面上会
     // 一直挂着一条与当前模型无关的“已自动回退”）。
     this.loadNote = null;
@@ -1800,19 +1803,51 @@ export class NativeEngine {
       }
       return res;
     }
-    if (this.llama.info?.modelId !== model || this.llama.state === 'idle') {
-      // 自动加载沿用管理员上次显式设置的上下文/层数（不再固定 8192/0）
-      await this.load(model, { explicit: false });
+    // 需要（重新）加载：模型换了、进程空闲、或上次已崩（state==='error'）。
+    // 以前只判 idle：崩溃后 state==='error'，聊天请求会直接对着一具尸体转发，
+    // 报“llama-server 尚未运行”，永远恢复不了，只能手动点一次加载。
+    const needLoad = this.llama.info?.modelId !== model
+      || this.llama.state === 'idle'
+      || this.llama.state === 'error';
+    let loadErr = null;
+    if (needLoad) {
+      try {
+        // 自动加载沿用管理员上次显式设置的上下文/层数（不再固定 8192/0）
+        await this.load(model, { explicit: false });
+      } catch (err) {
+        // 加载本身失败（崩溃/内存不足）：聊天请求不要变成 500 的“unexpected”，
+        // 先把它转成一次“安全配置重载”，失败也给出可执行的中文原因。
+        if (!this._looksLikeCrash(err) && !this._looksLikeMemoryFailure(err)) throw err;
+        loadErr = err;
+      }
     }
     try {
+      if (loadErr) throw loadErr;
       await this.llama.whenReady();
     } catch (err) {
-      // 加载途中 llama-server 崩溃/内存失败（如 0xC0000005）：聊天请求不要直接把
-      // 崩溃甩给用户——以安全配置（纯 CPU + 上下文 4096）自动重新加载一次再试。
+      // 加载途中 llama-server 崩溃/内存失败（如 0xC0000005）：以安全配置
+      // （纯 CPU + 上下文 4096）自动重新加载一次再试，仍失败则给出明确建议。
       if (!this._looksLikeCrash(err) && !this._looksLikeMemoryFailure(err)) throw err;
       this.logger.warn?.(`[native] llama-server 加载失败，聊天自动以安全配置重新加载：${err.message}`);
-      await this.load(model, { contextTokens: 4096, gpuLayers: 0, explicit: false });
-      await this.llama.whenReady();
+      try {
+        // safe: 这次只是“先把服务救活”，不覆盖管理员原本设定的上下文/层数，
+        // 否则一次崩溃会把 32K 上下文悄悄降成 4096，之后用户以为设置没生效。
+        await this.load(model, { contextTokens: 4096, gpuLayers: 0, explicit: false, safe: true });
+        await this.llama.whenReady();
+      } catch (retryErr) {
+        // 连纯 CPU + 4096 上下文都起不来：不是配置问题，而是权重/内存/驱动问题，
+        // 直接告诉用户下一步该干什么，别让他们对着退出码猜。
+        throw Object.assign(
+          new Error(
+            `llama-server 无法启动（已自动降级为纯 CPU + 4096 上下文重试，仍然失败）。\n`
+            + `最后一次错误：${String(retryErr.message || retryErr).slice(0, 300)}\n\n`
+            + '建议依次尝试：① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；'
+            + '② 关闭其它占用内存的程序后重试；③ 若日志显示缺 DLL/驱动，点“准备运行库”重装，'
+            + '或把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版。',
+          ),
+          { status: 502, loadFailed: true },
+        );
+      }
     }
     // 超大模型的上下文窗口往往只有 4K~32K，而网页/API 一次可以送来 8 万字符的历史：
     // 直接整包发给 llama.cpp，轻则被它悄悄截断（前面的系统提示/关键信息丢了），
