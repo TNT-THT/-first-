@@ -231,6 +231,10 @@ export class LlamaProcess {
       modelId: this.info?.modelId || null,
       quant: this.info?.quant || null,
       gpuLayers: this.info?.gpuLayers ?? null,
+      // 本次加载实际用的上下文与增强参数：面板显示“回退到了哪一组”，
+      // 用户排查 0xC0000005 时才知道现在跑的是不是精简配置。
+      contextTokens: this.info?.contextTokens ?? null,
+      flags: this.info?.flags || null,
       error: this.state === 'error' ? this.error : '',
       // 崩溃时把日志尾部一起放进 error：界面上的红色提示要能直接说明死因
       logTail: this.logTail.slice(-20),
@@ -248,7 +252,20 @@ export class LlamaProcess {
     return this.info?.apiKey || '';
   }
 
-  async start({ binary, modelFile, modelId, quant, contextTokens = 8192, gpuLayers = 0, port, extraArgs = [] }) {
+  /**
+   * @param {object} [opts] 参数级逃生开关：崩溃（0xC0000005 等）不只是“层数太多”造成的，
+   *   所以除了层数/上下文，还要能逐项关掉我们自己加的增强参数：
+   *   - flashAttn：'auto'（默认，交给 llama.cpp 判断）| 'on' | 'off' | null（完全不下发）
+   *     ——以前无条件 `-fa on`，在没有对应内核的构建/量化组合上会直接把进程打崩；
+   *   - cacheReuse：prompt 缓存复用粒度，null/0 = 不下发（混合注意力/SWA 模型上关掉更稳）；
+   *   - mmap：false 时下发 `--no-mmap`（模型放在云同步盘/网络盘/加密盘上时，
+   *     mmap 会以访问违例 0xC0000005 崩掉，改成整块读入内存即可）；
+   *   - batch：`-b/-ub` 批大小，内存很紧时调小可显著降低峰值占用。
+   */
+  async start({
+    binary, modelFile, modelId, quant, contextTokens = 8192, gpuLayers = 0, port, extraArgs = [],
+    flashAttn = 'auto', cacheReuse = 256, mmap = true, batch = 0,
+  }) {
     await this.stop();
     this.state = 'loading';
     this.error = '';
@@ -257,26 +274,33 @@ export class LlamaProcess {
     this.exitInfo = null;
     this.logTail = [];
     const apiKey = `sk-local-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    const layers = Math.max(0, Math.floor(gpuLayers) || 0);
     const args = [
       '-m', modelFile,
       '--host', '127.0.0.1',
       '--port', String(port),
       '-c', String(contextTokens),
-      '-ngl', String(Math.max(0, Math.floor(gpuLayers) || 0)),
+      '-ngl', String(layers),
       '-np', '1',
       '--jinja',
       '--reasoning-format', 'deepseek',
       '--api-key', apiKey,
-      // 历史里带上完整对话即可：每个请求都会把整段 messages 发来，llama.cpp 在 -c 满后
-      // 默认不再复用 prompt 前缀缓存，长对话每次都要重新预填充（超大模型极慢）。
-      // 显式打开它，前缀命中才生效。
-      '--cache-reuse', '256',
-      // flash attention：长上下文（超大模型常用 32K~256K）下省显存/内存的关键开关
-      '--flash-attn', 'on',
-      // 调用方按模型追加的参数（目前是 MoE 的专家卸载；普通模型为空）
-      ...(Array.isArray(extraArgs) ? extraArgs.filter((a) => typeof a === 'string' && a) : []),
     ];
-    this.info = { modelId, quant, port, apiKey, binary, contextTokens, gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0) };
+    // 历史里带上完整对话即可：每个请求都会把整段 messages 发来，llama.cpp 在 -c 满后
+    // 默认不再复用 prompt 前缀缓存，长对话每次都要重新预填充（超大模型极慢）。
+    if (Number(cacheReuse) > 0) args.push('--cache-reuse', String(Math.floor(Number(cacheReuse))));
+    // flash attention：长上下文下省显存/内存的关键。默认 auto 而不是硬开 on：
+    // 强制 on 时，构建里没有对应内核的模型（部分 MoE/小 head_dim 量化）会直接崩。
+    if (flashAttn && ['auto', 'on', 'off'].includes(flashAttn)) args.push('--flash-attn', flashAttn);
+    if (mmap === false) args.push('--no-mmap');
+    if (Number(batch) > 0) args.push('-b', String(Math.floor(Number(batch))), '-ub', String(Math.floor(Number(batch))));
+    // 调用方按模型追加的参数（目前是 MoE 的专家卸载；普通模型为空）
+    args.push(...(Array.isArray(extraArgs) ? extraArgs.filter((a) => typeof a === 'string' && a) : []));
+    this.info = {
+      modelId, quant, port, apiKey, binary, contextTokens, gpuLayers: layers,
+      // 面板要能显示“这次实际用的哪组参数”，否则用户看不出回退到了什么
+      flags: { flashAttn: flashAttn || null, cacheReuse: Number(cacheReuse) > 0 ? Number(cacheReuse) : 0, mmap: mmap !== false, batch: Number(batch) || 0 },
+    };
     // CUDA 版的 cudart 运行库就放在二进制同目录（随包下载时平铺在一起）：
     // Linux/macOS 的动态链接器不会自动搜“可执行文件所在目录”，必须显式加进
     // LD_LIBRARY_PATH / DYLD_LIBRARY_PATH，否则 CUDA 版一启动就报找不到 libcudart.so。

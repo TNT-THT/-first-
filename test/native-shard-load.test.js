@@ -85,10 +85,11 @@ test('加载：清单里缺分片时明确提示重新下载，而不是让 llam
     id: MODEL_ID, quant, repo: 'x/y', files: names.map((n) => ({ path: n, size: 1 })), totalBytes: 2,
   }));
   await rm(path.join(qdir, names[1]));
-  // 清单仍然“完整”（大小和文件数都对），但磁盘少一个分片
+  // 清单仍然“完整”（大小和文件数都对），但磁盘少一个分片。
+  // 提示要落在“没下全、可续传”上，而不是含糊的崩溃，也不是“尚未下载”。
   await assert.rejects(
     () => engine.load(MODEL_ID, { quant, contextTokens: 4096 }),
-    /权重文件不完整|尚未下载/,
+    /没下载完|权重文件不完整/,
   );
 });
 
@@ -468,4 +469,218 @@ http.createServer((req, res) => {
   assert.equal(engine.llama.state, 'ready');
   // 安全重载不能污染用户设定：上下文仍是 16384，不会被悄悄降成 4096
   assert.equal(engine.loadPrefs?.contextTokens, 16384, '自动降级重载不能覆盖管理员设定的上下文');
+});
+
+// ---- 加载前体检：0xC0000005 到底是“内存不够”还是“权重缺片/截断” ----
+// 以前两种都只会得到一句“已退出（代码 3221225477）”，用户既不敢删也不敢重下。
+
+const GSTR = (s) => {
+  const b = Buffer.from(s, 'utf8');
+  const h = Buffer.alloc(8);
+  h.writeBigUInt64LE(BigInt(b.length));
+  return Buffer.concat([h, b]);
+};
+const U32 = (v) => {
+  const b = Buffer.alloc(4);
+  b.writeUInt32LE(v);
+  return b;
+};
+/** 造一个真实结构的 GGUF 头（含架构/层数/上下文，够 readGgufMeta 解析）。 */
+function ggufHead({ arch = 'qwen3moe', blockCount = 48, splitCount = 0 } = {}) {
+  const parts = [];
+  const kv = (k, t, p) => parts.push(GSTR(k), U32(t), p);
+  kv('general.architecture', 8, GSTR(arch));
+  kv(`${arch}.context_length`, 4, U32(262144));
+  kv(`${arch}.block_count`, 4, U32(blockCount));
+  if (splitCount) {
+    kv('split.count', 4, U32(splitCount));
+    kv('split.no', 4, U32(0));
+  }
+  const head = Buffer.alloc(24);
+  head.write('GGUF', 0, 'ascii');
+  head.writeUInt32LE(3, 4);
+  head.writeBigUInt64LE(0n, 8);
+  head.writeBigUInt64LE(BigInt(parts.length / 3), 16);
+  // 补到 8KB，模拟“真实体积的分片”（体检对 <4KB 的文件只警告不拦）
+  const body = Buffer.concat([head, ...parts]);
+  return Buffer.concat([body, Buffer.alloc(Math.max(0, 8192 - body.length))]);
+}
+
+/** 准备好一个“已下载”的量化目录，返回 paths。 */
+async function putQuant(engine, quant, files) {
+  const qdir = engine.modelDir(MODEL_ID, quant);
+  await mkdir(qdir, { recursive: true });
+  for (const f of files) await writeFile(path.join(qdir, f.path), f.content);
+  await writeFile(path.join(qdir, 'manifest.json'), JSON.stringify({
+    id: MODEL_ID, quant, repo: 'x/y',
+    files: files.map((f) => ({ path: f.path, size: f.content.length })),
+    totalBytes: files.reduce((n, f) => n + f.content.length, 0),
+  }));
+  return qdir;
+}
+
+test('加载体检：真实大小的入口分片 GGUF 头坏了 → 直接说“这个文件损坏”，不跑十几分钟阶梯', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const quant = 'Q4_K_M';
+  await putQuant(engine, quant, [
+    { path: 'M-00001-of-00002.gguf', content: Buffer.alloc(9000, 7) }, // 不是 GGUF
+    { path: 'M-00002-of-00002.gguf', content: Buffer.alloc(16, 1) },
+  ]);
+  const err = await engine.load(MODEL_ID, { quant, contextTokens: 4096 }).then(() => null, (e) => e);
+  assert.ok(err, '必须抛错');
+  assert.equal(err.corrupt, true);
+  assert.match(err.message, /GGUF 文件头读不出来|损坏/);
+  assert.match(err.message, /删除这一档量化后重新下载/);
+  // 测试用的假 llama-server 一次都不该被启动：坏文件交给它只是白崩一次
+  assert.equal(engine.llama.state, 'idle');
+});
+
+test('加载体检：分片字节数比清单少（下载中断/文件被截断）→ 明确提示重新下载续传', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const quant = 'Q4_K_M';
+  const qdir = engine.modelDir(MODEL_ID, quant);
+  await mkdir(qdir, { recursive: true });
+  await writeFile(path.join(qdir, 'M-00001-of-00002.gguf'), ggufHead());
+  await writeFile(path.join(qdir, 'M-00002-of-00002.gguf'), Buffer.alloc(10, 1)); // 只有 10 字节
+  await writeFile(path.join(qdir, 'manifest.json'), JSON.stringify({
+    id: MODEL_ID, quant, repo: 'x/y',
+    files: [
+      { path: 'M-00001-of-00002.gguf', size: 8192 },
+      { path: 'M-00002-of-00002.gguf', size: 5000 }, // 清单说 5000，磁盘只有 10
+    ],
+    totalBytes: 13192,
+  }));
+  const err = await engine.load(MODEL_ID, { quant, contextTokens: 4096 }).then(() => null, (e) => e);
+  assert.ok(err);
+  // 关键回归：不能报成“量化还没有下载”——用户明明已经把几十 GB 下到硬盘上了
+  assert.ok(!/还没有下载/.test(err.message), `不该说“还没下载”：${err.message}`);
+  assert.match(err.message, /没下载完|没下完/);
+  assert.match(err.message, /续传/);
+  assert.equal(engine.llama.state, 'idle');
+});
+
+test('加载体检：完好权重不会把用户筛掉，且内存需求被算出来并带进状态', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const quant = 'Q4_K_M';
+  await putQuant(engine, quant, [
+    { path: 'M-00001-of-00002.gguf', content: ggufHead({ blockCount: 48, splitCount: 2 }) },
+    { path: 'M-00002-of-00002.gguf', content: Buffer.alloc(4096, 1) },
+  ]);
+  await engine.load(MODEL_ID, { quant, contextTokens: 4096 });
+  assert.equal(engine.llama.state, 'ready');
+  const st = await engine.status();
+  assert.ok(st.memory, '状态里要带内存体检结果，面板才能显示“要多少/有多少”');
+  assert.ok(st.memory.neededGB > 0);
+  assert.match(st.memory.summary, /GB/);
+  // 实际生效参数要能看到（默认 fa=auto / cache-reuse 256 / mmap）
+  assert.equal(st.running.flags.flashAttn, 'auto');
+  assert.equal(st.running.flags.mmap, true);
+  assert.equal(st.running.contextTokens, 4096);
+});
+
+test('加载体检：文件头声明的分片数比本地多 → 判为分片不全，而不是让 llama.cpp 崩', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const quant = 'Q4_K_M';
+  // 头里写共 5 片，实际只有 2 片
+  await putQuant(engine, quant, [
+    { path: 'M-00001-of-00005.gguf', content: ggufHead({ splitCount: 5 }) },
+    { path: 'M-00002-of-00005.gguf', content: Buffer.alloc(4096, 1) },
+  ]);
+  const err = await engine.load(MODEL_ID, { quant, contextTokens: 4096 }).then(() => null, (e) => e);
+  assert.ok(err);
+  assert.match(err.message, /分片不全|共 5 个分片/);
+  assert.equal(engine.llama.state, 'idle');
+});
+
+test('回退阶梯：崩溃后先只关 flash-attention（保住用户上下文），再逐级降层/关 mmap', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const list = engine._buildLoadAttempts({ requested: 40, ctx: 8192 });
+  // 第一步必须是原配置，否则等于一上来就先阉割性能
+  assert.deepEqual(
+    { layers: list[0].layers, ctx: list[0].contextTokens, fa: list[0].flashAttn, reuse: list[0].cacheReuse, mmap: list[0].mmap },
+    { layers: 40, ctx: 8192, fa: 'auto', reuse: 256, mmap: true },
+  );
+  // 第二步只关 flash-attention：层数与上下文都保住
+  assert.equal(list[1].flashAttn, 'off');
+  assert.equal(list[1].layers, 40);
+  assert.equal(list[1].contextTokens, 8192);
+  // 最后必须落到“纯 CPU + 不用 mmap”的最保险组合
+  const last = list.at(-1);
+  assert.equal(last.layers, 0);
+  assert.equal(last.mmap, false);
+  assert.equal(last.flashAttn, null);
+  // 不能有重复配置（重复只会让用户白等）
+  const keys = list.map((a) => `${a.layers}|${a.contextTokens}|${a.flashAttn}|${a.cacheReuse}|${a.mmap}|${a.batch}`);
+  assert.equal(new Set(keys).size, keys.length);
+  // 层数为 0 时不会退化成“只有一组”
+  assert.ok(list.length >= 4, `阶梯太短：${list.length}`);
+});
+
+test('内存体检：权重远超本机内存时给出“换小量化”的判断（不拦截加载）', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  // 405B 的 Q4 量级：单看数字就应判 tight
+  const huge = engine._memoryReport(230e9, 0, 8192);
+  assert.equal(huge.tight, true);
+  assert.match(huge.summary, /GB/);
+  assert.match(huge.summary, /换更小的量化|不够/);
+  // 小模型不该被误判
+  const tiny = engine._memoryReport(1.5e9, 0, 4096);
+  assert.equal(tiny.tight, false);
+  assert.ok(tiny.neededGB < huge.neededGB);
+});
+
+test('回退阶梯：救命重载（safe）不从原配置重头来，避免把失败配置再跑一遍', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const normal = engine._buildLoadAttempts({ requested: 0, ctx: 4096 });
+  const safe = engine._buildLoadAttempts({ requested: 0, ctx: 4096, safe: true });
+  assert.ok(safe.length > 0 && safe.length < normal.length, 'safe 阶段必须更短');
+  // 第一阶段刚试过的“原配置”不能再出现
+  assert.ok(!safe.some((a) => a.flashAttn === 'auto' && a.batch === 0 && a.cacheReuse === 256));
+  // 但最保守的那一档必须仍在（否则崩溃后没有任何翻身机会）
+  assert.equal(safe.at(-1).mmap, false);
+  assert.equal(safe.at(-1).layers, 0);
+});
+
+test('救命重载：上一次加载失败的组合不会被原样再跑一遍（记在实例上，成功即清空）', { timeout: 60000 }, async (t) => {
+  const { engine } = await setup(t);
+  const quant = 'Q4_K_M';
+  await putQuant(engine, quant, [{ path: 'M.gguf', content: ggufHead() }]);
+  // 先换成“永远崩溃”的 llama-server：第一阶段所有组合都会失败
+  const crashBin = path.join(path.dirname(engine.env.LLAMA_SERVER_BIN), 'crash-llama');
+  await writeFile(crashBin, '#!/usr/bin/env node\nprocess.exit(3221225477);\n');
+  await chmod(crashBin, 0o755);
+  engine.env.LLAMA_SERVER_BIN = crashBin;
+  const tried = [];
+  const origStart = engine.llama.start.bind(engine.llama);
+  engine.llama.start = (opts) => {
+    tried.push(`${opts.gpuLayers}|${opts.contextTokens}|${opts.flashAttn}|${opts.cacheReuse}|${opts.mmap}|${opts.batch}`);
+    return origStart(opts);
+  };
+  await engine.load(MODEL_ID, { quant, contextTokens: 4096 }).catch(() => {});
+  const failed = engine._failedAttempts?.get(`${MODEL_ID}@${quant}`);
+  assert.ok(failed && failed.size > 0, '失败的组合必须被记住，否则救命重载会整套重跑');
+  const firstRound = tried.length;
+  assert.ok(firstRound >= 4, `第一阶段应真的试过多组，实际 ${firstRound}`);
+  // 全部组合都失败过了：救命重载不该再原样重跑，而是直接说清“都试过了”+
+  // 下一步该干什么（用户不必再等一轮注定失败的启动）。
+  const exhausted = await engine.load(MODEL_ID, { quant, contextTokens: 4096, gpuLayers: 0, explicit: false, safe: true })
+    .then(() => null, (e) => e);
+  assert.ok(exhausted, '全部失败后必须抛错');
+  assert.match(exhausted.message, /都试过了/);
+  assert.match(exhausted.message, /重新下载|准备运行库/);
+  assert.equal(tried.length, firstRound, '全都失败过就不该再启动一次 —— 白等');
+
+  // 只失败了一部分时：救命重载只跑“还没试过”的那几组，一个也不重复
+  const keys = [...failed];
+  failed.delete(keys[keys.length - 1]); // 假设最后一档还没试过
+  // 快照：这次救命重载会重新把失败的组合写回记录，所以要在跑之前取
+  const knownFailed = new Set(failed);
+  await engine.load(MODEL_ID, { quant, contextTokens: 4096, gpuLayers: 0, explicit: false, safe: true }).catch(() => {});
+  const secondRound = tried.slice(firstRound);
+  assert.ok(secondRound.length > 0, '还有没试过的组合时必须去试');
+  assert.equal(secondRound.filter((k) => knownFailed.has(k)).length, 0, `救命重载重复了已失败的组合：${secondRound.join('、')}`);
+  // 换个能成功的 llama-server：加载成功后失败记录要清空（否则下次会少试好几档）
+  engine.env.LLAMA_SERVER_BIN = path.join(path.dirname(crashBin), 'llama-server');
+  await engine.load(MODEL_ID, { quant, contextTokens: 4096 }).catch(() => {});
+  assert.equal(engine._failedAttempts?.get(`${MODEL_ID}@${quant}`), undefined, '加载成功后失败记录必须清空');
 });

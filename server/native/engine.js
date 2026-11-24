@@ -12,6 +12,7 @@
  *    走 Hugging Face 云端推理，模型 id 不变、用量照常统计。
  */
 import { existsSync, readFileSync } from 'node:fs';
+import os from 'node:os';
 import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
@@ -26,11 +27,16 @@ import { detectFormats, detectVariants, hfModelId, optionsForFormats, routeForFo
 import { downloadFile, fetchModelInfo, fetchRepoFiles, freeDiskBytes, resolveFileUrl, searchModels } from './hf.js';
 import { downloadLlamaBinary, findLlamaBinary, LlamaProcess } from './llama.js';
 import { extractZip } from './archive.js';
-import { readGgufBlockCount } from './gguf.js';
+import { readGgufBlockCount, readGgufMeta } from './gguf.js';
 import { findConverter, prepareConverter, runConvert } from './convert.js';
 import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python-runner.js';
 
 const QUANT_CACHE_MS = 10 * 60 * 1000;
+
+/** 一组加载参数的指纹：用于去重/判断“这一组是不是刚试过”。 */
+function attemptKey(a) {
+  return `${a.layers}|${a.contextTokens}|${a.flashAttn}|${a.cacheReuse}|${a.mmap}|${a.batch}`;
+}
 
 /**
  * 粗略估算一段对话要占多少上下文 token。
@@ -327,6 +333,89 @@ export class NativeEngine {
     return out;
   }
 
+  /**
+   * 磁盘上有量化目录、但没通过完整性核对（缺片/截断/大小不一致）的档位。
+   *
+   * 这类“下了一半”的量化以前对上层完全不可见：`downloadedQuants` 只返回完整的，
+   * 于是点加载得到的是“尚未下载”，用户只能把几十 GB 删掉重下——而其实 .part 与
+   * 已下完的分片都在，续传一次就能用。
+   *
+   * @returns {Promise<Array<{quant: string, summary: string, files: number}>>}
+   */
+  async _brokenQuants(id) {
+    const base = this.modelDir(id);
+    let dirs = [];
+    try {
+      dirs = await readdir(base);
+    } catch {
+      return [];
+    }
+    const out = [];
+    for (const quant of dirs) {
+      if (quant === 'SNAPSHOT' || quant === 'CONVERTED') continue;
+      const manifest = await this.readManifest(id, quant);
+      if (!manifest) {
+        // 没有清单通常意味着“还没下完就中断了”：清单只在全部文件到位后才写。
+        // 这里按 .part 的存在与否给出可续传的提示，同样不要报成“尚未下载”。
+        const parts = await this._countPartFiles(path.join(base, quant));
+        if (parts > 0) {
+          out.push({ quant, files: parts, summary: `有 ${parts} 个文件只下到一半（.part）` });
+        }
+        continue;
+      }
+      let present = 0;
+      let missing = 0;
+      let short = 0;
+      for (const f of manifest.files) {
+        const dest = path.join(base, quant, f.path);
+        const want = Number(f.size) || 0;
+        let size = -1;
+        try {
+          size = (await stat(dest)).size;
+        } catch {
+          // 正式文件不在：看有没有 .part（有就是下到一半，续传即可）
+          try {
+            size = (await stat(`${dest}.part`)).size;
+          } catch {
+            size = -1;
+          }
+        }
+        if (size < 0) missing += 1;
+        else {
+          present += 1;
+          if (want && size < want) short += 1;
+        }
+      }
+      if (!missing && !short) continue; // 完整档位由 downloadedQuants 负责
+      const bits = [];
+      if (missing) bits.push(`缺 ${missing} 个分片`);
+      if (short) bits.push(`${short} 个分片还没下完`);
+      out.push({
+        quant,
+        files: manifest.files.length,
+        summary: `${bits.join('、')}（共 ${manifest.files.length} 个，已就位 ${present} 个）`,
+      });
+    }
+    return out;
+  }
+
+  /** 统计一个量化目录下还没转正的 .part 文件数（递归，最多看两层子目录）。 */
+  async _countPartFiles(dir, depth = 0) {
+    if (depth > 1) return 0;
+    let entries = [];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+    let n = 0;
+    for (const e of entries) {
+      if (e.isDirectory()) n += await this._countPartFiles(path.join(dir, e.name), depth + 1);
+      else if (e.isFile() && /\.part$/i.test(e.name)) n += 1;
+    }
+    return n;
+  }
+
   /** GGUF 层数（按“文件+大小”缓存，避免状态刷新时反复读文件头）。 */
   async _ggufLayers(filePath, totalBytes) {
     if (!filePath) return null;
@@ -409,6 +498,9 @@ export class NativeEngine {
     const models = [];
     for (const m of this.listModels()) {
       const downloaded = await this.downloadedQuants(m.id);
+      // 下了但没下完的档位也要让界面知道：否则用户在量化下拉里根本看不到它，
+      // 点加载只会得到“还没下载完”，却不知道是哪一档、还差多少。
+      const incomplete = await this._brokenQuants(m.id);
       // 只下发展示需要的字段：内部 entry（含整份文件清单）、receivedByFile（Map）不外传
       const dl = [...this.downloads.values()]
         .filter((d) => d.id === m.id)
@@ -431,6 +523,7 @@ export class NativeEngine {
         kind: m.kind,
         formats: m.formats || ['gguf'],
         downloaded,
+        incomplete,
         downloads: dl,
         remote: this.remote.has(m.id),
         conversion: this.conversions.get(m.id) || null,
@@ -449,6 +542,8 @@ export class NativeEngine {
       loadNote: this.loadNote || null,
       // 最近一次生成是否因上下文不够而省略了历史（面板据此提示用户）
       contextTrim: this.contextTrim || null,
+      // 最近一次加载前算出的内存需求 vs 本机实际（面板显示，避免用户对着崩溃码猜）
+      memory: this.memoryReport || null,
       pythonRunning: this.python.status(),
       models,
       hf: {
@@ -1595,6 +1690,20 @@ export class NativeEngine {
     }
     const pick = loadable.find((d) => d.quant === wanted) || loadable[0];
     if (!pick) {
+      // 关键：下载中断留下 .part / 被截断的分片，以前在这里就被判成“尚未下载”——
+      // 用户明明看到几十 GB 已经躺在硬盘上，系统却说没下载，只能删了重下。
+      // 现在先看磁盘上有没有量化目录，有就用“不完整”的口吻给出续传指引。
+      const broken = await this._brokenQuants(id);
+      if (broken.length) {
+        const main = broken.find((b) => b.quant === wanted) || broken[0];
+        throw Object.assign(
+          new Error(
+            `量化 ${main.quant} 还没下载完（${main.summary}）。\n`
+            + '这不是内存不够，是文件不完整。请回到“本机大模型”点一次下载，软件会按已下载的字节续传补齐（不会从头开始），再点加载。',
+          ),
+          { status: 409, corrupt: true },
+        );
+      }
       const why = downloaded.length
         ? `这个模型目前只下载了原格式权重（SNAPSHOT），请点“转换并使用”转成 GGUF，或用“本地运行（Python）”直接运行原格式。`
         : `模型 ${model.name} 尚未下载。请在“API 接入 → 本机大模型”中先下载权重。`;
@@ -1626,6 +1735,22 @@ export class NativeEngine {
         { status: 409 },
       );
     }
+    // 开跑前先自己做一次“权重完整性体检”：分片齐全、每个分片大小与清单一致、
+    // 入口分片的 GGUF 头能解析（架构/层数读得到）。
+    // 以前所有这些只在 llama.cpp 启动失败后由一句含糊的“代码 3221225477”反推，
+    // 用户根本分不清是内存不够还是权重缺片/截断——而这正是 0xC0000005 的两种
+    // 最常见来源。体检失败直接给出“哪个文件坏、怎么修”，不再走十几分钟的阶梯。
+    const verdict = await this._verifyWeights(id, pick.quant, manifest, entryFile);
+    if (!verdict.ok) {
+      throw Object.assign(new Error(verdict.message), { status: verdict.status || 500, corrupt: !!verdict.corrupt });
+    }
+    // 内存体检（只警告、不拦截）：0xC0000005 报告里最多的其实是“权重本身没坏，
+    // 但这台机器内存装不下 / 剩余内存不够”。以前系统只丢一个崩溃码给用户，
+    // 现在把“需要多少、现在有多少”直接写进日志与状态面板，用户一眼就知道是换量化还是关程序。
+    const reportCtx = Math.min(Math.max(1024, Math.floor(contextTokens) || 8192), Number(model.context) > 0 ? Number(model.context) : 8192);
+    const ram = this._memoryReport(manifest.totalBytes, gpuLayers, reportCtx);
+    this.memoryReport = ram;
+    if (ram.tight) this.logger.warn?.(`[native] 内存可能不够：${ram.summary}`);
     const wantCtx = Math.max(1024, Math.floor(contextTokens) || 8192);
     const maxCtx = Number(model.context) > 0 ? Number(model.context) : 8192;
     const ctx = Math.min(wantCtx, maxCtx);
@@ -1634,16 +1759,29 @@ export class NativeEngine {
       : null;
     const port = 18100 + Math.floor(Math.random() * 800);
     const requested = Math.max(0, Math.floor(gpuLayers) || 0);
-    // 加载失败时自动回退，不让用户手动试错：
-    // GPU 卸载层数 请求值 → 一半 → 四分之一 → 0（纯 CPU+内存），每一档再附带一档
-    // 更小的上下文（4096）——崩溃（0xC0000005 等）或疑似内存/显存不足时逐档重试。
-    const ladder = [...new Set([requested, Math.floor(requested / 2), Math.floor(requested / 4), 0])];
-    const attempts = [];
-    for (const layers of ladder) {
-      attempts.push({ layers, contextTokens: ctx });
-      if (ctx > 4096) attempts.push({ layers, contextTokens: 4096 });
-    }
+    const planned = this._buildLoadAttempts({ requested, ctx, safe });
+    // 这台机器上“已经试过且失败”的组合要记住（同一模型同一档位内有效）：
+    // 聊天路径的救命重载若原样再跑一遍刚失败的配置，用户只会多等几分钟。
+    // 成功一次就清空记录——之前失败可能只是因为别的程序占着内存。
+    const failKey = `${id}@${pick.quant}`;
+    if (!this._failedAttempts) this._failedAttempts = new Map();
+    const failed = safe ? (this._failedAttempts.get(failKey) || new Set()) : null;
+    const attempts = safe && failed ? planned.filter((a) => !failed.has(attemptKey(a))) : planned;
+    const extraArgs = String(this.env.OJ_LLAMA_EXTRA_ARGS || '').trim().split(/\s+/).filter(Boolean);
     let lastErr = null;
+    if (safe && !attempts.length) {
+      const mem = this.memoryReport;
+      throw Object.assign(
+        new Error(
+          '这组权重在本机把能试的启动配置都试过了（纯 CPU、关 flash-attention、关 KV 缓存复用、不用 mmap、小上下文），仍然起不来。\n'
+          + `最后一次错误：${String(lastErr?.message || '').slice(0, 300)}\n`
+          + (mem?.summary ? `内存情况：${mem.summary}\n` : '')
+          + '\n这基本可以确定是权重文件本身或运行库的问题：① 删除这一档量化后重新下载一次；'
+          + '② 点“准备运行库”重装 llama.cpp；③ 或换更小的量化/上下文再试。',
+        ),
+        { status: 502, loadFailed: true },
+      );
+    }
     for (const [i, attempt] of attempts.entries()) {
       try {
         await this.llama.start({
@@ -1657,15 +1795,29 @@ export class NativeEngine {
           // 高级参数（可选）：MoE 模型常需要 --n-cpu-moe / --override-tensor 之类把专家张量
           // 留在内存，否则 -ngl 拉满必然显存不足。不写死任何值，由管理员通过
           // OJ_LLAMA_EXTRA_ARGS 显式指定，避免把大模型推到更慢的配置上。
-          extraArgs: String(this.env.OJ_LLAMA_EXTRA_ARGS || '').trim().split(/\s+/).filter(Boolean),
+          extraArgs,
+          // 参数级逃生开关（见 _buildLoadAttempts）：崩溃/内存不足时逐档收敛到最保险的组合
+          flashAttn: attempt.flashAttn,
+          cacheReuse: attempt.cacheReuse,
+          mmap: attempt.mmap,
+          batch: attempt.batch,
         });
-        const reduced = attempt.layers < requested || attempt.contextTokens < ctx;
+        // 加载成功：之前的失败记录作废（那次可能只是内存被别的程序占着）
+        this._failedAttempts?.delete(failKey);
+        const reduced = attempt.layers < requested
+          || attempt.contextTokens < ctx
+          || attempt.flashAttn !== 'auto'
+          || attempt.cacheReuse !== 256
+          || attempt.mmap !== true
+          || attempt.batch !== 0;
         this.loadNote = reduced
           ? {
               requested,
               used: attempt.layers,
               contextTokens: attempt.contextTokens,
-              reason: '加载失败（疑似显存/内存不足或程序崩溃），已自动回退层数/上下文后加载成功',
+              // 把“实际用了哪组参数”带出去：用户看到 0xC0000005 之后至少知道现在跑的是什么
+              flags: { flashAttn: attempt.flashAttn, cacheReuse: attempt.cacheReuse, mmap: attempt.mmap, batch: attempt.batch },
+              reason: `加载失败（疑似显存/内存不足或程序崩溃），已自动回退后加载成功（第 ${i + 1} 组配置）`,
             }
           : contextNote;
         return this.llama.status();
@@ -1682,13 +1834,179 @@ export class NativeEngine {
             { status: 500, corrupt: true },
           );
         }
+        if (!this._failedAttempts) this._failedAttempts = new Map();
+        if (!this._failedAttempts.has(failKey)) this._failedAttempts.set(failKey, new Set());
+        this._failedAttempts.get(failKey).add(attemptKey(attempt));
         const retryable = kinds.context || this._looksLikeMemoryFailure(err) || this._looksLikeCrash(err);
         if (i === attempts.length - 1 || !retryable) throw err;
-        this.logger.warn?.(`[native] 加载失败（${attempt.layers} 层 / 上下文 ${attempt.contextTokens}），自动回退重试：${err.message}`);
+        this.logger.warn?.(`[native] 加载失败（${attempt.layers} 层 / 上下文 ${attempt.contextTokens}${attempt.flashAttn !== 'auto' ? ` / fa=${attempt.flashAttn}` : ''}${attempt.batch ? ` / batch=${attempt.batch}` : ''}${attempt.mmap === false ? ' / no-mmap' : ''}），自动回退重试：${err.message}`);
         await this.llama.stop().catch(() => {});
       }
     }
     throw lastErr;
+  }
+
+  /**
+   * 生成加载退避阶梯。
+   *
+   * 以前只有“层数 × 上下文”两个维度，而 0xC0000005 的真实成因远不止这两项：
+   * - 强制 `-fa on`：部分模型/量化在该构建上没有 flash-attention 内核，一开就崩；
+   * - `--cache-reuse`：混合注意力/SWA 模型（很多新版 MoE）上复用 KV 会越界；
+   * - mmap：权重放在云同步盘/网络盘/加密盘时，访问违例直接崩；
+   * - 批大小：内存很紧时峰值占用把系统压爆。
+   * 现在每一步只动一个维度，保证“回退后能跑起来”的那一步是可解释、可复现的：
+   *   1) 原配置（fa=auto、cache-reuse 256、mmap）
+   *   2) 关掉 flash-attention（fa=off）
+   *   3) 关掉 cache-reuse + 小批（-b 512）
+   *   4) 层数减半 / 上下文 4096
+   *   5) 纯 CPU（0 层）+ `--no-mmap` + 小批 + fa=off + 上下文 4096
+   * 同一层数只保留一次，不重复尝试。
+   */
+  _buildLoadAttempts({ requested = 0, ctx = 8192, safe = false } = {}) {
+
+    const half = Math.floor(requested / 2);
+    const quarter = Math.floor(requested / 4);
+    const smallCtx = Math.min(ctx, 4096);
+    const raw = [
+      { layers: requested, contextTokens: ctx, flashAttn: 'auto', cacheReuse: 256, mmap: true, batch: 0 },
+      { layers: requested, contextTokens: ctx, flashAttn: 'off', cacheReuse: 256, mmap: true, batch: 0 },
+      { layers: requested, contextTokens: ctx, flashAttn: 'off', cacheReuse: 0, mmap: true, batch: 512 },
+      { layers: half, contextTokens: smallCtx, flashAttn: 'off', cacheReuse: 0, mmap: true, batch: 512 },
+      { layers: quarter, contextTokens: smallCtx, flashAttn: 'off', cacheReuse: 0, mmap: true, batch: 512 },
+      { layers: 0, contextTokens: smallCtx, flashAttn: 'off', cacheReuse: 0, mmap: true, batch: 0 },
+      { layers: 0, contextTokens: smallCtx, flashAttn: 'off', cacheReuse: 0, mmap: false, batch: 256 },
+      { layers: 0, contextTokens: 2048, flashAttn: null, cacheReuse: 0, mmap: false, batch: 128 },
+    ];
+    const seen = new Set();
+    let out = [];
+    for (const a of raw) {
+      const key = attemptKey(a);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(a);
+    }
+    // safe（聊天崩溃后的救命重载）：只留“最保守的 CPU 组合”及之后的档位。
+    // 到底哪些组合“上一次已经试过”，由 _load 拿着它自己记录的指纹再筛一遍
+    // （这里只做位置收敛，不能反过来递归调用自己）。
+    if (safe) {
+      const idx = out.findIndex((a) => a.layers === 0 && a.mmap === true && a.batch === 0 && a.cacheReuse === 0);
+      if (idx > 0) out = out.slice(idx);
+    }
+    return out;
+  }
+
+  /**
+   * 内存体检：估算这份权重跑起来需要多少内存，并和本机总内存/当前可用内存对比。
+   *
+   * 只用于“提前说清楚”，不做拦截：Windows 下进程分配的虚拟内存超过可用物理内存
+   * 时，llama.cpp 往往不是抛 out of memory，而是直接以 0xC0000005 崩掉——
+   * 这正是用户看到的那个退出码最常见的成因。所以这里必须在启动前把数摆出来。
+   *
+   * @returns {{neededGB: number, totalGB: number, freeGB: number, tight: boolean, summary: string}}
+   */
+  _memoryReport(totalBytes, gpuLayers = 0, contextTokens = 8192) {
+    const round = (n) => Math.round(n * 10) / 10;
+    const weightsGB = (Number(totalBytes) || 0) / 1e9;
+    // 权重按 1.06 倍计（GGUF 落内存后还有少量对齐/索引开销）；
+    // KV 缓存按上下文估算：每 16K 上下文约 1 GB（MoE 与 GQA 模型量级）；
+    // 再留 1.2 GB 给运行时（llama.cpp 自身的缓冲区、模板、Tokenizer）。
+    const kvGB = Math.max(0.3, (Number(contextTokens) || 8192) / 16384);
+    const neededGB = round(weightsGB * 1.06 + kvGB + 1.2);
+    let totalGB = 0;
+    let freeGB = 0;
+    try {
+      totalGB = round(os.totalmem() / 1e9);
+      freeGB = round(os.freemem() / 1e9);
+    } catch { /* 某些受限环境拿不到内存信息 */ }
+    const tight = totalGB > 0 && neededGB > totalGB * 0.92;
+    const summary = totalGB > 0
+      ? `这份权重约需 ${neededGB} GB 内存（含上下文 ${contextTokens} 的 KV 缓存），本机总内存 ${totalGB} GB、当前可用 ${freeGB} GB`
+        + (tight ? '：总内存都不够，很可能启动即崩（0xC0000005）。请换更小的量化，或换内存更大的机器。' : '。')
+      : `这份权重约需 ${neededGB} GB 内存（含上下文 ${contextTokens} 的 KV 缓存）。`;
+    return {
+      neededGB,
+      totalGB,
+      freeGB,
+      tight,
+      gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0),
+      contextTokens: Number(contextTokens) || 8192,
+      summary,
+    };
+  }
+
+  /**
+   * 加载前的权重体检：分片是否齐全、大小是否与清单一致、入口分片的 GGUF 头能否解析。
+   *
+   * 返回 { ok: true, blockCount, architecture } 或 { ok: false, message, status, corrupt }。
+   * 只在“入口分片连 GGUF 头都读不出来”时判 corrupt——仅仅是文件大小对不上时，
+   * 有的仓库 LFS 记录的 size 与实际字节略有出入（重新上传/转换工具差异），
+   * 那种情况仍让 llama.cpp 去试，避免把好模型误判成坏文件让用户白下几十 GB。
+   */
+  async _verifyWeights(id, quant, manifest, entryFile) {
+    const dir = this.modelDir(id, quant);
+    const shortNames = (list) => list.slice(0, 3).join('、') + (list.length > 3 ? ` 等 ${list.length} 个` : '');
+    const missing = [];
+    const truncated = [];
+    const oversized = [];
+    let entrySize = 0;
+    for (const f of manifest.files) {
+      const p = path.join(dir, f.path);
+      let st = null;
+      try {
+        st = await stat(p);
+      } catch {
+        missing.push(f.path);
+        continue;
+      }
+      const want = Number(f.size) || 0;
+      if (f.path === entryFile.path) entrySize = st.size;
+      if (!want || st.size === want) continue;
+      if (st.size < want) truncated.push(`${f.path}（应 ${want} 字节，实际 ${st.size} 字节）`);
+      else oversized.push(`${f.path}（清单 ${want} 字节，实际 ${st.size} 字节）`);
+    }
+    if (missing.length) {
+      return {
+        ok: false,
+        corrupt: true,
+        message: `权重文件不完整：缺少 ${missing.length} 个分片（${shortNames(missing)}）。\n`
+          + '这不是内存不够，是文件没下全。请在“本机大模型”里重新点下载补齐（会从断点续传，不会从头开始），再点加载。',
+      };
+    }
+    if (truncated.length) {
+      return {
+        ok: false,
+        corrupt: true,
+        message: `权重文件没下完：${shortNames(truncated)} 的字节数比清单少（下载中断/文件被截断）。\n`
+          + '请重新点一次下载，软件会按已下载的字节续传补齐，再点加载。',
+      };
+    }
+    const meta = await readGgufMeta(path.join(dir, entryFile.path));
+    if (!meta.ok) {
+      // 小文件（< 4KB）几乎不可能是真的权重：那更像是测试占位/空壳文件，
+      // 只警告不拦，交给 llama.cpp 自己判断；真实体积的分片头读不出来就是坏文件。
+      if (entrySize >= 4096) {
+        return {
+          ok: false,
+          corrupt: true,
+          message: `入口分片 ${entryFile.path} 的 GGUF 文件头读不出来：${meta.reason}。\n`
+            + '这个文件多半已损坏或根本不是 GGUF。请在“本机大模型”里删除这一档量化后重新下载（其它量化不受影响）。',
+        };
+      }
+      this.logger.warn?.(`[native] 入口分片 ${entryFile.path} 太小（${entrySize} 字节）且读不出 GGUF 头，仍尝试加载。`);
+      return { ok: true, blockCount: null, architecture: '' };
+    }
+    if (meta.splitCount && meta.splitCount > manifest.files.length) {
+      return {
+        ok: false,
+        corrupt: true,
+        message: `权重分片不全：文件头声明共 ${meta.splitCount} 个分片，本地只有 ${manifest.files.length} 个。`
+          + '请重新点下载补齐（会从断点续传）。',
+      };
+    }
+    if (oversized.length) {
+      this.logger.warn?.(`[native] 权重大小与清单不一致（仍尝试加载）：${shortNames(oversized)}`);
+    }
+    return { ok: true, blockCount: meta.blockCount, architecture: meta.architecture || '' };
   }
 
   /** 失败是否疑似显存/内存不足（决定要不要自动减少 GPU 卸载层数重试）。 */
@@ -1826,8 +2144,11 @@ export class NativeEngine {
       await this.llama.whenReady();
     } catch (err) {
       // 加载途中 llama-server 崩溃/内存失败（如 0xC0000005）：以安全配置
-      // （纯 CPU + 上下文 4096）自动重新加载一次再试，仍失败则给出明确建议。
+      // （纯 CPU + 上下文 4096 + 精简参数）自动重新加载一次再试，仍失败则给出明确建议。
       if (!this._looksLikeCrash(err) && !this._looksLikeMemoryFailure(err)) throw err;
+      // 权重本身的问题（缺片/截断/头读不出来）已经由 _verifyWeights 给了精确原因，
+      // 再拿安全配置重试一次毫无意义，只会让用户多等一轮。
+      if (err?.corrupt) throw err;
       this.logger.warn?.(`[native] llama-server 加载失败，聊天自动以安全配置重新加载：${err.message}`);
       try {
         // safe: 这次只是“先把服务救活”，不覆盖管理员原本设定的上下文/层数，
@@ -1835,13 +2156,19 @@ export class NativeEngine {
         await this.load(model, { contextTokens: 4096, gpuLayers: 0, explicit: false, safe: true });
         await this.llama.whenReady();
       } catch (retryErr) {
+        // 权重坏了下游还会走到这里（safe 重载会再体检一次）：把真实原因原样带出去，
+        // 不要再包一层“纯 CPU 也起不来”让人误以为要换更小的量化。
+        if (retryErr?.corrupt) throw retryErr;
         // 连纯 CPU + 4096 上下文都起不来：不是配置问题，而是权重/内存/驱动问题，
         // 直接告诉用户下一步该干什么，别让他们对着退出码猜。
+        const mem = this.memoryReport;
         throw Object.assign(
           new Error(
-            `llama-server 无法启动（已自动降级为纯 CPU + 4096 上下文重试，仍然失败）。\n`
-            + `最后一次错误：${String(retryErr.message || retryErr).slice(0, 300)}\n\n`
-            + '建议依次尝试：① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；'
+            `llama-server 无法启动（已自动降级为纯 CPU + 4096 上下文 + 精简参数重试，仍然失败）。\n`
+            + `最后一次错误：${String(retryErr.message || retryErr).slice(0, 300)}\n`
+            // 把内存的实际数字带上：用户才知道该换量化还是该关程序，而不是盲试
+            + (mem?.summary ? `内存情况：${mem.summary}\n` : '')
+            + `\n建议依次尝试：① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；`
             + '② 关闭其它占用内存的程序后重试；③ 若日志显示缺 DLL/驱动，点“准备运行库”重装，'
             + '或把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版。',
           ),

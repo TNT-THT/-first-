@@ -172,7 +172,11 @@ test('LlamaProcess：非 Windows 启动时把 bin 目录加进 LD_LIBRARY_PATH/D
   assert.ok(opts.env[varName].split(path.delimiter)[0] === '/data/native/bin', `首个搜索路径应是 bin 目录，实际 ${opts.env[varName]}`);
   // 关键参数仍在：分片入口 + flash attention
   assert.match(args[args.indexOf('-m') + 1], /-00001-of-00002\.gguf$/);
-  assert.equal(args[args.indexOf('--flash-attn') + 1], 'on');
+  // flash attention 默认交给 llama.cpp 自己判断（auto），不再硬开 on：
+  // 部分模型/量化在强制 on 的构建上启动即崩（0xC0000005）。
+  assert.equal(args[args.indexOf('--flash-attn') + 1], 'auto');
+  assert.ok(args.includes('--cache-reuse'));
+  assert.ok(!args.includes('--no-mmap'), '默认仍走 mmap');
 });
 
 test('pickReleaseAsset：CUDA/Vulkan 也要按当前架构挑包（arm64 机器不能装 x64 包）', async () => {

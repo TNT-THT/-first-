@@ -343,7 +343,9 @@ test('加载崩溃自动回退：大上下文崩溃后以小上下文加载成�
   }
   assert.ok(downloaded);
 
-  // 聊天自动加载：第一次（上下文 8192）模拟崩溃，应自动回退到 4096 成功，而不是把崩溃甩给用户
+  // 聊天自动加载：第一次（上下文 8192）模拟崩溃，应自动回退后加载成功，而不是把崩溃甩给用户。
+  // 新阶梯优先只关掉 flash-attention（fa=off）再试，所以用户设的 8192 上下文会被保住；
+  // 以前只有“层数×上下文”两维，会直接把上下文砍到 4096。
   const chat = await fetch(`${base}/api/native/chat`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -354,7 +356,10 @@ test('加载崩溃自动回退：大上下文崩溃后以小上下文加载成�
   const status = engine.llama.status();
   assert.equal(status.state, 'ready');
   assert.ok(engine.loadNote, '应记录自动回退说明');
-  assert.equal(engine.loadNote.contextTokens, 4096);
+  assert.equal(engine.loadNote.contextTokens, 8192, '优先保住用户设的上下文，而不是直接砍到 4096');
+  assert.equal(engine.loadNote.flags?.flashAttn, 'off', '应记录这次实际关掉了 flash attention');
+  // 状态接口把「实际生效参数」也带出去，界面能显示回退到了哪一组
+  assert.ok(status.flags && status.flags.flashAttn === 'off');
   // 状态接口带日志尾部，前端面板据此展示死因
   const st = await (await fetch(`${base}/api/native/status`)).json();
   assert.ok(Array.isArray(st.running.logTail));
