@@ -103,6 +103,8 @@ export async function streamNativeToHttp(engine, { model, messages, temperature,
   const folder = createThinkFolder();
   let content = '';
   let usage = null;
+  let upstreamError = '';
+  let sawFinish = false;
   let buffer = '';
   const decoder = new TextDecoder();
   for await (const chunk of upstream.body) {
@@ -121,6 +123,12 @@ export async function streamNativeToHttp(engine, { model, messages, temperature,
         continue;
       }
       if (data.usage) usage = data.usage;
+      // llama.cpp 在生成中途失败时会在流里塞一条 {"error":…}（HTTP 仍是 200）：
+      // 以前这里直接忽略，网页只看到回答流莫名中断、什么原因都没有。
+      if (data.error) {
+        upstreamError = String(data.error.message || data.error || '生成失败');
+        continue;
+      }
       const delta = data.choices?.[0]?.delta || {};
       const text = folder.push(delta);
       if (text) {
@@ -130,13 +138,25 @@ export async function streamNativeToHttp(engine, { model, messages, temperature,
       }
       const finish = data.choices?.[0]?.finish_reason;
       if (finish) {
+        sawFinish = true;
         emit({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: finish }] });
       }
     }
   }
+  if (upstreamError) {
+    // 明确告诉客户端“是上游生成失败”，而不是让它把空/半截回答当成正常结束
+    try {
+      res.write(`data: ${JSON.stringify({ error: { message: `llama.cpp 生成失败：${upstreamError}`, type: 'server_error', code: null } })}\n\n`);
+    } catch { /* 连接已断开 */ }
+  } else if (!content && !sawFinish) {
+    // 上游既没内容也没结束标记（版本不兼容/流被截断）：同样给出可执行的原因
+    try {
+      res.write(`data: ${JSON.stringify({ error: { message: 'llama.cpp 没有返回任何内容：请到“本机大模型”面板查看日志尾部，确认模型已正确加载。', type: 'server_error', code: null } })}\n\n`);
+    } catch { /* 连接已断开 */ }
+  }
   res.write('data: [DONE]\n\n');
   res.end();
-  return { content, usage };
+  return { content, usage, error: upstreamError };
 }
 
 /** 非流式：返回 OpenAI 风格的完整响应对象。 */

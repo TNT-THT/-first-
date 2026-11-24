@@ -8,7 +8,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readdir, rename, rm } from 'node:fs/promises';
+import { chmod, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractTarGz, extractZip } from './archive.js';
@@ -35,22 +35,48 @@ export function llamaBinaryName(platform = process.platform) {
   return platform === 'win32' ? 'llama-server.exe' : 'llama-server';
 }
 
-/** 按平台给 llama.cpp Release 资源打分，挑当前平台最合适的一个（CPU 优先于 GPU 变体之外的精确匹配）。 */
+/**
+ * 按平台给 llama.cpp Release 资源打分，挑当前平台最合适的一个。
+ *
+ * 必须只认 `llama-` 开头的正式构建包：同一发布里还有 `cudart-llama-…`（只有
+ * CUDA 运行库、不含 llama-server）。以前 CUDA 变体用的是不带前缀约束的正则，
+ * 会先命中靠前的 `cudart-llama-…` 包，解压后当然找不到 llama-server，
+ * 用户看到的是“压缩包里没有找到 llama-server”这种莫名其妙的话。
+ */
 export function pickReleaseAsset(assets, { platform = process.platform, arch = process.arch, variant = 'cpu' } = {}) {
-  const names = (assets || []).map((a) => a?.name).filter(Boolean);
-  const find = (re) => names.find((n) => re.test(n));
+  const list = (assets || []).filter((a) => a && typeof a.name === 'string' && /^llama-/.test(a.name));
+  const find = (re) => list.find((a) => re.test(a.name)) || null;
+  const bits = arch === 'arm64' ? 'arm64' : 'x64';
   let hit = null;
+  // 只挑“当前架构”的包：以前 CUDA/Vulkan 的正则是 (x64|arm64)，在 arm64 机器上
+  // 可能先命中 x64 的包，装完一运行就是“可执行文件格式错误”。
+  const archRe = bits;
   if (platform === 'win32') {
-    if (variant === 'cuda') hit = find(/bin-win-cuda-[\d.]+-x64\.zip$/i);
-    else if (variant === 'vulkan') hit = find(/bin-win-vulkan-x64\.zip$/i);
-    hit = hit || find(/bin-win-cpu-x64\.zip$/i) || find(/bin-win-.*x64\.zip$/i);
+    if (variant === 'cuda') hit = find(new RegExp(`bin-win-cuda-[\\d.]+-${archRe}\\.zip$`, 'i'));
+    else if (variant === 'vulkan') hit = find(new RegExp(`bin-win-vulkan-${archRe}\\.zip$`, 'i'));
+    hit = hit || find(new RegExp(`bin-win-cpu-${bits}\\.zip$`, 'i'))
+      || find(new RegExp(`bin-win-.*-${bits}\\.zip$`, 'i'));
   } else if (platform === 'darwin') {
-    hit = find(new RegExp(`bin-macos-${arch === 'arm64' ? 'arm64' : 'x64'}\\.tar\\.gz$`, 'i'));
+    hit = find(new RegExp(`bin-macos-${bits}\\.tar\\.gz$`, 'i'));
   } else {
-    hit = find(new RegExp(`bin-ubuntu-${arch === 'arm64' ? 'arm64' : 'x64'}\\.tar\\.gz$`, 'i'));
+    if (variant === 'cuda') hit = find(new RegExp(`bin-ubuntu-cuda-[\\d.]+-${archRe}\\.tar\\.gz$`, 'i'));
+    else if (variant === 'vulkan') hit = find(new RegExp(`bin-ubuntu-vulkan-${archRe}\\.tar\\.gz$`, 'i'));
+    hit = hit || find(new RegExp(`bin-ubuntu-${bits}\\.tar\\.gz$`, 'i'))
+      // 有的发布只给 rocm/sycl 之类：仍要能挑到一个本架构的可用包，而不是“没有预编译包”
+      || find(new RegExp(`bin-ubuntu-(?!cuda|vulkan|rocm|sycl)[a-z0-9_.-]*-${bits}\\.tar\\.gz$`, 'i'));
   }
-  if (!hit) return null;
-  return (assets || []).find((a) => a.name === hit) || null;
+  return hit;
+}
+
+/**
+ * CUDA 版 llama-server 还依赖同一发布里的 `cudart-llama-…` 运行库包（cudart DLL/so）。
+ * 只下主包会得到“缺 cudart64_*.dll”的启动失败。这里按主包名推导出配套包。
+ */
+export function pickCudartAsset(assets, primaryAsset) {
+  const name = String(primaryAsset?.name || '');
+  if (!/^llama-/.test(name)) return null;
+  const want = name.replace(/^llama-/, 'cudart-llama-');
+  return (assets || []).find((a) => a?.name === want) || null;
 }
 
 /** 在候选路径里找可执行的 llama-server。 */
@@ -87,36 +113,76 @@ export async function downloadLlamaBinary({ dataDir, fetchImpl = fetch, variant 
   if (!relRes.ok) throw new Error(`读取 llama.cpp 发布信息失败（HTTP ${relRes.status}），请检查网络后重试。`);
   const release = pickLlamaRelease(await relRes.json());
   if (!release) throw new Error('没有找到 llama.cpp 的 b 系列正式发布，请稍后重试或手动安装 llama.cpp。');
-  const asset = pickReleaseAsset(release.assets || [], { variant });
+  const assets = release.assets || [];
+  const asset = pickReleaseAsset(assets, { variant });
   if (!asset) {
-    throw new Error(`llama.cpp 最新版（${release.tag_name || '未知版本'}）没有当前平台的预编译包，请手动安装 llama.cpp 并设置 LLAMA_SERVER_BIN。`);
+    throw new Error(`llama.cpp 最新版（${release.tag_name || '未知版本'}）没有当前平台（${process.platform}-${process.arch}）的预编译包，请手动安装 llama.cpp 并设置环境变量 LLAMA_SERVER_BIN。`);
   }
+  // CUDA 版必须连 cudart 运行库一起装，否则 llama-server 启动就报缺 DLL/so
+  const cudart = variant === 'cuda' ? pickCudartAsset(assets, asset) : null;
   const binDir = path.join(dataDir, 'bin');
   const staging = path.join(dataDir, `.bin-staging-${Date.now()}`);
   await mkdir(staging, { recursive: true });
   try {
-    const res = await fetchImpl(asset.browser_download_url, {
-      headers: { 'user-agent': 'llm-host-skyblue' },
-      redirect: 'follow',
-    });
-    if (!res.ok) throw new Error(`下载 llama.cpp 失败（HTTP ${res.status}）。`);
-    const buf = Buffer.from(await res.arrayBuffer());
-    onProgress?.({ downloaded: buf.length, total: buf.length });
-    if (/\.zip$/i.test(asset.name)) await extractZip(buf, staging);
-    else await extractTarGz(buf, staging);
-    // 在解压结果里找 llama-server（可能在子目录）
+    const packs = [asset, ...(cudart ? [cudart] : [])];
+    // 先下到磁盘再解压：以前整包读进内存（CUDA 包 300~600 MB），低配电脑直接 OOM
+    for (const pack of packs) {
+      let buf = null;
+      for (let attempt = 0; attempt < 3 && !buf; attempt += 1) {
+        try {
+          const res = await fetchImpl(pack.browser_download_url, {
+            headers: { 'user-agent': 'llm-host-skyblue' },
+            redirect: 'follow',
+          });
+          if (!res.ok) throw new Error(`下载 llama.cpp 失败（HTTP ${res.status}）：${pack.name}`);
+          buf = Buffer.from(await res.arrayBuffer());
+        } catch (err) {
+          if (attempt >= 2) throw err;
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        }
+      }
+      onProgress?.({ downloaded: buf.length, total: buf.length, asset: pack.name });
+      if (/\.zip$/i.test(pack.name)) await extractZip(buf, staging);
+      else await extractTarGz(buf, staging);
+      buf = null;
+    }
+    // 在解压结果里找 llama-server（通常在 llama-bXXXX/ 子目录里）
     const found = await findInTree(staging, llamaBinaryName());
-    if (!found) throw new Error('llama.cpp 压缩包里没有找到 llama-server 可执行文件。');
+    if (!found) {
+      const hint = variant === 'cuda' || variant === 'vulkan'
+        ? `（当前选的是 ${variant} 版；这台电脑若没有对应显卡驱动，请把 OJ_LLAMA_VARIANT 改成 cpu 再试）`
+        : '';
+      throw new Error(`llama.cpp 压缩包里没有找到 ${llamaBinaryName()} 可执行文件${hint}。`);
+    }
     await rm(binDir, { recursive: true, force: true });
     await mkdir(binDir, { recursive: true });
-    // 把二进制所在目录的全部文件（dll/so 依赖）平铺到 bin/
-    const srcDir = path.dirname(found);
-    for (const name of await readdir(srcDir)) {
-      await rename(path.join(srcDir, name), path.join(binDir, name)).catch(() => {});
+    // 把二进制所在目录的全部文件（dll/so 依赖）平铺到 bin/；
+    // cudart 包解压在另一个目录，也要一并平铺过来（缺它 CUDA 版起不来）
+    const flat = async (fromDir) => {
+      const names = await readdir(fromDir).catch(() => []);
+      for (const name of names) {
+        const src = path.join(fromDir, name);
+        const st = await stat(src).catch(() => null);
+        if (!st || !st.isFile()) continue;
+        await rename(src, path.join(binDir, name)).catch(() => {});
+      }
+    };
+    await flat(path.dirname(found));
+    if (cudart) {
+      // cudart 包里的 dll/so 通常直接位于解压根或 bin/ 子目录：全部平铺
+      const walkFlat = async (dir, depth = 0) => {
+        if (depth > 3) return;
+        for (const e of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) await walkFlat(p, depth + 1);
+          else if (/\.(dll|so(\.[\d.]+)?|dylib)$/i.test(e.name)) await rename(p, path.join(binDir, e.name)).catch(() => {});
+        }
+      };
+      await walkFlat(staging);
     }
     const binary = path.join(binDir, llamaBinaryName());
     if (process.platform !== 'win32') await chmod(binary, 0o755).catch(() => {});
-    return { path: binary, version: release.tag_name || '', asset: asset.name };
+    return { path: binary, version: release.tag_name || '', asset: asset.name, cudart: cudart?.name || '' };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
   }
@@ -166,7 +232,9 @@ export class LlamaProcess {
       quant: this.info?.quant || null,
       gpuLayers: this.info?.gpuLayers ?? null,
       error: this.state === 'error' ? this.error : '',
+      // 崩溃时把日志尾部一起放进 error：界面上的红色提示要能直接说明死因
       logTail: this.logTail.slice(-20),
+      log: this.state === 'error' ? this.logTail.slice(-12) : [],
     };
   }
 
@@ -178,7 +246,7 @@ export class LlamaProcess {
     return this.info?.apiKey || '';
   }
 
-  async start({ binary, modelFile, modelId, quant, contextTokens = 8192, gpuLayers = 0, port }) {
+  async start({ binary, modelFile, modelId, quant, contextTokens = 8192, gpuLayers = 0, port, extraArgs = [] }) {
     await this.stop();
     this.state = 'loading';
     this.error = '';
@@ -194,9 +262,31 @@ export class LlamaProcess {
       '--jinja',
       '--reasoning-format', 'deepseek',
       '--api-key', apiKey,
+      // 历史里带上完整对话即可：每个请求都会把整段 messages 发来，llama.cpp 在 -c 满后
+      // 默认不再复用 prompt 前缀缓存，长对话每次都要重新预填充（超大模型极慢）。
+      // 显式打开它，前缀命中才生效。
+      '--cache-reuse', '256',
+      // flash attention：长上下文（超大模型常用 32K~256K）下省显存/内存的关键开关
+      '--flash-attn', 'on',
+      // 调用方按模型追加的参数（目前是 MoE 的专家卸载；普通模型为空）
+      ...(Array.isArray(extraArgs) ? extraArgs.filter((a) => typeof a === 'string' && a) : []),
     ];
-    this.info = { modelId, quant, port, apiKey, binary, gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0) };
-    const child = this.spawnImpl(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    this.info = { modelId, quant, port, apiKey, binary, contextTokens, gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0) };
+    // CUDA 版的 cudart 运行库就放在二进制同目录（随包下载时平铺在一起）：
+    // Linux/macOS 的动态链接器不会自动搜“可执行文件所在目录”，必须显式加进
+    // LD_LIBRARY_PATH / DYLD_LIBRARY_PATH，否则 CUDA 版一启动就报找不到 libcudart.so。
+    const binEnv = {};
+    const binDir = path.dirname(binary);
+    const win = process.platform === 'win32';
+    if (!win) {
+      const varName = process.platform === 'darwin' ? 'DYLD_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
+      const prev = process.env[varName];
+      binEnv[varName] = prev ? `${binDir}${path.delimiter}${prev}` : binDir;
+    }
+    const child = this.spawnImpl(binary, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(win ? {} : { env: { ...process.env, ...binEnv } }),
+    });
     this.child = child;
     const pushLog = (chunk) => {
       for (const line of String(chunk).split(/\r?\n/)) {
@@ -228,11 +318,25 @@ export class LlamaProcess {
     return this.readyPromise;
   }
 
+  /** 把日志尾部拼进错误信息，让上抛的报错自带死因（面板红字才有用）。 */
+  _withLog(message) {
+    const tail = this.logTail.slice(-6).join('\n');
+    return tail ? `${message}\n${tail}` : message;
+  }
+
   async waitHealthy(child) {
     const deadline = Date.now() + 30 * 60 * 1000;
+    let lastProgressNote = 0;
     while (Date.now() < deadline) {
       if (this.child !== child) throw new Error('llama-server 已被停止或替换。');
-      if (this.state === 'error') throw new Error(this.error);
+      if (this.state === 'error') throw new Error(this._withLog(this.error));
+      // 超大模型从磁盘读权重就要几分钟且没有 /health：把加载进度同步到日志尾部，
+      // 界面因此能显示“正在加载 xx%”，而不是一直空白。
+      const progressLine = [...this.logTail].reverse().find((l) => /load_tensors|loading model|llama_model_loader/i.test(l));
+      if (progressLine && Date.now() - lastProgressNote > 5000) {
+        lastProgressNote = Date.now();
+        this.logger.log?.(`[native] ${progressLine}`);
+      }
       try {
         const res = await this.fetchImpl(`${this.baseUrl}/health`, {
           headers: { authorization: `Bearer ${this.apiKey}` },
@@ -246,7 +350,7 @@ export class LlamaProcess {
       }
       await new Promise((r) => setTimeout(r, 500));
     }
-    throw new Error('llama-server 加载超时（30 分钟）。超大模型首次加载很慢，可稍后在状态面板确认，或换更小的量化。');
+    throw new Error(this._withLog('llama-server 加载超时（30 分钟）。超大模型首次加载很慢，可稍后在状态面板确认，或换更小的量化。'));
   }
 
   /** 等待就绪（聊天请求自动加载时用）。 */

@@ -172,6 +172,11 @@ export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetch
     // 浏览器传字节失败：回退服务端直连（量化分组缓存已在 /use 时写入，选档不必再列树）。
     // 失败原因必须带出来——以前这里默默吞掉，用户最后只看到直连的一句 fetch failed，
     // 根本不知道浏览器通道到底死在哪一步。
+    //
+    // 但“文件本身拿不到”（401/403/404）时直连同样注定失败：门控仓库要 Token、
+    // 仓库改名/删档要重新搜索。这时不再制造第二个更含糊的报错，直接把原因抛上去。
+    const fatal = /HTTP (401|403|404)|Token|仓库不存在|找不到/.test(String(browserErr?.message || ''));
+    if (fatal) throw browserErr;
     await adminJson(fetchImpl, `/api/native/models/${encodeURIComponent(out.id)}/download`, {
       token: adminToken,
       body: { quant: out.quant || undefined },
@@ -296,44 +301,77 @@ const HF_WEB_BASE = 'https://huggingface.co';
  */
 const defaultFetch = (...args) => fetch(...args);
 
-/** 浏览器直连 HF 文件树，归一化为与服务端 fetchRepoFiles 一致的清单。 */
-export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = defaultFetch, timeoutMs = 60000 } = {}) {
-  const url = `${HF_WEB_BASE}/api/models/${repo}/tree/main?recursive=true`;
-  let res;
-  let lastErr = null;
-  // 大仓库的文件树不小、慢代理下 30 秒经常不够：放宽到 60 秒，网络失败自动重试一次
-  for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
-    const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
-      ? AbortSignal.timeout(timeoutMs)
-      : undefined;
-    try {
-      res = await fetchImpl(url, {
-        headers: { accept: 'application/json' },
-        cache: 'no-store',
-        signal,
+/**
+ * 解析 Link 响应头里的 rel="next"（Hub 树接口按游标分页，每页最多 1000 条）。
+ * 与服务端 parseLinkNext 同一套口径。找不到返回 ''。
+ */
+export function parseLinkNext(linkHeader) {
+  for (const part of String(linkHeader || '').split(',')) {
+    const m = part.match(/<([^>]+)>\s*;\s*rel\s*=\s*"?([^";]+)"?/i);
+    if (m && String(m[2]).trim().toLowerCase() === 'next') return m[1];
+  }
+  return '';
+}
+
+/**
+ * 浏览器直连 HF 文件树，归一化为与服务端 fetchRepoFiles 一致的清单。
+ *
+ * 必须跟随 Link rel="next"：Hub 一次最多给 1000 条，超大模型仓库（几十个量化
+ * × 多个分片）轻松过千。以前只取第一页，于是量化列表少档、分片只下一部分，
+ * 加载时才报缺文件——浏览器通道是大多数用户的实际下载路径，这个坑影响最大。
+ */
+export async function fetchRepoTreeViaBrowser(repo, { fetchImpl = defaultFetch, timeoutMs = 60000, maxPages = 100 } = {}) {
+  let url = `${HF_WEB_BASE}/api/models/${repo}/tree/main?recursive=true`;
+  const out = [];
+  const seen = new Set();
+  const visited = new Set();
+  for (let page = 0; url && page < maxPages; page += 1) {
+    if (visited.has(url)) break;
+    visited.add(url);
+    let res = null;
+    let lastErr = null;
+    // 大仓库的文件树不小、慢代理下 30 秒经常不够：放宽到 60 秒，网络失败自动重试一次
+    for (let attempt = 0; attempt < 2 && !res; attempt += 1) {
+      const signal = typeof AbortSignal?.timeout === 'function' && timeoutMs > 0
+        ? AbortSignal.timeout(timeoutMs)
+        : undefined;
+      try {
+        res = await fetchImpl(url, {
+          headers: { accept: 'application/json' },
+          cache: 'no-store',
+          signal,
+        });
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 1200));
+      }
+    }
+    if (!res) {
+      const err = lastErr;
+      if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
+        throw new Error('浏览器连接 Hugging Face 超时（仓库较大或网络较慢），请检查网络/代理后重试。');
+      }
+      throw new Error(`浏览器无法连接 Hugging Face（${err?.message || '网络错误'}）。`);
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(`读取模型仓库 ${repo} 需要授权（HTTP ${res.status}）：该仓库是门控/私有仓库，请先在软件里保存 Hugging Face Token 再试。`);
+    }
+    if (!res.ok) throw new Error(`读取模型仓库 ${repo} 失败（HTTP ${res.status}）。`);
+    const tree = await res.json().catch(() => null);
+    if (!Array.isArray(tree)) throw new Error(`模型仓库 ${repo} 返回了无法识别的文件列表。`);
+    for (const e of tree) {
+      if (!e || e.type !== 'file' || typeof e.path !== 'string' || seen.has(e.path)) continue;
+      seen.add(e.path);
+      out.push({
+        path: e.path,
+        size: Math.max(0, Number(e?.lfs?.size ?? e?.size) || 0),
+        sha256: typeof e?.lfs?.oid === 'string' ? e.lfs.oid : '',
       });
-    } catch (err) {
-      lastErr = err;
-      if (attempt === 0) await new Promise((r) => setTimeout(r, 1200));
     }
+    const next = parseLinkNext(typeof res.headers?.get === 'function' ? res.headers.get('link') : '');
+    url = next && !visited.has(next) ? next : '';
   }
-  if (!res) {
-    const err = lastErr;
-    if (err?.name === 'TimeoutError' || err?.name === 'AbortError') {
-      throw new Error('浏览器连接 Hugging Face 超时（仓库较大或网络较慢），请检查网络/代理后重试。');
-    }
-    throw new Error(`浏览器无法连接 Hugging Face（${err?.message || '网络错误'}）。`);
-  }
-  if (!res.ok) throw new Error(`读取模型仓库 ${repo} 失败（HTTP ${res.status}）。`);
-  const tree = await res.json().catch(() => null);
-  if (!Array.isArray(tree)) throw new Error(`模型仓库 ${repo} 返回了无法识别的文件列表。`);
-  return tree
-    .filter((e) => e && e.type === 'file' && typeof e.path === 'string')
-    .map((e) => ({
-      path: e.path,
-      size: Math.max(0, Number(e?.lfs?.size ?? e?.size) || 0),
-      sha256: typeof e?.lfs?.oid === 'string' ? e.lfs.oid : '',
-    }));
+  return out;
 }
 
 /** 管理员 JSON 请求（走指定 fetchImpl，便于整条浏览器通道统一替换/测试）。 */
@@ -466,6 +504,19 @@ async function downloadOneFileViaBrowser(ctx) {
       if (sent > 0 && res.status === 200) {
         throw new Error('模型文件没有按断点返回内容（Range 被忽略），浏览器通道不可用。');
       }
+      if (res.status === 401 || res.status === 403) {
+        // 门控/私有仓库：这些必须是浏览器请求带上 Token 才有权限，换直连也一样 403
+        throw Object.assign(
+          new Error(`该仓库是门控/私有仓库，或该文件需要授权（HTTP ${res.status}），请先保存 Hugging Face Token 再试。`),
+          { status: res.status },
+        );
+      }
+      if (res.status === 404) {
+        throw Object.assign(
+          new Error(`仓库里找不到 ${file.path}（HTTP 404）：仓库可能已改名/删档，或文件被移走，请重新搜索这个模型。`),
+          { status: 404 },
+        );
+      }
       if (res.status !== 200 && res.status !== 206) {
         throw new Error(`从 Hugging Face 下载 ${file.path} 失败（HTTP ${res.status}）。`);
       }
@@ -530,6 +581,8 @@ async function downloadOneFileViaBrowser(ctx) {
       try { await reader?.cancel(); } catch { /* 忽略 */ }
       // 并行下载里已有别的文件失败：不用再重试探路，直接停，根因由失败的那个文件给出
       if (ctx.shouldStop?.()) throw err;
+      // 权限/不存在类错误（401/403/404）重试多少次都一样，只会让用户多等几十秒
+      if ([401, 403, 404].includes(Number(err?.status))) throw friendlyDownloadError(err, file.path);
       if (Number.isFinite(err?.received)) {
         sent = err.received;
       } else if (attempt < 4) {
