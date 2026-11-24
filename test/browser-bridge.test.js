@@ -269,17 +269,10 @@ test('真实 WebSocket 桥接：网页端回传的生成失败原因要原样到
 
 test('桥接模式：网页自身聊天 /api/chat 也经桥接返回流式回答', async (t) => {
   const base = await setup(t);
-  const loginRes = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ password: PASSWORD }),
-  });
-  assert.equal(loginRes.status, 200);
-  const { token } = await loginRes.json();
-
+  // 入口登录已删除：网页聊天免登录
   const chatRes = await fetch(`${base}/api/chat`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ messages: [{ role: 'user', content: '你好' }] }),
   });
   assert.equal(chatRes.status, 200);
@@ -297,15 +290,9 @@ test('桥接模式：网页聊天与 API 可各自选择不同模型，互不影
       { id: 'second-model', label: 'Second Model' },
     ],
   });
-  const loginRes = await fetch(`${base}/api/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ password: PASSWORD }),
-  });
-  const { token } = await loginRes.json();
   const webChat = (body) => fetch(`${base}/api/chat`, {
     method: 'POST',
-    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
 

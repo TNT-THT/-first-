@@ -10,19 +10,8 @@
   </head>
   <body>
     <div id="app" class="app">
-      <!-- 登录页：行内表单，不使用弹窗 -->
-      <section id="login" class="login" hidden>
-        <form id="loginForm" class="login-card">
-          <div class="logo">AI</div>
-          <h1 id="loginTitle">LLM托管平台——天蓝色1.0</h1>
-          <p class="muted">请输入站点访问口令</p>
-          <input id="password" type="password" autocomplete="current-password" placeholder="访问口令" required />
-          <button id="loginBtn" type="submit" class="btn primary block">登录</button>
-          <a id="accessDocsLink" class="muted small" href="/api/docs" target="_blank" rel="noopener noreferrer" hidden>API 与网页接入文档</a>
-          <p id="loginError" class="error" role="alert"></p>
-        </form>
-      </section>
-
+      <!-- 不再有入口登录页：打开即可使用。账号（可选）只用于把自己的对话与
+           设定按账号存到服务器，见顶栏“账号”按钮。 -->
       <div id="main" class="main" hidden>
         <aside id="sidebar" class="sidebar">
           <div class="brand">
@@ -49,6 +38,7 @@
             <button id="embedNewBtn" type="button" class="btn ghost small">新会话</button>
             <button id="exportChatBtn" type="button" class="btn ghost small" title="把当前对话保存为 Markdown 文件（仅保存在本机，不上传）">导出对话</button>
             <button id="usageBtn" type="button" class="btn ghost small" title="查看各模型的调用次数与 Token 用量（只保存在本机）">用量统计</button>
+            <button id="accountBtn" type="button" class="btn ghost small" title="账号：登录后你的对话记录与参数设定会按账号存到服务器，换设备登录也能恢复；不登录也能正常使用" hidden>账号</button>
             <button id="apiAccessBtn" type="button" class="btn ghost small" title="查看 API 地址、申请 Key 和生成分享链接" hidden>API 接入</button>
             <button id="modelDownloadBtn" type="button" class="btn ghost small" title="打开模型下载面板：在本机下载、加载大模型（独立面板，不用先进 API 接入）" hidden>模型下载</button>
             <button id="adminPanelBtn" type="button" class="btn ghost small" title="API 管理员控制台：参数、API Key 与调试台（需要管理口令）" hidden>API 管理</button>
@@ -99,6 +89,7 @@
                     <button type="button" class="btn ghost small" data-site-package="site-linux-x64.zip">Linux 版</button>
                   </div>
                   <p id="sitePackageHint" class="muted small"></p>
+                  <p class="muted small">局域网服务器版（Windows）：一台电脑运行模型，同一个局域网里的其他人用浏览器打开服务器地址就能用，计算都在服务器电脑上完成。解压后双击 start-server.bat，按包内《服务器使用说明》操作：<button type="button" class="btn ghost small" data-site-package="server-win-x64.zip">服务器版（Windows）</button></p>
                   <p class="muted small">独立软件「LLM托管平台——天蓝色1.0」（推荐给想跑大模型的用户）：单文件 exe 双击即用，功能与网站包一致，另外内置 llama.cpp 本机大模型引擎，可下载并运行 27B～671B 级开源大模型；完整压缩包除 exe 外还含解压版程序与使用说明。大模型权重不包含在安装包里，首次使用时在软件内按需下载。</p>
                   <div class="site-package-btns">
                     <button type="button" class="btn ghost small" data-site-package="LLM托管平台-天蓝色1.0.exe">独立软件 exe（Windows 单文件）</button>
@@ -112,8 +103,14 @@
                   <button id="exportDataBtn" type="button" class="btn ghost small">导出所选数据</button>
                 </div>
                 <div class="role-section">
+                  <p class="muted small"><strong>全局知识库</strong>（顶替原知识库：一个输入框写全部内容，对所有模型的对话生效；清空则不发送给 AI。管理员验证后可编辑，最多 4096 字。）</p>
+                  <textarea id="kbTextInput" rows="6" maxlength="4096" placeholder="在这里输入要让 AI 始终知道的内容，例如术语、事实、口径……" aria-label="全局知识库内容"></textarea>
+                  <div class="api-access-actions">
+                    <button id="kbSaveBtn" type="button" class="btn primary small">验证管理员并保存</button>
+                    <span id="kbCharCount" class="muted small">0 / 4096</span>
+                    <span id="kbStatus" class="muted small" role="status"></span>
+                  </div>
                   <p id="adaptHint" class="muted small"></p>
-                  <div id="migrateBox" class="local-list" hidden></div>
                   <div id="adaptList" class="local-list"></div>
                 </div>
               </div>
@@ -175,24 +172,13 @@
             </div>
             <div id="imageGallery" class="image-gallery"></div>
             <div id="imageAdmin" class="image-admin" hidden>
-              <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42, inputTokens=8192”即可记录生图参数（仅本机，直到清除；inputTokens 为描述输入上限，默认 4096，最高 16384）。也可以单独写一行“更正：……”（需管理员密钥验证）记录为该生图 AI 的更正。更正与知识库放在每次生图提示词的最前面，完整保留、不被截断：若它们自身超过单段 CLIP 的 75 个可用 token（中文每字通常占多个 token），将拒绝生成，请精简。画面描述超过 75 个 token 时会分段编码，最多 4 段（约 300 个 token）；超出部分末尾被截断（风格提示最先被截掉），并提示截断了多少 token。若某个模型不支持分段，会自动改用单段并在状态中说明。</p>
+              <p class="muted small">管理员：在提示词中单独写一行“参数：width=768, height=512, steps=25, guidance=6, seed=42, inputTokens=8192”即可记录生图参数（仅本机，直到清除；inputTokens 为描述输入上限，默认 4096，最高 16384）。全局知识库（在聊天页管理员面板的输入框维护）非空时会放在每次生图提示词的最前面，完整保留、不被截断：若它自身超过单段 CLIP 的 75 个可用 token（中文每字通常占多个 token），将拒绝生成，请精简；知识库为空时不添加任何前置内容。画面描述超过 75 个 token 时会分段编码，最多 4 段（约 300 个 token）；超出部分末尾被截断（风格提示最先被截掉），并提示截断了多少 token。若某个模型不支持分段，会自动改用单段并在状态中说明。</p>
               <div class="image-admin-row">
                 <input id="imageHintInput" type="text" placeholder="风格提示，例如：水彩风格，柔和光线" aria-label="风格提示" />
                 <button id="imageHintAdd" type="button" class="btn ghost small">添加风格提示</button>
                 <button id="imageParamsClear" type="button" class="btn ghost small">清除管理员生图参数</button>
               </div>
               <div id="imageHintList" class="local-list"></div>
-              <div class="image-admin-row">
-                <input id="imageCorrectionInput" type="text" placeholder="更正，例如：猫是橘色的（需管理员密钥）" aria-label="生图更正" />
-                <button id="imageCorrectionAdd" type="button" class="btn ghost small">添加更正（需密钥）</button>
-              </div>
-              <div id="imageCorrectionList" class="local-list"></div>
-              <div class="image-admin-row">
-                <input id="imageKnowledgeInput" type="text" placeholder="知识库条目，例如：白天的天空是蓝色（仅本机）" aria-label="生图知识库条目" />
-                <button id="imageKnowledgeAdd" type="button" class="btn ghost small">添加知识库条目</button>
-              </div>
-              <div id="imageKnowledgeList" class="local-list"></div>
-              <div id="imageMigrateBox" class="local-list" hidden></div>
             </div>
           </section>
 
@@ -272,7 +258,7 @@
         <p id="markDesc" class="muted small"></p>
         <label class="small muted" for="markWrong">错误的说法（可从回复中选取后打开）</label>
         <textarea id="markWrong" rows="2" aria-label="错误的说法"></textarea>
-        <label class="small muted" for="markRight">正确的说法（会同时作为该 AI 的更正）</label>
+        <label class="small muted" for="markRight">正确的说法（保存为校验规则，以后出现错误说法时会提醒）</label>
         <textarea id="markRight" rows="3" aria-label="正确的说法"></textarea>
         <input id="markKey" type="password" autocomplete="off" placeholder="管理员密钥" aria-label="管理员密钥" />
         <p id="markError" class="error small" role="alert"></p>
@@ -282,18 +268,32 @@
         </div>
       </form>
     </dialog>
-    <dialog id="correctionDialog" class="correction-dialog" aria-labelledby="correctionTitle">
-      <form id="correctionForm" class="correction-form">
-        <h3 id="correctionTitle">管理员验证</h3>
-        <p id="correctionDesc" class="muted small">这条消息包含更正。输入管理员密钥验证后，才会作为该 AI 的底层设定记录（仅本机）；取消则不发送。</p>
-        <pre id="correctionPreview" class="correction-preview"></pre>
-        <input id="correctionKey" type="password" autocomplete="off" placeholder="管理员密钥" aria-label="管理员密钥" />
-        <p id="correctionError" class="error small" role="alert"></p>
-        <div class="correction-actions">
-          <button id="correctionCancel" type="button" class="btn ghost small">取消</button>
-          <button id="correctionSubmit" type="submit" class="btn primary small">验证并发送</button>
+    <dialog id="accountDialog" class="correction-dialog" aria-labelledby="accountTitle">
+      <div class="correction-form">
+        <h3 id="accountTitle">账号</h3>
+        <div id="accountAnon">
+          <p class="muted small">不登录也能正常使用。登录（或注册）后，你的对话记录与参数设定会按账号存到服务器，换设备/换浏览器登录同一账号即可恢复；模型是共用的，不占账号空间。</p>
+          <label class="small muted" for="accountName">账号名</label>
+          <input id="accountName" type="text" autocomplete="username" placeholder="2~32 个字符" aria-label="账号名" />
+          <label class="small muted" for="accountPassword">密码</label>
+          <input id="accountPassword" type="password" autocomplete="current-password" placeholder="至少 6 位" aria-label="账号密码" />
+          <p id="accountError" class="error small" role="alert"></p>
+          <div class="correction-actions">
+            <button id="accountClose" type="button" class="btn ghost small">关闭</button>
+            <button id="accountRegisterBtn" type="button" class="btn ghost small">注册新账号</button>
+            <button id="accountLoginBtn" type="button" class="btn primary small">登录</button>
+          </div>
         </div>
-      </form>
+        <div id="accountLogged" hidden>
+          <p>当前账号：<strong id="accountCurrentName"></strong></p>
+          <p id="accountSyncStatus" class="muted small" role="status"></p>
+          <div class="correction-actions">
+            <button id="accountClose2" type="button" class="btn ghost small">关闭</button>
+            <button id="accountSyncNowBtn" type="button" class="btn ghost small">立即同步</button>
+            <button id="accountLogoutBtn" type="button" class="btn primary small">退出登录</button>
+          </div>
+        </div>
+      </div>
     </dialog>
     <dialog id="modelDownloadDialog" class="api-access-dialog model-download-dialog" aria-labelledby="modelDownloadTitle">
       <div class="api-access-panel">
@@ -328,6 +328,7 @@
             </label>
             <button id="apiNativeUnloadBtn" type="button" class="btn ghost small">卸载当前模型</button>
           </div>
+          <p class="muted small">GPU 卸载层数说明：0 = 全部层放在 CPU 上跑（不吃显存，较慢）。每一层大约占用的显存 ≈ 该档权重文件大小 ÷ 总层数（选中已下载的量化后会在该行显示估算值，如“共 32 层，每层约 90 MB”）。层数填多了不会直接加载失败：显存装不下时软件会自动减少卸载层数重新加载，最后实际生效的层数会显示在下方状态中。</p>
           <p id="apiNativeHint" class="muted small"></p>
           <div class="hf-bridge">
             <h4>找更多模型（从 Hugging Face 搜索）</h4>

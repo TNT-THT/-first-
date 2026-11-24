@@ -7,7 +7,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { loadConfig, validateConfig } from './config.js';
-import { createToken, verifyToken, checkPassword, checkApiKey, extractBearer } from './auth.js';
+import { createToken, verifyToken, checkPassword, checkApiKey, extractBearer, createUserToken, verifyUserToken } from './auth.js';
+import { AccountStore } from './accounts.js';
 import {
   validateMessages,
   validateChatCompletionBody,
@@ -122,6 +123,8 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
   // 单独放宽这一组接口的请求体上限；其余接口维持 256kb 收紧不变。
   // 必须排在全局 parser 之前：body-parser 解析过后全局 parser 会自动跳过。
   app.use('/api/native', express.json({ limit: '8mb' }));
+  // 账号数据同步（对话记录+设定整体上传）也需要更大的请求体上限。
+  app.use('/api/account', express.json({ limit: '10mb' }));
   app.use(express.json({ limit: '256kb' }));
   app.use(['/api/admin/api-keys', '/api/admin/settings', '/api/admin/usage-stats'], (_req, res, next) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -198,14 +201,28 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
   apiSettingsStore.apply(cfg);
   // API 用量统计（按模型聚合；仅管理员接口可读，见 /api/admin/usage-stats）
   const usageStats = new UsageStatsStore(cfg.usageStatsFile);
+  // 网页账号：注册/登录与每账号数据（对话与设定），模型共用。
+  const accountStore = new AccountStore(cfg.accountsFile);
   // 使用独立签名密钥空间；普通网页登录令牌不能冒充 API Key 管理员会话。
   const apiKeyAdminSecret = `${cfg.sessionSecret}:api-key-admin-v1`;
+  const accountSecret = `${cfg.sessionSecret}:account-v1`;
 
-  const requireAuth = (req, res, next) => {
-    const token = extractBearer(req);
-    if (!verifyToken(cfg.sessionSecret, token)) {
-      return res.status(401).json({ error: '未登录或登录已过期' });
-    }
+  /** 从请求里解析账号令牌（带了且有效才算登录；匿名使用也完全允许）。 */
+  const accountIdOf = (req) => verifyUserToken(accountSecret, extractBearer(req));
+  /** 必须登录账号的接口用：无有效账号令牌 → 401。 */
+  const requireAccount = (req, res, next) => {
+    const id = accountIdOf(req);
+    if (!id) return res.status(401).json({ error: '请先登录账号。' });
+    req.accountId = id;
+    return next();
+  };
+  /**
+   * 普通使用不再上锁：聊天、搜索、本机模型状态等接口匿名可用。
+   * 带账号令牌时顺便挂上身份（req.accountId），供需要的接口区分账号。
+   * 只保留管理员限制：/api/admin/*、本机模型管理仍走管理员口令会话。
+   */
+  const requireAuth = (req, _res, next) => {
+    req.accountId = accountIdOf(req) || undefined;
     next();
   };
 
@@ -296,6 +313,8 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
       apiBaseUrl: cfg.publicBaseUrl ? `${cfg.publicBaseUrl}/v1` : '/v1',
       apiKeyAuth: !!cfg.apiKeys?.length || !!cfg.apiAdminPassword,
       apiKeyManagerEnabled: !!cfg.apiAdminPassword,
+      // 网页账号体系可用（注册/登录 + 每账号对话与设定存服务器端）
+      accounts: true,
       localBrowserBridge: !!browserBridge,
       nativeModels: !!nativeEngine,
       apiDefaultTemperature: cfg.llmTemperature,
@@ -423,26 +442,75 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
     res.send(buildDocsHtml(cfg, browserBridge?.status()));
   });
 
-  app.post('/api/login', (req, res) => {
+  // ---- 网页账号（开放自助注册；普通使用免登录，登录只为了把自己的
+  // 对话记录与参数设定按账号存到服务器、换设备也能恢复）----
+  const issueAccountToken = (user) => createUserToken(accountSecret, user.id, 30 * 24 * 60 * 60 * 1000);
+
+  app.post('/api/account/register', async (req, res) => {
     const ip = req.ip;
     if (limiter.blocked(ip)) {
       return res.status(429).json({ error: '尝试次数过多，请 15 分钟后再试' });
     }
-    const { password } = req.body || {};
-    if (!checkPassword(cfg.appPassword, password)) {
-      limiter.fail(ip);
-      return res.status(401).json({ error: '密码错误' });
+    try {
+      const user = await accountStore.register(req.body?.name, req.body?.password);
+      limiter.reset(ip);
+      const { token, expiresAt } = issueAccountToken(user);
+      return res.status(201).json({ token, expiresAt, account: user });
+    } catch (err) {
+      if (Number.isInteger(err?.status) && err.status < 500) limiter.fail(ip);
+      const status = Number.isInteger(err?.status) ? err.status : 500;
+      return res.status(status).json({ error: err.message || '注册失败' });
     }
-    limiter.reset(ip);
-    const { token, expiresAt } = createToken(cfg.sessionSecret, cfg.tokenTtlHours * 3600 * 1000);
-    res.json({ token, expiresAt });
   });
 
-  app.get('/api/session', requireAuth, (_req, res) => res.json({ ok: true }));
+  app.post('/api/account/login', async (req, res) => {
+    const ip = req.ip;
+    if (limiter.blocked(ip)) {
+      return res.status(429).json({ error: '尝试次数过多，请 15 分钟后再试' });
+    }
+    const user = await accountStore.verify(req.body?.name, req.body?.password).catch(() => null);
+    if (!user) {
+      limiter.fail(ip);
+      return res.status(401).json({ error: '账号或密码错误。' });
+    }
+    limiter.reset(ip);
+    const { token, expiresAt } = issueAccountToken(user);
+    return res.json({ token, expiresAt, account: user });
+  });
+
+  app.get('/api/account/me', requireAccount, async (req, res) => {
+    const data = await accountStore.getData(req.accountId);
+    return res.json({ account: { id: req.accountId }, dataUpdatedAt: data.updatedAt });
+  });
+
+  app.get('/api/account/data', requireAccount, async (req, res) => {
+    const data = await accountStore.getData(req.accountId);
+    return res.json(data);
+  });
+
+  app.put('/api/account/data', requireAccount, async (req, res) => {
+    try {
+      const payload = req.body?.payload;
+      if (payload !== null && (typeof payload !== 'object' || Array.isArray(payload))) {
+        return res.status(400).json({ error: '账号数据必须是对象。' });
+      }
+      const out = await accountStore.putData(req.accountId, payload ?? null);
+      return res.json(out);
+    } catch (err) {
+      const status = Number.isInteger(err?.status) ? err.status : 500;
+      return res.status(status).json({ error: err.message || '保存账号数据失败' });
+    }
+  });
+
+  // 兼容旧探活：现在返回是否带了有效账号令牌（普通使用不再要求登录）
+  app.get('/api/session', (req, res) => res.json({ ok: true, loggedIn: !!accountIdOf(req) }));
 
   app.post('/api/chat', requireAuth, async (req, res) => {
     try {
       const messages = validateMessages(req.body?.messages);
+      // 思考模式开关（网页工具面板）：明确给出布尔值时透传给模型，关闭时下发
+      // enable_thinking=false；不传则沿用模型默认。此前从不透传，开关无效。
+      const thinking = typeof req.body?.thinking === 'boolean' ? req.body.thinking : undefined;
       const ac = new AbortController();
       res.on('close', () => {
         if (!res.writableFinished) ac.abort();
@@ -462,6 +530,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
             messages: nativeMessages,
             signal: ac.signal,
             res,
+            thinking,
           });
           return;
         }
@@ -516,10 +585,16 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
         const nativeMessages = messages.some((m) => m.role === 'system')
           ? messages
           : [{ role: 'system', content: cfg.systemPrompt }, ...messages];
-        await streamNativeToHttp(nativeEngine, { model: nativeModel, messages: nativeMessages, signal: ac.signal, res });
+        await streamNativeToHttp(nativeEngine, { model: nativeModel, messages: nativeMessages, signal: ac.signal, res, thinking });
         return;
       }
-      await proxyChatStream({ cfg, messages, res, signal: ac.signal });
+      await proxyChatStream({
+        cfg,
+        messages,
+        res,
+        signal: ac.signal,
+        params: thinking === false ? { chat_template_kwargs: { enable_thinking: false } } : undefined,
+      });
     } catch (err) {
       const status = err instanceof HttpError
         ? err.status
@@ -612,6 +687,9 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
       // 本机大模型（llama.cpp）：不依赖浏览器桥接与上游 API，由服务端原生生成。
       if (nativeEngine && requestedModel && nativeEngine.hasModel(requestedModel)) {
         usageModel = requestedModel;
+        // OpenAI 兼容的思考开关：chat_template_kwargs.enable_thinking 或 enable_thinking
+        const thinking = req.body?.chat_template_kwargs?.enable_thinking === false
+          || req.body?.enable_thinking === false ? false : undefined;
         if (stream) {
           let streamedChars = 0;
           const out = await streamNativeToHttp(nativeEngine, {
@@ -621,6 +699,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
             maxTokens: outputLimit,
             signal: ac.signal,
             res,
+            thinking,
             onText: (t) => {
               streamedChars += t.length;
             },
@@ -634,6 +713,7 @@ export function createApp(cfg = loadConfig(), { browserBridge = null, nativeEngi
           temperature,
           maxTokens: outputLimit,
           signal: ac.signal,
+          thinking,
         });
         if (ac.signal.aborted || res.destroyed) return;
         if (!out.content.trim()) {
@@ -899,7 +979,7 @@ if (isMain) {
     console.warn('[warn] 未配置 LLM_BASE_URL / LLM_MODEL，聊天功能暂不可用。');
   }
   if (!cfg.apiKeys?.length && !cfg.apiAdminPassword) {
-    console.warn('[warn] 未配置 API_KEYS 或 API_ADMIN_PASSWORD，外部 API（/v1/*）仅接受网页登录令牌；如需供外部系统调用，请配置其中一项。');
+    console.warn('[warn] 未配置 API_KEYS 或 API_ADMIN_PASSWORD，外部 API（/v1/*）暂无可用 Key；普通网页聊天不受影响，如需供外部系统调用请配置其中一项。');
   }
   const browserBridge = process.env.LOCAL_BROWSER_BRIDGE === '1' ? new BrowserModelBridge() : null;
   const nativeEngine = cfg.nativeModelsEnabled

@@ -22,9 +22,15 @@ async function req(path, { method = 'GET', token, body, headers = {} } = {}) {
   return fetch(base + path, { method, headers: h, body: body === undefined ? undefined : JSON.stringify(body) });
 }
 
-async function login() {
-  const r = await req('/api/login', { method: 'POST', body: { password: PASSWORD } });
-  assert.equal(r.status, 200);
+let accountSeq = 0;
+/** 注册一个测试账号，返回账号令牌（u1. 前缀）。入口登录已删除，不再有 /api/login。 */
+async function registerAccountToken() {
+  accountSeq += 1;
+  const r = await req('/api/account/register', {
+    method: 'POST',
+    body: { name: `tester${accountSeq}`, password: 'account-pass-123' },
+  });
+  assert.equal(r.status, 201);
   return (await r.json()).token;
 }
 
@@ -41,6 +47,7 @@ before(async () => {
     API_ADMIN_PASSWORD: 'manager-secret-test-password',
     API_KEYS_FILE: path.join(apiKeyDir, 'keys.json'),
     API_SETTINGS_FILE: path.join(apiKeyDir, 'settings.json'),
+    OJ_ACCOUNTS_FILE: path.join(apiKeyDir, 'accounts.json'),
     CORS_ORIGINS: '*',
     PUBLIC_BASE_URL: 'https://ai.example.test',
     API_MAX_TOKENS: '128',
@@ -143,9 +150,9 @@ test('网站端 API Key 管理：独立管理员口令、创建只展示一次�
   });
   assert.equal(badLogin.status, 401);
 
-  const webToken = await login();
-  const webTokenCannotManage = await req('/api/admin/api-keys', { token: webToken });
-  assert.equal(webTokenCannotManage.status, 401, '普通网站会话不能管理 API Key');
+  const accountToken = await registerAccountToken();
+  const webTokenCannotManage = await req('/api/admin/api-keys', { token: accountToken });
+  assert.equal(webTokenCannotManage.status, 401, '普通账号令牌不能管理 API Key');
 
   const adminLogin = await req('/api/admin/api-keys/login', {
     method: 'POST', body: { password: 'manager-secret-test-password' },
@@ -246,10 +253,10 @@ test('误把完整对话接口填为 Base URL 时的兼容路径，以及 /v1 �
   assert.match(missingData.error.message, /Base URL 以 \/v1 结尾/);
 });
 
-test('网站登录令牌不能调用 /v1；API 管理员令牌可用于网页调试台', async () => {
-  const webToken = await login();
+test('账号令牌不能调用 /v1；API 管理员令牌可用于网页调试台', async () => {
+  const webToken = await registerAccountToken();
   const webSessionDenied = await req('/v1/models', { token: webToken });
-  assert.equal(webSessionDenied.status, 401, '普通网站会话不能作为 API 凭证');
+  assert.equal(webSessionDenied.status, 401, '账号令牌不能作为 API 凭证');
 
   const adminLogin = await req('/api/admin/api-keys/login', {
     method: 'POST', body: { password: 'manager-secret-test-password' },
@@ -285,6 +292,7 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
     API_ADMIN_PASSWORD: 'manager-settings-test-password',
     API_KEYS_FILE: path.join(dir, 'keys.json'),
     API_SETTINGS_FILE: settingsPath,
+    OJ_ACCOUNTS_FILE: path.join(dir, 'accounts.json'),
     API_MAX_TOKENS: '128',
     CORS_ORIGINS: '*',
   });
@@ -304,10 +312,11 @@ test('管理员参数控制台：服务端鉴权、写入不回显密钥、运�
 
   try {
     assert.equal((await settingsReq('/api/admin/settings')).status, 401);
-    const webLogin = await settingsReq('/api/login', {
-      method: 'POST', body: { password: PASSWORD },
+    const webRegister = await settingsReq('/api/account/register', {
+      method: 'POST', body: { name: 'settings-tester', password: 'account-pass-123' },
     });
-    const webToken = (await webLogin.json()).token;
+    assert.equal(webRegister.status, 201);
+    const webToken = (await webRegister.json()).token;
     assert.equal((await settingsReq('/api/admin/settings', { token: webToken })).status, 401);
     assert.equal((await settingsReq('/v1/models', { token: webToken })).status, 401);
 
@@ -554,30 +563,63 @@ test('/v1/chat/completions：流式 SSE 补齐 OpenAI 元数据；模型与参�
   assert.equal(typeof (await malformed.json()).error.message, 'string');
 });
 
-test('登录：错误密码 401，正确密码返回令牌', async () => {
-  const bad = await req('/api/login', { method: 'POST', body: { password: 'wrong' } });
-  assert.equal(bad.status, 401);
-  const token = await login();
-  assert.match(token, /^v1\./);
-  const ok = await req('/api/session', { token });
-  assert.equal(ok.status, 200);
+test('入口登录已删除：/api/login 不存在，普通使用免登录', async () => {
+  const gone = await req('/api/login', { method: 'POST', body: { password: PASSWORD } });
+  assert.equal(gone.status, 404);
+  const session = await req('/api/session');
+  assert.equal(session.status, 200);
+  assert.equal((await session.json()).loggedIn, false);
 });
 
-test('未登录或伪造令牌无法访问 /api/chat', async () => {
+test('账号注册登录：开放注册、密码错误 401、数据按账号隔离', async () => {
+  const reg = await req('/api/account/register', {
+    method: 'POST', body: { name: 'alice01', password: 'alice-pass-123' },
+  });
+  assert.equal(reg.status, 201);
+  const { token } = await reg.json();
+  assert.match(token, /^u1\./);
+
+  const dup = await req('/api/account/register', {
+    method: 'POST', body: { name: 'alice01', password: 'alice-pass-123' },
+  });
+  assert.equal(dup.status, 409, '同名账号不能重复注册');
+
+  const bad = await req('/api/account/login', {
+    method: 'POST', body: { name: 'alice01', password: 'wrong-password' },
+  });
+  assert.equal(bad.status, 401);
+  const ok = await req('/api/account/login', {
+    method: 'POST', body: { name: 'alice01', password: 'alice-pass-123' },
+  });
+  assert.equal(ok.status, 200);
+
+  // 写入自己的数据后能读回；另一个账号读到的是空数据（隔离）
+  const put = await req('/api/account/data', {
+    method: 'PUT', token, body: { payload: { v: 1, sessions: { sessions: [] }, settings: {} } },
+  });
+  assert.equal(put.status, 200);
+  const mine = await (await req('/api/account/data', { token })).json();
+  assert.deepEqual(mine.payload.settings, {});
+  const other = await registerAccountToken();
+  const otherData = await (await req('/api/account/data', { token: other })).json();
+  assert.equal(otherData.payload, null);
+
+  // 没有账号令牌时，账号数据接口 401（但普通聊天不受影响，见下个用例）
+  assert.equal((await req('/api/account/data')).status, 401);
+  assert.equal((await req('/api/account/data', { token: 'u1.1.deadbeef.sig' })).status, 401);
+});
+
+test('聊天免登录：匿名可访问 /api/chat（入口锁已删除）', async () => {
   const body = { messages: [{ role: 'user', content: '题目' }] };
-  assert.equal((await req('/api/chat', { method: 'POST', body })).status, 401);
-  assert.equal((await req('/api/chat', { method: 'POST', body, token: 'v1.1.deadbeef' })).status, 401);
-  const token = await login();
-  const tampered = token.replace(/.$/, (c) => (c === '0' ? '1' : '0'));
-  assert.equal((await req('/api/chat', { method: 'POST', body, token: tampered })).status, 401);
+  const anon = await req('/api/chat', { method: 'POST', body });
+  assert.equal(anon.status, 200);
+  await anon.text();
 });
 
 test('/api/chat 流式透传上游结果，并带上服务端密钥与系统提示', async () => {
-  const token = await login();
   const before = llm.requests.length;
   const r = await req('/api/chat', {
     method: 'POST',
-    token,
     body: { messages: [{ role: 'user', content: '两数之和怎么做？' }] },
   });
   assert.equal(r.status, 200);
@@ -596,15 +638,14 @@ test('/api/chat 流式透传上游结果，并带上服务端密钥与系统提�
   assert.equal(upstream.body.model, 'qwen-test');
   assert.equal(upstream.body.stream, true);
   assert.equal(upstream.body.messages[0].role, 'system');
-  assert.match(upstream.body.messages[0].content, /外部资料.*不可信/);
+  // 没有外部资料证据块时，不注入“外部资料不可信”守卫（外部词汇为空不导入给 AI）
+  assert.doesNotMatch(upstream.body.messages[0].content, /外部资料.*不可信/);
   assert.equal(upstream.body.messages[1].content, '两数之和怎么做？');
 });
 
 test('上游报错时返回 502，且不把上游原始信息（含密钥）回显给浏览器', async () => {
-  const token = await login();
   const r = await req('/api/chat', {
     method: 'POST',
-    token,
     body: { messages: [{ role: 'user', content: '__ERROR__' }] },
   });
   const text = await r.text();
@@ -614,7 +655,6 @@ test('上游报错时返回 502，且不把上游原始信息（含密钥）回�
 });
 
 test('请求体校验：空数组、非法角色、末尾非用户消息、超长都会被拒绝', async () => {
-  const token = await login();
   const cases = [
     { messages: [] },
     { messages: [{ role: 'system', content: 'x' }] },
@@ -624,29 +664,34 @@ test('请求体校验：空数组、非法角色、末尾非用户消息、超�
     { messages: 'nope' },
   ];
   for (const body of cases) {
-    const r = await req('/api/chat', { method: 'POST', token, body });
+    const r = await req('/api/chat', { method: 'POST', body });
     assert.equal(r.status, 400, JSON.stringify(body).slice(0, 80));
   }
 });
 
-test('登录失败次数过多会被限流', async () => {
-  const app = createApp(loadConfig({ APP_PASSWORD: PASSWORD, SESSION_SECRET: 'x'.repeat(16) }));
-  const s = await new Promise((r) => {
-    const srv = app.listen(0, '127.0.0.1', () => r(srv));
+test('账号登录失败次数过多会被限流', async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-ai-login-limit-'));
+  const app = createApp(loadConfig({
+    SESSION_SECRET: 'x'.repeat(16),
+    OJ_ACCOUNTS_FILE: path.join(dir, 'accounts.json'),
+  }));
+  const srv = await new Promise((r) => {
+    const s2 = app.listen(0, '127.0.0.1', () => r(s2));
   });
-  const u = `http://127.0.0.1:${s.address().port}/api/login`;
+  const u = `http://127.0.0.1:${srv.address().port}/api/account/login`;
   const statuses = [];
   for (let i = 0; i < 11; i++) {
     const r = await fetch(u, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ password: 'bad-password' }),
+      body: JSON.stringify({ name: 'nobody', password: 'bad-password' }),
     });
     statuses.push(r.status);
   }
   assert.equal(statuses[9], 401);
   assert.equal(statuses[10], 429);
-  await new Promise((r) => s.close(r));
+  await new Promise((r) => srv.close(r));
+  await rm(dir, { recursive: true, force: true });
 });
 
 test('前端入口可访问（需先执行 npm run build）', async () => {

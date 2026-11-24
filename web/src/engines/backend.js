@@ -12,7 +12,7 @@ import {
 import { loadLocalModels, localRecords } from '../local-models.js';
 import { composeSystemPrompt, getModelParams } from '../adaptation.js';
 import { presetOverrides } from '../presets.js';
-import { SEARCH_EVIDENCE_SYSTEM_GUARD } from '../search/context.js';
+import { SEARCH_EVIDENCE_SYSTEM_GUARD, hasSearchEvidence } from '../search/context.js';
 import { getThinkingPref, isReasoningModel, setThinkingPref } from '../reasoning.js';
 import { getSlidingPref, setSlidingPref } from '../sliding.js';
 import {
@@ -56,15 +56,20 @@ function createRemoteBackend() {
     },
     isReady: () => true,
     setModel() {},
-    supportsThinking: () => false,
-    thinkingEnabled: () => true,
-    setThinking() {},
+    // 服务端（本机大模型/上游）支持思考开关：偏好与网页版共用同一存储，
+    // 发送时透传给服务端，由服务端下发 enable_thinking 给模型。
+    // 此前这里写死“不支持+恒开”，界面开关因此置灰且无效、模型却照常思考。
+    supportsThinking: () => true,
+    thinkingEnabled: () => getThinkingPref(),
+    setThinking(on) {
+      setThinkingPref(on);
+    },
     async ensureReady() {},
     async releaseIfStale() {
       return false;
     },
     async *stream({ messages, signal, model }) {
-      yield* streamChat({ messages, signal, model });
+      yield* streamChat({ messages, signal, model, thinking: getThinkingPref() });
     },
   };
 }
@@ -204,8 +209,10 @@ function createWebLLMBackend(cfg) {
       // 本机 API 桥接专用：服务端系统提示词，附加到本机系统提示词之后
       systemPrompt: extraSystemPrompt = '',
     }) {
-      // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数
-      let systemContent = `${composeSystemPrompt(cfg.systemPrompt, modelId)}\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}`;
+      // 管理员反馈（仅本机）附加到该模型的系统提示词，并可覆盖该模型的采样参数。
+      // 外部资料的安全守则只在本条真的带了资料时才追加：为空不导入给 AI。
+      let systemContent = composeSystemPrompt(cfg.systemPrompt, modelId);
+      if (hasSearchEvidence(messages)) systemContent += `\n\n${SEARCH_EVIDENCE_SYSTEM_GUARD}`;
       const extraSystem = String(extraSystemPrompt || '').trim();
       if (extraSystem && !systemContent.includes(extraSystem)) {
         systemContent = `${systemContent}\n\n${extraSystem}`;
@@ -225,10 +232,10 @@ function createWebLLMBackend(cfg) {
         new Error('Prompt tokens exceed context window size：对话内容已占满上下文窗口，请新建对话或减少历史');
       // 历史超出提示词空间时从最早的消息开始丢弃；若启用了思考预算，为强制输出说明预留空间
       const reserve = w.thinkingActive ? FORCE_NOTE_RESERVE : 0;
-      // 管理员信息（更正、知识库、反馈）从不截断：系统提示放不下时直接报错
+      // 管理员信息（全局知识库、反馈）从不截断：系统提示放不下时直接报错
       if (!systemPromptFits(system, w.contextWindow, reserve)) {
         throw new Error(
-          `管理员信息（更正、知识库、反馈）与系统提示已超出${w.sliding ? '滑动' : '上下文'}窗口，为避免截断，本次未发送。请精简这些内容，或在参数中调大${w.sliding ? '滑动窗口（参数 slidingWindow，最大 20000）' : '上下文窗口（参数 contextWindow，最大 20000）'}。`,
+          `管理员信息（知识库、反馈）与系统提示已超出${w.sliding ? '滑动' : '上下文'}窗口，为避免截断，本次未发送。请精简这些内容，或在参数中调大${w.sliding ? '滑动窗口（参数 slidingWindow，最大 20000）' : '上下文窗口（参数 contextWindow，最大 20000）'}。`,
         );
       }
       const all = fitHistory([system, ...folded.rest], w.contextWindow - ANSWER_MIN_TOKENS - reserve, {

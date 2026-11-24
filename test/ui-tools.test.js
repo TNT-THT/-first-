@@ -102,7 +102,7 @@ async function waitFor(check, { timeout = 1500, interval = 20 } = {}) {
 }
 
 test('启动后两个模型下拉框内容一致，窄屏下拉框可用', () => {
-  assert.equal($('#login').hidden, true, '静态模式应直接进入聊天');
+  assert.equal($('#login'), null, '入口登录页已删除，静态模式直接进入聊天');
   assert.equal($('#main').hidden, false);
   assert.equal($$('#modelSelect option').length, config.webllm.models.length + config.webllm.pendingModels.length);
   assert.equal($$('#modelSelectCompact option').length, config.webllm.models.length + config.webllm.pendingModels.length);

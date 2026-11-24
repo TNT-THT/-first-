@@ -5,10 +5,12 @@
  *   inputTokens 为描述输入上限（token，默认 4096，最高 16384），不影响生成结果，只决定何时拒绝过长的输入。
  *   只接受下表中的键，数值夹到范围内；width/height 取整到 8 的倍数。
  * - 管理员的风格提示（hints）：附加到提示词末尾。
- * - 管理员的更正（corrections，需管理员密钥验证）与本地知识库（knowledge）：
- *   作为该生图 AI 的底层设定，放在提示词最前面（优先保证被文本编码器读取）。
+ * - 全局知识库（管理员在聊天管理员面板的一个输入框里维护，对所有模型共用）：
+ *   由调用方作为 lead 传进来，放在提示词最前面（优先保证被文本编码器读取）；
+ *   知识库为空时不传任何前置内容（不塞空壳词汇）。
  *   注意：CLIP 每段读取 75 个内容 token，描述最多分 4 段（约 300 个 token）；超出部分不参与生图。
  *   管理员内容只占第一段，超出单段时拒绝生成（中文通常每字占多个 token）。
+ *   旧的生图“更正/条目式知识库”已随全站对话修正功能一并删除，旧数据不再读取。
  * - 生效优先级：界面控件（默认值）< 管理员参数。
  * 存储键 oj-ai.image.v1，按图片模型分别保存（与聊天模型的适应记录 oj-ai.adapt.v1 分开）。
  */
@@ -76,11 +78,9 @@ function writeAll(data, storage) {
 }
 
 function entryFor(data, modelId) {
-  const e = data.models[modelId] || { params: {}, hints: [], corrections: [], knowledge: [] };
+  const e = data.models[modelId] || { params: {}, hints: [] };
   e.params = e.params || {};
   e.hints = Array.isArray(e.hints) ? e.hints : [];
-  e.corrections = Array.isArray(e.corrections) ? e.corrections : [];
-  e.knowledge = Array.isArray(e.knowledge) ? e.knowledge : [];
   data.models[modelId] = e;
   return e;
 }
@@ -90,49 +90,7 @@ export function getImageSettings(modelId, { storage = globalThis.localStorage } 
   return {
     params: e?.params && typeof e.params === 'object' ? e.params : {},
     hints: Array.isArray(e?.hints) ? e.hints : [],
-    corrections: Array.isArray(e?.corrections) ? e.corrections : [],
-    knowledge: Array.isArray(e?.knowledge) ? e.knowledge : [],
   };
-}
-
-/** 添加一条更正（底层设定）。调用方须已通过管理员密钥验证。空文本或重复时返回 null。 */
-export function addImageCorrection(modelId, text, { storage = globalThis.localStorage, now = Date.now() } = {}) {
-  return addNote(modelId, 'corrections', text, { storage, now });
-}
-
-/** 添加一条本地知识库条目（仅本机）。空文本或重复时返回 null。 */
-export function addImageKnowledge(modelId, text, { storage = globalThis.localStorage, now = Date.now() } = {}) {
-  return addNote(modelId, 'knowledge', text, { storage, now });
-}
-
-export function removeImageCorrection(modelId, id, { storage = globalThis.localStorage } = {}) {
-  return removeNote(modelId, 'corrections', id, { storage });
-}
-
-export function removeImageKnowledge(modelId, id, { storage = globalThis.localStorage } = {}) {
-  return removeNote(modelId, 'knowledge', id, { storage });
-}
-
-function addNote(modelId, field, text, { storage, now }) {
-  const body = String(text || '').trim();
-  if (!modelId || !body) return null;
-  const data = readAll(storage);
-  const entry = entryFor(data, modelId);
-  if (entry[field].some((n) => n.text === body)) return null;
-  const note = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text: body, ts: now };
-  entry[field] = [...entry[field], note].slice(-MAX_IMAGE_NOTES);
-  writeAll(data, storage);
-  return note;
-}
-
-function removeNote(modelId, field, id, { storage }) {
-  const data = readAll(storage);
-  const entry = data.models[modelId];
-  if (!entry) return false;
-  const before = entry[field].length;
-  entry[field] = entry[field].filter((n) => n.id !== id);
-  writeAll(data, storage);
-  return entry[field].length !== before;
 }
 
 /** 清洗管理员参数：只保留合法键并限制在范围内。没有有效参数时返回 null。 */
@@ -198,60 +156,14 @@ export function clearImageHints(modelId, { storage = globalThis.localStorage } =
   return true;
 }
 
-/** 有管理员记录（更正、知识库或风格提示）的生图 AI 的 id 列表（仅本机）。 */
+/** 有风格提示记录的生图 AI 的 id 列表（仅本机）。 */
 export function imageAdminModelIds({ storage = globalThis.localStorage } = {}) {
   const models = readAll(storage).models;
-  return Object.keys(models).filter((id) => {
-    const e = models[id];
-    return ['corrections', 'knowledge', 'hints'].some((k) => Array.isArray(e?.[k]) && e[k].length > 0);
-  });
+  return Object.keys(models).filter((id) => Array.isArray(models[id]?.hints) && models[id].hints.length > 0);
 }
 
 /**
- * 把条目复制到某个生图 AI（仅本机；复制而非移动）。
- * items = {corrections, knowledge, hints}，每项为 [{text, from?}]。
- * - 更正会成为该生图 AI 的底层设定（放在提示词最前面），因此必须 allowCorrections（调用方已通过管理员密钥验证）。
- * - 完全相同文字的条目跳过（duplicate）；每类不超过上限，超出的不写入（overflow），不丢弃已有条目。
- * - 没有写入任何内容时不改动存储。
- * 返回 {corrections, knowledge, hints, duplicate, overflow}：各类实际新增条数。
- */
-export function copyIntoImageModel(
-  modelId,
-  items = {},
-  { storage = globalThis.localStorage, now = Date.now(), allowCorrections = false } = {},
-) {
-  if (!modelId) throw new Error('请选择目标生图 AI');
-  if ((items.corrections || []).length && !allowCorrections) throw new Error('迁移更正需要先通过管理员密钥验证');
-  const limits = { corrections: MAX_IMAGE_NOTES, knowledge: MAX_IMAGE_NOTES, hints: MAX_IMAGE_HINTS };
-  const data = readAll(storage);
-  const entry = entryFor(data, modelId);
-  const counts = { corrections: 0, knowledge: 0, hints: 0, duplicate: 0, overflow: 0 };
-  for (const field of ['corrections', 'knowledge', 'hints']) {
-    const known = new Set(entry[field].map((n) => n.text));
-    for (const src of items[field] || []) {
-      const text = String(src?.text ?? '').trim();
-      if (!text) continue;
-      if (known.has(text)) {
-        counts.duplicate += 1;
-        continue;
-      }
-      if (entry[field].length >= limits[field]) {
-        counts.overflow += 1;
-        continue;
-      }
-      known.add(text);
-      const note = { id: `${now.toString(36)}${Math.random().toString(36).slice(2, 7)}`, text, ts: now };
-      if (src.from) note.from = String(src.from);
-      entry[field] = [...entry[field], note];
-      counts[field] += 1;
-    }
-  }
-  if (counts.corrections || counts.knowledge || counts.hints) writeAll(data, storage);
-  return counts;
-}
-
-/**
- * 提示词 = 前置内容（更正、知识库，按给定顺序）+ 用户描述 + 风格提示（逗号分隔）。
+ * 提示词 = 前置内容（全局知识库）+ 用户描述 + 风格提示（逗号分隔）。
  * lead 为字符串数组；没有前置内容时结果与旧版本相同。
  */
 export function buildImagePrompt(userPrompt, hints = [], lead = []) {
@@ -265,9 +177,10 @@ export function effectiveInputLimit(params = {}) {
   return Number.isFinite(v) ? clampParam('inputTokens', v) : DEFAULT_INPUT_TOKENS;
 }
 
-/** 管理员设定的前置内容：更正在前，其次是知识库。 */
-export function imageLeadTexts(settings) {
-  return [...(settings?.corrections || []), ...(settings?.knowledge || [])].map((n) => n.text);
+/** 全局知识库作为前置内容：非空时返回 [文本]，为空时返回 []（不注入）。 */
+export function imageLeadTexts(knowledgeText) {
+  const text = String(knowledgeText || '').trim();
+  return text ? [text] : [];
 }
 
 /**

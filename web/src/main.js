@@ -6,7 +6,7 @@ import { hasThinking, splitThinking } from './think.js';
 import { setThinkingPref, truncateThinking } from './reasoning.js';
 import { trimRepetition } from './repetition.js';
 import { isAllowedOrigin } from './origin.js';
-import { ApiError, checkSession, fetchConfig, getToken, login, setToken } from './api.js';
+import { ApiError, accountLogin, accountRegister, checkSession, fetchAccountData, fetchConfig, getToken, putAccountData, setToken } from './api.js';
 import { createBackend } from './engines/backend.js';
 import {
   getSavedDefaultModel,
@@ -32,21 +32,15 @@ import {
   summarizeUsage,
 } from './usage-stats.js';
 import {
-  addImageCorrection,
   addImageHint,
-  addImageKnowledge,
   buildImagePrompt,
-  copyIntoImageModel,
   effectiveInputLimit,
-  imageAdminModelIds,
   clearImageParams,
   effectiveImageSettings,
   getImageSettings,
   imageLeadTexts,
   parseImageParams,
-  removeImageCorrection,
   removeImageHint,
-  removeImageKnowledge,
   sanitizeImageParams,
   setImageParams,
   stripImageParamLine,
@@ -90,25 +84,20 @@ import {
   adaptedModelIds,
   applyParamSuggestion,
   clearModelAdaptation,
+  getKnowledgeText,
   getModelParams,
   listAdaptation,
-  listCorrections,
-  listKnowledge,
   listParamLog,
-  migrateAdaptation,
+  MAX_KB_TEXT_CHARS,
   PARAM_LABELS,
   PARAM_LIMITS,
-  parseCorrections,
   recordFeedback,
-  removeCorrection,
-  removeKnowledge,
   removeNote,
   resetAllParams,
   resetParam,
   sanitizeParams,
+  setKnowledgeText,
   setModelParams,
-  solidifyJsonl,
-  stripCorrectionLines,
   suggestParams,
   mechanicalReply,
 } from './adaptation.js';
@@ -165,11 +154,25 @@ const MODE = import.meta.env.VITE_ENGINE === 'remote' ? 'remote' : 'webllm';
 const $ = (sel) => document.querySelector(sel);
 const els = {
   body: document.body,
-  login: $('#login'),
-  loginForm: $('#loginForm'),
-  loginError: $('#loginError'),
-  loginBtn: $('#loginBtn'),
-  accessDocsLink: $('#accessDocsLink'),
+  accountBtn: $('#accountBtn'),
+  accountDialog: $('#accountDialog'),
+  accountAnon: $('#accountAnon'),
+  accountLogged: $('#accountLogged'),
+  accountName: $('#accountName'),
+  accountPassword: $('#accountPassword'),
+  accountError: $('#accountError'),
+  accountLoginBtn: $('#accountLoginBtn'),
+  accountRegisterBtn: $('#accountRegisterBtn'),
+  accountClose: $('#accountClose'),
+  accountClose2: $('#accountClose2'),
+  accountCurrentName: $('#accountCurrentName'),
+  accountSyncStatus: $('#accountSyncStatus'),
+  accountSyncNowBtn: $('#accountSyncNowBtn'),
+  accountLogoutBtn: $('#accountLogoutBtn'),
+  kbTextInput: $('#kbTextInput'),
+  kbSaveBtn: $('#kbSaveBtn'),
+  kbCharCount: $('#kbCharCount'),
+  kbStatus: $('#kbStatus'),
   apiAccessBtn: $('#apiAccessBtn'),
   adminPanelBtn: $('#adminPanelBtn'),
   modelDownloadBtn: $('#modelDownloadBtn'),
@@ -280,10 +283,8 @@ const els = {
   apiHfRunnerStatus: $('#apiHfRunnerStatus'),
   apiHfSearchStatus: $('#apiHfSearchStatus'),
   apiHfResults: $('#apiHfResults'),
-  password: $('#password'),
   main: $('#main'),
   brandName: $('#brandName'),
-  loginTitle: $('#loginTitle'),
   modelSelect: $('#modelSelect'),
   presetSelect: $('#presetSelect'),
   modelLabel: $('#modelLabel'),
@@ -348,11 +349,6 @@ const els = {
   adminKey: $('#adminKey'),
   roleSubmit: $('#roleSubmit'),
   roleError: $('#roleError'),
-  correctionDialog: $('#correctionDialog'),
-  correctionForm: $('#correctionForm'),
-  correctionPreview: $('#correctionPreview'),
-  correctionDesc: $('#correctionDesc'),
-  correctionKey: $('#correctionKey'),
   markDialog: $('#markDialog'),
   markForm: $('#markForm'),
   markDesc: $('#markDesc'),
@@ -361,9 +357,7 @@ const els = {
   markKey: $('#markKey'),
   markError: $('#markError'),
   markCancel: $('#markCancel'),
-  correctionError: $('#correctionError'),
-  correctionCancel: $('#correctionCancel'),
-  correctionSubmit: $('#correctionSubmit'),
+  markSubmit: $('#markSubmit'),
   roleLogoutBtn: $('#roleLogoutBtn'),
   modelAdminHint: $('#modelAdminHint'),
   localModelList: $('#localModelList'),
@@ -374,7 +368,6 @@ const els = {
   exportParamsText: $('#exportParamsText'),
   exportParamsLabel: $('#exportParamsLabel'),
   adaptList: $('#adaptList'),
-  migrateBox: $('#migrateBox'),
   imageModeBtn: $('#imageModeBtn'),
   imagePanel: $('#imagePanel'),
   imageModelSelect: $('#imageModelSelect'),
@@ -394,7 +387,6 @@ const els = {
   imageProgressFill: $('#imageProgressFill'),
   imageGallery: $('#imageGallery'),
   imageModelFiles: $('#imageModelFiles'),
-  imageMigrateBox: $('#imageMigrateBox'),
   imageFilesStatus: $('#imageFilesStatus'),
   imageDownloadBtn: $('#imageDownloadBtn'),
   imageExportModelBtn: $('#imageExportModelBtn'),
@@ -415,12 +407,6 @@ const els = {
   imageHintAdd: $('#imageHintAdd'),
   imageParamsClear: $('#imageParamsClear'),
   imageHintList: $('#imageHintList'),
-  imageCorrectionInput: $('#imageCorrectionInput'),
-  imageCorrectionAdd: $('#imageCorrectionAdd'),
-  imageCorrectionList: $('#imageCorrectionList'),
-  imageKnowledgeInput: $('#imageKnowledgeInput'),
-  imageKnowledgeAdd: $('#imageKnowledgeAdd'),
-  imageKnowledgeList: $('#imageKnowledgeList'),
 };
 
 // ---------- 运行参数 ----------
@@ -459,6 +445,7 @@ function scrollToBottom(force = false) {
 
 function persist() {
   saveStore(state.store);
+  scheduleAccountSync();
 }
 
 function activeSession() {
@@ -773,7 +760,7 @@ function buildCheckWarning(hits) {
   const box = document.createElement('div');
   box.className = 'check-warning';
   const title = document.createElement('strong');
-  title.textContent = '⚠ 回答中含有管理员标记为错误的说法（以下为正确说法，以更正为准）';
+  title.textContent = '⚠ 回答中含有管理员标记为错误的说法（以下为正确说法，请以此为准）';
   box.appendChild(title);
   const list = document.createElement('ul');
   for (const { rule } of hits) {
@@ -844,7 +831,7 @@ function selectedTextIn(el) {
 
 /**
  * 管理员标记错误：填写错误说法与正确说法，验证管理员密钥后，
- * 保存为校验规则（以后回答再出现错误说法时提示），并把正确说法记为该 AI 的更正（仅本机）。
+ * 保存为校验规则：以后回答再出现错误说法时会提示，并展示正确说法（仅本机）。
  */
 function openMarkDialog(msg, presetWrong = '') {
   const dlg = els.markDialog;
@@ -858,7 +845,7 @@ function openMarkDialog(msg, presetWrong = '') {
   els.markError.textContent = '';
   els.markDesc.textContent =
     `为即将回答的「${modelDisplayName(target)}」标记错误说法。之后该 AI 的回答若再出现错误说法，会在回答下方提示正确说法。` +
-    '正确说法会同时作为该 AI 的更正（底层设定，仅本机）。输入管理员密钥验证后保存；取消则不记录。';
+    '保存后，本机今后回答中再出现错误说法时会给出提示。输入管理员密钥验证后保存；取消则不记录。';
   els.markForm.onsubmit = async (e) => {
     e.preventDefault();
     els.markError.textContent = '';
@@ -888,14 +875,9 @@ function openMarkDialog(msg, presetWrong = '') {
         els.markError.textContent = res.error;
         return;
       }
-      // 正确说法同时作为更正（已验证密钥，仅本机）；换行压成一行，符合更正格式
-      recordFeedback(target, `更正：${right.replace(/\s*\n\s*/g, ' ')}`, {
-        allowCorrections: true,
-        question: questionBefore(session, msg),
-      });
       dlg.close();
       renderMessages();
-      showStatus(`已记录：「${wrong.trim()}」→「${right.trim()}」（同时作为该 AI 的更正，仅本机）。`);
+      showStatus(`已保存校验规则：「${wrong.trim()}」出现时请核对，应为「${right.trim()}」（仅本机）。`);
     } finally {
       if (submitBtn) submitBtn.disabled = false;
     }
@@ -1051,7 +1033,7 @@ function undoTurn() {
   els.input.focus();
   flashStatus(
     turn.recorded
-      ? '已撤回上一轮，问题已放回输入框。该轮的反馈、更正或参数修改已记录在本机，撤回不会回滚，请到适应面板中删除。'
+      ? '已撤回上一轮，问题已放回输入框。该轮的反馈或参数修改已记录在本机，撤回不会回滚，请到适应面板中删除。'
       : '已撤回上一轮，问题已放回输入框（未发送）。',
   );
 }
@@ -1079,7 +1061,7 @@ function modelDisplayName(id) {
 }
 
 /**
- * 管理员（且为本机模式）在对话中的修改（参数行、参数关键词、附加说明、更正、标记错误）
+ * 管理员（且为本机模式）在对话中的修改（参数行、参数关键词、附加说明、标记错误）
  * 一律针对“即将回答的 AI”，即下拉框当前选中的模型（state.backend.modelId），而不是上一条回复的 AI。
  * 这些修改仅保存在本机，并作为该 AI 之后回答的附加说明或参数。
  */
@@ -1125,18 +1107,16 @@ function fmtChange(c) {
 /**
  * 记录管理员在本条消息中的修改，并直接生效（不需要确认，不调用模型）。
  * 返回 {target, label, changes, extra, parts}：changes 为实际变更的参数 [{key, from, to}]，
- * extra 为同时记录的附加说明或更正描述。非管理员、非本机模式或没有 AI 时返回空结果。
+ * extra 为同时记录的附加说明描述。非管理员、非本机模式或没有 AI 时返回空结果。
+ * （旧“更正/对话修正”已删除：消息内容只按反馈/参数处理。）
  */
-function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
+function recordAdminFeedback(session, text) {
   const none = { target: null, label: '', changes: [], extra: [], parts: [] };
   if (MODE !== 'webllm' || !isAdmin() || !state.backend) return none;
   const target = state.backend.modelId;
   if (!target) return none;
   const label = modelDisplayName(target);
-  // 附加说明与更正关联的问题：会话中最近一条已完成回答所回答的问题
-  const lastReply = [...(session?.messages || [])].reverse().find((m) => m.role === 'assistant' && !m.fixed && m.content && !m.error);
-  const question = lastReply ? questionBefore(session, lastReply) : '';
-  const rec = recordFeedback(target, text, { allowCorrections, question });
+  const rec = recordFeedback(target, text);
   const parts = [];
   const changes = [];
   const extra = [];
@@ -1144,16 +1124,12 @@ function recordAdminFeedback(session, text, { allowCorrections = false } = {}) {
     parts.push('已记录反馈');
     extra.push('记录了附加说明');
   }
-  if (rec?.corrections?.length) {
-    parts.push(`已记录 ${rec.corrections.length} 条更正（已验证密钥，作为该 AI 的底层设定，无条件采纳）`);
-    extra.push(`记录了 ${rec.corrections.length} 条更正`);
-  }
   if (rec?.params) {
     for (const c of rec.changes || []) changes.push({ key: c.key, from: c.from, to: c.to });
     parts.push('已更新参数 ' + (changes.length ? changes.map(fmtChange).join(', ') : '（未变化）'));
   }
-  // 没有显式参数行、也没有更正时，按关键词直接修改参数（不需要确认，不调用模型）
-  if (!rec?.params && !rec?.corrections?.length) {
+  // 没有显式参数行时，按关键词直接修改参数（不需要确认，不调用模型）
+  if (!rec?.params) {
     const current = effectiveParams(target);
     for (const f of suggestParams(text, current)) {
       const to = applyParamSuggestion(target, f.key, f.value, { reason: f.reason });
@@ -1190,56 +1166,6 @@ async function releaseAfterSettingChange() {
   return releaseStaleEngine();
 }
 
-/**
- * 管理员密钥验证（用于更正）。返回 Promise<boolean>：验证通过为 true；取消或密钥错误则不发送，文字保留在输入框中。
- */
-function verifyCorrectionKey(text, desc = '') {
-  return new Promise((resolve) => {
-    if (!hasAccessGate(state.appConfig.access)) {
-      showStatus('未配置管理员密钥，无法记录更正，消息未发送。', { error: true });
-      resolve(false);
-      return;
-    }
-    const dlg = els.correctionDialog;
-    let settled = false;
-    const finish = (ok) => {
-      if (settled) return;
-      settled = true;
-      els.correctionForm.removeEventListener('submit', onSubmit);
-      els.correctionCancel.removeEventListener('click', onCancel);
-      dlg.removeEventListener('close', onCancel);
-      if (dlg.open) dlg.close();
-      els.correctionKey.value = '';
-      resolve(ok);
-    };
-    const onSubmit = async (e) => {
-      e.preventDefault();
-      els.correctionError.textContent = '';
-      els.correctionSubmit.disabled = true;
-      try {
-        const ok = await verifyAccessPassword(state.appConfig.access, els.correctionKey.value);
-        if (ok) finish(true);
-        else {
-          els.correctionError.textContent = '管理员密钥错误，更正未记录，消息未发送。';
-          els.correctionKey.select();
-        }
-      } finally {
-        els.correctionSubmit.disabled = false;
-      }
-    };
-    const onCancel = () => finish(false);
-    els.correctionForm.addEventListener('submit', onSubmit);
-    els.correctionCancel.addEventListener('click', onCancel);
-    dlg.addEventListener('close', onCancel);
-    els.correctionPreview.textContent = text;
-    els.correctionDesc.textContent = desc || '这条消息包含更正。输入管理员密钥验证后，才会作为该 AI 的底层设定记录（仅本机）；取消则不发送。';
-    els.correctionError.textContent = '';
-    els.correctionKey.value = '';
-    dlg.showModal();
-    els.correctionKey.focus();
-  });
-}
-
 /** 固定提示（不调用模型）：作为助手消息显示，但不标注 AI、不作为反馈对象，也不发送给模型。 */
 function showFixedReply(session, isFirst, userMsg, content) {
   session.messages.push(userMsg, { role: 'assistant', content, ts: Date.now(), fixed: true });
@@ -1257,26 +1183,11 @@ async function send(rawText) {
   const text = (rawText || '').trim();
   if (!text || state.streaming) return;
 
-  // 更正需要管理员密钥验证（仅 WebLLM 本机模式、管理员）；更正针对即将回答的 AI
-  let allowCorrections = false;
-  if (MODE === 'webllm' && isAdmin() && parseCorrections(text).length) {
-    const desc = `这条消息包含更正，将作为「${modelDisplayName(state.backend.modelId)}」（即将回答的 AI）的底层设定记录（仅本机）。输入管理员密钥验证后保存；取消则不发送。`;
-    const ok = await verifyCorrectionKey(text, desc);
-    if (!ok) {
-      if (!els.input.value) {
-        els.input.value = text;
-        autoGrow();
-      }
-      return;
-    }
-    allowCorrections = true;
-  }
-
   const session = ensureSession();
   const isFirst = session.messages.length === 0;
   const userMsg = { role: 'user', content: text, ts: Date.now() };
-  const feedback = recordAdminFeedback(session, text, { allowCorrections });
-  // 记录过反馈、更正或参数修改的轮次：撤回时需要提示（撤回不回滚这些记录）
+  const feedback = recordAdminFeedback(session, text);
+  // 记录过反馈或参数修改的轮次：撤回时需要提示（撤回不回滚这些记录）
   if (feedback.parts?.length) userMsg.recorded = true;
   // 机械识别：管理员消息只是参数调整指令（已直接修改参数、没有提问）时，不调用模型，给出固定提示
   if (mechanicalReply(text, feedback)) {
@@ -1550,14 +1461,17 @@ async function send(rawText) {
       noteUsageOnce('stopped');
       paintAssistant(bubble, assistantMsg);
     } else if (err instanceof ApiError && err.status === 401 && state.backend.mode === 'remote') {
-      // 服务端令牌失效：回到登录页。本次问题退回输入框，登录后可直接重新发送。
+      // 账号令牌失效：清掉令牌并退回访客状态（普通使用不再需要登录）。
+      // 本次问题退回输入框，重新登录账号后可直接再发送。
       setToken('');
+      accountState.name = null;
+      renderAccountUI();
       session.messages.splice(-2, 2);
       if (isFirst) session.title = '新会话';
       persist();
       els.input.value = text;
       autoGrow();
-      showLogin('登录已过期，请重新输入密码');
+      showStatus('账号登录已过期，已切换回访客状态（不影响正常使用）；需要同步记录时请重新登录账号。', { error: true });
       return;
     } else {
       noteUsageOnce('error');
@@ -1842,7 +1756,10 @@ function node(tag, props = {}, ...children) {
 
 /** 当前的工具清单。available 为 false 时行仍然显示（附原因），避免用户以为功能消失了。 */
 function toolDefs() {
-  const thinkingSupported = MODE === 'webllm' && !!state.backend?.supportsThinking();
+  // 思考开关两种模式都可用：网页版作用于本机 WebLLM 模型，服务端模式透传给
+  // 服务端下发 enable_thinking。此前服务端模式被写死为不可用，开关置灰且
+  // 显示关闭、模型却照常思考，已修复为全程贯通。
+  const thinkingSupported = !!state.backend?.supportsThinking();
   const cfg = state.search.config;
   const searchOk = searchAvailable(cfg, state.search.settings);
   return [
@@ -2000,17 +1917,20 @@ function toggleToolsPanel(force) {
 
 function renderThinkingCard() {
   if (MODE !== 'webllm') {
+    // 服务端模式：开关经服务端下发 enable_thinking 给模型（本机大模型立刻生效）
+    const on = !!state.backend?.thinkingEnabled();
     return toolCardShell({
       title: '思考模式',
-      state: '不可用',
+      state: on ? '已开启' : '已关闭',
       body: node(
         'div',
         { class: 'tool-card-body' },
-        node('p', { class: 'muted small' }, '服务端模式下，是否输出思考过程由服务器端的模型决定，本站无法切换。'),
+        node('p', {}, '开启后，推理模型（Qwen3、DeepSeek-R1 等）会先写出思考过程再回答；关闭后直接回答、速度更快。开关由服务端下发给模型，下一条消息立即生效，不需要重新加载模型。'),
+        node('p', { class: 'tool-note' }, '少数模型对关闭思考的支持取决于其对话模板；若关闭后仍有思考过程，是该模型模板不接受此开关。'),
       ),
     });
   }
-  const supported = MODE === 'webllm' && !!state.backend?.supportsThinking();
+  const supported = !!state.backend?.supportsThinking();
   const on = supported && !!state.backend?.thinkingEnabled();
   const eff = effectiveParams(state.backend.modelId);
   const win = activeContextWindow(eff);
@@ -2062,7 +1982,7 @@ function renderSlidingCard() {
     node(
       'p',
       {},
-      '开启后上下文窗口固定为滑动窗口大小，历史超出时最早的消息滚出窗口；管理员的更正、知识库与反馈始终保留在最前面。',
+      '开启后上下文窗口固定为滑动窗口大小，历史超出时最早的消息滚出窗口；全局知识库与管理员反馈始终保留在最前面。',
     ),
     node(
       'p',
@@ -2255,6 +2175,12 @@ async function setThinkingTool(on) {
   if (!state.backend) return;
   state.backend.setThinking(on);
   refreshTools();
+  if (MODE !== 'webllm') {
+    flashStatus(on
+      ? '已开启思考模式：推理模型会先展示思考过程（可折叠），回答更充分但更慢。下一条消息立即生效。'
+      : '已关闭思考模式：推理模型直接给出回答，速度更快。下一条消息立即生效。');
+    return;
+  }
   const eff = effectiveParams(state.backend.modelId);
   const win = activeContextWindow(eff);
   const released = state.streaming ? false : await releaseStaleEngine();
@@ -2698,7 +2624,7 @@ function closeUsagePanel() {
   else els.usageDialog.removeAttribute('open');
 }
 
-/** 选择性导出本机数据（会话、管理员说明/参数/更正、知识库、新建AI清单）。仅管理员。 */
+/** 选择性导出本机数据（会话、管理员说明/参数、全局知识库、新建AI清单）。仅管理员。 */
 function exportLocalData() {
   if (!requireAdmin('导出本机数据')) return;
   const ids = [...els.dataSectionList.querySelectorAll('input.data-section:checked')].map((i) => i.value);
@@ -2830,39 +2756,9 @@ function deleteAdaptNote(modelId, noteId) {
   renderAdaptList();
 }
 
-/** 删除一条更正（仅本机）。 */
-function deleteCorrection(modelId, correctionId) {
-  if (!requireAdmin('删除更正')) return;
-  removeCorrection(modelId, correctionId);
-  renderAdaptList();
-}
-
-/** 删除本地知识库中的一条管理员信息（仅本机）。 */
-function deleteKnowledgeEntry(modelId, entryId) {
-  if (!requireAdmin('删除本地知识库条目')) return;
-  removeKnowledge(modelId, entryId);
-  renderAdaptList();
-}
-
-function exportSolidifyData(modelId) {
-  if (!requireAdmin('导出固化数据')) return;
-  const { text, counts } = solidifyJsonl(modelId);
-  const total = counts.correction + counts.knowledge;
-  const summary = `更正 ${counts.correction} 条，知识库 ${counts.knowledge} 条，跳过 ${counts.skipped} 条（无对应问题）`;
-  if (!total) {
-    showStatus(`没有可导出的固化样本：${summary}。`, { error: true });
-    return;
-  }
-  const safe = String(modelId).replace(/[^\w.-]+/g, '_');
-  downloadBlob(new Blob([text], { type: 'application/x-ndjson' }), `solidify-${safe}.jsonl`);
-  showStatus(
-    `已导出 ${total} 条固化样本（${summary}）。在本机运行：python3 training/ojtrain.py solidify <文件>（需要 GPU）。`,
-  );
-}
-
 function clearAdaptation(modelId) {
   if (!requireAdmin('清空 AI 适应记录')) return;
-  if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录（包括说明、本地知识库、参数与参数变更记录）？`)) return;
+  if (!window.confirm(`清空「${modelDisplayName(modelId)}」的全部适应记录（包括说明、参数与参数变更记录）？`)) return;
   clearModelAdaptation(modelId);
   renderAdaptList();
 }
@@ -2968,22 +2864,171 @@ document.addEventListener(
   true
 );
 
-// ---------- 登录（仅远程模式；webllm 模式无需口令即可使用） ----------
-function showLogin(message = '') {
-  els.main.hidden = true;
-  els.login.hidden = false;
-  els.loginError.textContent = message;
-  els.password.value = '';
-  els.password.focus();
-}
-
 function showMain() {
-  els.login.hidden = true;
   els.main.hidden = false;
   refreshAll();
   refreshIdleStatus();
   applyLinkPrompt();
   els.input.focus({ preventScroll: true });
+}
+
+// ---------- 账号（仅服务端模式）：不登录也能正常使用；登录只为了把自己的
+// 对话记录与参数设定按账号存到服务器，换设备登录同一账号即可恢复 ----------
+// 注意：不再有网站入口登录页/入口口令，打开即用；只有管理员操作需要口令。
+const accountState = { name: null };
+const ACCOUNT_NAME_KEY = 'oj-ai.accountName.v1';
+const ACCOUNT_SYNC_KEY = 'oj-ai.accountSync.v1';
+/** 随账号同步的本机设定键（对话记录另走 sessions 整体同步）。 */
+const ACCOUNT_SETTINGS_KEYS = [
+  'oj-ai.thinking.v1',
+  'oj-ai.sliding.v1',
+  'oj-ai.preset.v1',
+  'oj-ai.defaultModel.v1',
+  'oj-ai.search.v1',
+  'oj-ai.search.settings.v1',
+  'oj-ai.localChatModel.v1',
+  'oj-ai.adapt.v1',
+  'oj-ai.kbText.v1',
+];
+let accountSyncTimer = null;
+let applyingAccountData = false;
+
+function accountLoggedIn() {
+  return MODE === 'remote' && !!accountState.name && !!getToken();
+}
+
+function collectAccountPayload() {
+  const settings = {};
+  for (const key of ACCOUNT_SETTINGS_KEYS) {
+    try {
+      const v = localStorage.getItem(key);
+      if (v !== null) settings[key] = v;
+    } catch { /* 存储不可用 */ }
+  }
+  return { v: 1, sessions: state.store, settings };
+}
+
+/** 把服务器上的账号数据落到本机（设定写回 localStorage，对话整体替换）。 */
+function applyAccountPayload(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  applyingAccountData = true;
+  try {
+    if (payload.settings && typeof payload.settings === 'object') {
+      for (const key of ACCOUNT_SETTINGS_KEYS) {
+        try {
+          if (typeof payload.settings[key] === 'string') localStorage.setItem(key, payload.settings[key]);
+          else localStorage.removeItem(key);
+        } catch { /* 存储不可用 */ }
+      }
+    }
+    if (payload.sessions && Array.isArray(payload.sessions.sessions)) {
+      state.store = payload.sessions;
+      if (!getSession(state.store)) state.store.activeId = state.store.sessions[0]?.id || null;
+    }
+    saveStore(state.store);
+    return true;
+  } finally {
+    applyingAccountData = false;
+  }
+}
+
+function markAccountSynced(updatedAt) {
+  try {
+    localStorage.setItem(ACCOUNT_SYNC_KEY, JSON.stringify({ updatedAt: updatedAt || Date.now() }));
+  } catch { /* 存储不可用 */ }
+}
+
+function setAccountSyncText(text) {
+  if (els.accountSyncStatus) els.accountSyncStatus.textContent = text;
+}
+
+/** 登录状态下把本机数据推到服务器（防抖；失败只提示不打断使用）。 */
+function scheduleAccountSync() {
+  if (!accountLoggedIn() || applyingAccountData) return;
+  if (els.accountBtn) setAccountSyncText('有更改待同步…');
+  clearTimeout(accountSyncTimer);
+  accountSyncTimer = setTimeout(() => { void syncAccountNow(); }, 1200);
+}
+
+async function syncAccountNow() {
+  if (!accountLoggedIn()) return false;
+  try {
+    const out = await putAccountData(collectAccountPayload());
+    markAccountSynced(out?.updatedAt);
+    setAccountSyncText(`已同步到服务器（${new Date().toLocaleTimeString()}）`);
+    return true;
+  } catch (err) {
+    setAccountSyncText(`同步失败：${err.message || '网络错误'}（本机记录不受影响，稍后会再试）`);
+    return false;
+  }
+}
+
+/** 登录/注册成功后：服务器上有数据就拉下来恢复，没有就把本机数据推上去。 */
+async function afterAccountAuth(data, { isRegister = false } = {}) {
+  accountState.name = data?.account?.name || els.accountName.value.trim();
+  try {
+    localStorage.setItem(ACCOUNT_NAME_KEY, accountState.name);
+  } catch { /* 存储不可用 */ }
+  const remote = await fetchAccountData().catch(() => null);
+  if (remote?.payload) {
+    applyAccountPayload(remote.payload);
+    markAccountSynced(remote.updatedAt);
+    setAccountSyncText('已从服务器恢复你的对话与设定。');
+  } else {
+    await putAccountData(collectAccountPayload())
+      .then((out) => markAccountSynced(out?.updatedAt))
+      .catch(() => {});
+    setAccountSyncText(isRegister ? '账号已创建，本机对话与设定已存到服务器。' : '已登录，本机对话与设定已存到服务器。');
+  }
+  renderAccountUI();
+  refreshAll();
+  renderPresetOptions();
+  refreshTools();
+}
+
+function renderAccountUI() {
+  if (!els.accountBtn) return;
+  const logged = accountLoggedIn();
+  els.accountBtn.textContent = logged ? `账号：${accountState.name}` : '账号';
+  if (els.accountAnon) els.accountAnon.hidden = logged;
+  if (els.accountLogged) els.accountLogged.hidden = !logged;
+  if (logged && els.accountCurrentName) els.accountCurrentName.textContent = accountState.name;
+}
+
+/** 启动时恢复账号：有令牌则校验并按需拉取服务器数据（服务器更新时以服务器为准）。 */
+async function initAccount() {
+  if (MODE !== 'remote' || !els.accountBtn) return;
+  els.accountBtn.hidden = false;
+  if (!getToken()) {
+    renderAccountUI();
+    return;
+  }
+  const me = await checkSession().catch(() => null);
+  if (!me) {
+    setToken('');
+    renderAccountUI();
+    return;
+  }
+  accountState.name = me;
+  renderAccountUI();
+  try {
+    const remote = await fetchAccountData();
+    let localMark = 0;
+    try {
+      localMark = JSON.parse(localStorage.getItem(ACCOUNT_SYNC_KEY) || '{}').updatedAt || 0;
+    } catch { /* 忽略 */ }
+    if (remote?.payload && remote.updatedAt > localMark) {
+      applyAccountPayload(remote.payload);
+      markAccountSynced(remote.updatedAt);
+      refreshAll();
+      renderPresetOptions();
+      refreshTools();
+    } else if (!remote?.payload) {
+      await syncAccountNow();
+    }
+  } catch {
+    /* 同步失败不阻断使用，本机数据照常 */
+  }
 }
 
 function applyLinkPrompt() {
@@ -3003,19 +3048,57 @@ function applyLinkPrompt() {
   }
 }
 
-els.loginForm.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  els.loginError.textContent = '';
-  els.loginBtn.disabled = true;
-  try {
-    await login(els.password.value);
-    showMain();
-  } catch (err) {
-    els.loginError.textContent = err.message || '登录失败';
-  } finally {
-    els.loginBtn.disabled = false;
-  }
+els.accountBtn?.addEventListener('click', () => {
+  renderAccountUI();
+  if (els.accountError) els.accountError.textContent = '';
+  els.accountDialog?.showModal();
 });
+els.accountClose?.addEventListener('click', () => els.accountDialog?.close());
+els.accountClose2?.addEventListener('click', () => els.accountDialog?.close());
+
+async function accountAuth(kind) {
+  const name = els.accountName.value.trim();
+  const password = els.accountPassword.value;
+  els.accountError.textContent = '';
+  els.accountLoginBtn.disabled = true;
+  els.accountRegisterBtn.disabled = true;
+  try {
+    const data = kind === 'register' ? await accountRegister(name, password) : await accountLogin(name, password);
+    els.accountPassword.value = '';
+    await afterAccountAuth(data, { isRegister: kind === 'register' });
+    showStatus(kind === 'register' ? `账号「${accountState.name}」注册成功并已登录。` : `已登录账号「${accountState.name}」。`);
+  } catch (err) {
+    els.accountError.textContent = err.message || (kind === 'register' ? '注册失败' : '登录失败');
+  } finally {
+    els.accountLoginBtn.disabled = false;
+    els.accountRegisterBtn.disabled = false;
+  }
+}
+els.accountLoginBtn?.addEventListener('click', () => void accountAuth('login'));
+els.accountRegisterBtn?.addEventListener('click', () => void accountAuth('register'));
+els.accountSyncNowBtn?.addEventListener('click', () => { void syncAccountNow(); });
+els.accountLogoutBtn?.addEventListener('click', () => {
+  // 退出登录：先把最新数据推上去，再清令牌；本机保留一份访客副本，不删对话
+  void syncAccountNow().finally(() => {
+    setToken('');
+    accountState.name = null;
+    try {
+      localStorage.removeItem(ACCOUNT_NAME_KEY);
+    } catch { /* 存储不可用 */ }
+    renderAccountUI();
+    els.accountDialog?.close();
+    showStatus('已退出账号登录。当前浏览器里保留着刚才的对话（访客状态）；登录其他账号会恢复那个账号的数据。');
+  });
+});
+window.addEventListener('beforeunload', () => {
+  if (accountLoggedIn()) void syncAccountNow();
+});
+// 周期同步只对服务端模式有意义（静态版 MODE!=='remote' 时 accountLoggedIn 恒为 false）
+if (MODE === 'remote') {
+  setInterval(() => {
+    if (accountLoggedIn() && !document.hidden) void syncAccountNow();
+  }, 30000);
+}
 
 // ---------- 网站端远程接入：API Key 管理与网页链接生成 ----------
 let apiKeyEnvironmentCount = 0;
@@ -3324,7 +3407,16 @@ function buildNativeModelRow(m, admin) {
     const bits = q.bitsPerWeight ? `，每权重约 ${q.bitsPerWeight} 位` : '';
     const size = q.totalBytes ? ` · ${(q.totalBytes / 1e9).toFixed(1)} GB` : (q.sizeGB ? ` · ${q.sizeGB} GB` : '');
     const use = q.directUse === false ? '需要转换后才能用' : '下载后可直接使用';
-    setQuantStatus(`已选 ${q.quant}：${q.typeLabel || 'GGUF 量化'}${bits}${size} · ${use}。${q.qualityNote || ''}确认就点“下载所选量化”。`);
+    // 每层显存估算：权重大小 ÷ 总层数（层数来自 GGUF 文件头，服务端随量化信息下发）
+    const layers = Number(q.layers) || 0;
+    const bytes = Number(q.totalBytes) || (q.sizeGB ? q.sizeGB * 1e9 : 0);
+    let gpuNote = '';
+    if (layers > 0 && bytes > 0) {
+      const perLayerMB = Math.round((bytes / layers / 1e6) * 10) / 10;
+      const want = Math.max(0, Number(els.apiNativeGpuLayers?.value) || 0);
+      gpuNote = `共 ${layers} 层，每层约占 ${perLayerMB} MB 显存${want ? `；当前填的卸载 ${want} 层大约需要 ${(perLayerMB * want / 1024).toFixed(2)} GB 显存（另需少量计算缓冲）` : ''}。显存不够时会自动减少层数，不会直接失败。`;
+    }
+    setQuantStatus(`已选 ${q.quant}：${q.typeLabel || 'GGUF 量化'}${bits}${size} · ${use}。${q.qualityNote || ''}${gpuNote}确认就点“下载所选量化”。`);
   });
 
   const mkBtn = (text, onClick, { disabled = false } = {}) => {
@@ -3553,9 +3645,15 @@ function renderNativePanel() {
       : '卸载当前模型';
   }
   if (els.apiNativeHint) {
-    els.apiNativeHint.textContent = admin
+    const base = admin
       ? '下载/加载/删除会占用本机磁盘与内存，超大模型请先确认内存（内存+显存合计）足够。同一时间只运行一个大模型，加载新模型会自动卸载当前模型。'
       : '查看状态不需要验证；下载、加载、删除权重需要先在下方“管理员控制面板”验证口令（验证一次即可，之后不用重复验证，点“锁定管理面板”才退出）。';
+    const gpuBits = [];
+    if (running.state === 'ready' && running.gpuLayers !== null && running.gpuLayers !== undefined) {
+      gpuBits.push(`当前模型实际卸载到 GPU 的层数：${running.gpuLayers} 层`);
+    }
+    if (nativeStatus.loadNote) gpuBits.push(nativeStatus.loadNote);
+    els.apiNativeHint.textContent = gpuBits.length ? `${base} ${gpuBits.join('；')}。` : base;
   }
   if (els.apiHfTokenStatus) {
     els.apiHfTokenStatus.textContent = nativeStatus.hf?.hasToken
@@ -4654,319 +4752,41 @@ function refreshRoleUI() {
   renderLocalList();
   renderAdaptList();
   renderParamOverrides();
-}
-
-/** 跨模型迁移的选择状态（仅本页面会话有效，不保存）。聊天页与生图管理员面板各自一份。 */
-const migrateState = { source: '', target: '' };
-const imageMigrateState = { source: '', target: '' };
-
-function migrateEl(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function makeMigrateSelect(items, value, onChange) {
-  const sel = document.createElement('select');
-  sel.className = 'migrate-select';
-  for (const it of items) {
-    const opt = document.createElement('option');
-    opt.value = it.id;
-    opt.textContent = it.label;
-    sel.append(opt);
+  // 全局知识库：管理员可编辑并保存（非管理员只读回显）
+  if (els.kbTextInput && document.activeElement !== els.kbTextInput) {
+    els.kbTextInput.value = getKnowledgeText();
   }
-  sel.value = value;
-  sel.addEventListener('change', () => onChange(sel.value));
-  return sel;
+  if (els.kbTextInput) els.kbTextInput.disabled = !admin;
+  if (els.kbSaveBtn) els.kbSaveBtn.disabled = !admin;
+  updateKbCharCount();
 }
 
-/** 下拉框中的全部聊天 AI（官方、待转换、新建AI）。 */
-function allModelOptions() {
-  return [...els.modelSelect.options].map((o) => ({ id: o.value, label: o.dataset.label || o.value }));
-}
-
-/** 全部生图 AI 作为迁移目标（带前缀，便于与聊天 AI 区分）。 */
-function imageTargetOptions() {
-  return imageModels().map((m) => ({ id: m.id, label: `[生图] ${m.label}` }));
-}
-
-function isImageAdminId(id) {
-  return !!imageModelById(id);
-}
-
-/** 迁移中显示的 AI 名称：生图 AI 用其名称，聊天 AI 用其显示名。 */
-function adminDisplayName(id) {
-  const im = imageModelById(id);
-  return im ? `[生图] ${im.label}` : modelDisplayName(id);
-}
-
-/** 可作为来源的 AI：有更正、知识库或说明的聊天 AI，以及有更正、知识库或风格提示的生图 AI。 */
-function migrationSourceIds() {
-  return [...new Set([...adaptedModelIds(), ...imageAdminModelIds()])];
-}
-
-/**
- * 来源可选的目标：来自生图 AI 的只能迁入生图 AI（风格提示等只属于生图）；
- * 来自聊天 AI 的可迁入聊天 AI 或生图 AI（说明会作为生图 AI 的知识库条目）。
- */
-function migrationTargetChoices(sourceId) {
-  if (isImageAdminId(sourceId)) return imageTargetOptions().filter((o) => o.id !== sourceId);
-  return [...allModelOptions(), ...imageTargetOptions()].filter((o) => o.id !== sourceId);
-}
-
-/** 来源 AI 中可迁移的条目，按类别分组。 */
-function migratableItems(sourceId) {
-  if (isImageAdminId(sourceId)) {
-    const s = getImageSettings(sourceId);
-    return {
-      corrections: s.corrections.map((c) => ({ kind: 'correction', id: c.id, text: c.text })),
-      knowledge: s.knowledge.map((k) => ({ kind: 'knowledge', id: k.id, text: k.text })),
-      notes: [],
-      hints: s.hints.map((h) => ({ kind: 'hint', id: h.id, text: h.text })),
-    };
+function updateKbCharCount() {
+  if (els.kbCharCount && els.kbTextInput) {
+    els.kbCharCount.textContent = `${els.kbTextInput.value.length} / ${MAX_KB_TEXT_CHARS}`;
   }
-  return {
-    corrections: listCorrections(sourceId).map((c) => ({
-      kind: 'correction',
-      id: c.id,
-      text: c.text,
-      question: c.question,
-      from: c.from,
-    })),
-    knowledge: listKnowledge(sourceId).map((k) => ({
-      kind: 'knowledge',
-      id: k.id,
-      text: k.text,
-      question: k.question,
-      from: k.from,
-    })),
-    notes: listAdaptation(sourceId).notes.map((n) => ({ kind: 'note', id: n.id, text: n.text })),
-    hints: [],
-  };
 }
-
-function migrateItemRow({ kind, id, text, question, from }) {
-  const row = migrateEl('label', 'local-row migrate-item');
-  const box = document.createElement('input');
-  box.type = 'checkbox';
-  box.checked = true;
-  box.dataset.kind = kind;
-  box.dataset.id = id;
-  const names = {
-    correction: '更正',
-    knowledge: '知识库',
-    note: '说明（迁入生图 AI 后作为知识库条目）',
-    hint: '风格提示',
-  };
-  const label = migrateEl('div', 'muted small local-meta', `${names[kind] || kind}：${text}`);
-  const tags = [question ? '含训练样本' : '', from ? `迁入自 ${modelDisplayName(from)}` : ''].filter(Boolean);
-  if (tags.length) label.textContent += `（${tags.join('，')}）`;
-  row.append(box, label);
-  return row;
-}
-
-/**
- * 迁移框（聊天页与生图管理员面板共用，仅管理员、仅本机）。
- * st：选择状态 {source, target}。fixedTarget：生图管理员面板中给出的目标生图 AI（目标固定，不显示目标下拉框）。
- * notify(text, {error})：显示结果的方式（聊天页用状态栏，生图页用生图状态）。onDone：迁移完成后的刷新。
- */
-function renderMigrateInto(box, st, { fixedTarget = '', notify = showStatus, onDone = () => {} } = {}) {
-  box.replaceChildren();
-  const sources = migrationSourceIds().filter((id) => id !== fixedTarget);
-  box.append(
-    migrateEl(
-      'p',
-      'muted small local-meta',
-      fixedTarget
-        ? '从其他 AI 迁移到本生图 AI（仅本机，不上传）：把来源 AI 中勾选的更正、知识库、说明或风格提示复制过来，源 AI 保持不变。迁入的更正与知识库会放在本生图 AI 提示词的最前面。迁移更正需输入管理员密钥验证。'
-        : '跨模型迁移（仅本机，不上传）：把源 AI 中勾选的条目复制到目标 AI，目标可以是聊天 AI，也可以是生图 AI。复制而非移动，源 AI 的记录保持不变。迁移更正需输入管理员密钥验证。',
-    ),
-  );
-  if (!sources.length) {
-    box.append(migrateEl('p', 'muted small', '暂无可迁移的记录。'));
+els.kbTextInput?.addEventListener('input', updateKbCharCount);
+els.kbSaveBtn?.addEventListener('click', () => {
+  if (!panelAdmin()) {
+    if (els.kbStatus) els.kbStatus.textContent = '请先通过管理员验证，再保存知识库。';
     return;
   }
-  if (!sources.includes(st.source)) st.source = sources[0];
-  const choices = fixedTarget ? [] : migrationTargetChoices(st.source);
-  if (!fixedTarget && !choices.some((o) => o.id === st.target)) st.target = choices[0]?.id || '';
-  const target = fixedTarget || st.target;
-  const targetIsImage = isImageAdminId(target);
-
-  const rerender = () => renderMigrateInto(box, st, { fixedTarget, notify, onDone });
-  const srcRow = migrateEl('div', 'migrate-row');
-  srcRow.append(
-    migrateEl('span', 'muted small', '源 AI：'),
-    makeMigrateSelect(
-      sources.map((id) => ({ id, label: adminDisplayName(id) })),
-      st.source,
-      (v) => {
-        st.source = v;
-        st.target = '';
-        rerender();
-      },
-    ),
-  );
-  box.append(srcRow);
-  if (!fixedTarget) {
-    const tgtRow = migrateEl('div', 'migrate-row');
-    tgtRow.append(
-      migrateEl('span', 'muted small', '目标 AI：'),
-      makeMigrateSelect(choices, st.target, (v) => {
-        st.target = v;
-        rerender();
-      }),
-    );
-    box.append(tgtRow);
+  const saved = setKnowledgeText(els.kbTextInput?.value || '');
+  if (els.kbTextInput) { els.kbTextInput.value = saved; updateKbCharCount(); }
+  if (els.kbStatus) {
+    els.kbStatus.textContent = saved.trim()
+      ? `已保存（${saved.length} 字），对所有模型生效。`
+      : '已清空：之后不会再向 AI 发送知识库内容。';
   }
+  scheduleAccountSync();
+  showStatus('全局知识库已保存。');
+});
 
-  const items = migratableItems(st.source);
-  const list = migrateEl('div', 'local-list');
-  const sourceIsImage = isImageAdminId(st.source);
-  const shown = [
-    ...items.corrections,
-    ...items.knowledge,
-    // 说明只迁入生图 AI（作为知识库条目）；聊天 AI 之间的迁移仍只包含更正与知识库
-    ...(targetIsImage && !sourceIsImage ? items.notes : []),
-    // 风格提示只在生图 AI 之间迁移
-    ...(targetIsImage && sourceIsImage ? items.hints : []),
-  ];
-  for (const it of shown) list.append(migrateItemRow({ ...it, from: it.from }));
-  if (!shown.length) list.append(migrateEl('p', 'muted small', '该 AI 没有可迁移的条目。'));
-  box.append(list);
-
-  if (!targetIsImage) {
-    const training = document.createElement('label');
-    training.className = 'migrate-training';
-    const trainBox = document.createElement('input');
-    trainBox.type = 'checkbox';
-    trainBox.id = 'migrateTraining';
-    trainBox.checked = true;
-    training.append(trainBox, document.createTextNode(' 同时迁移对话训练样本（问题→回答，之后可在目标 AI 导出固化数据；取消则只作为提示词内容）'));
-    box.append(training);
-  }
-
-  const go = document.createElement('button');
-  go.type = 'button';
-  go.className = 'btn ghost small';
-  go.dataset.action = 'migrate-run';
-  go.textContent = '迁移所选到目标 AI';
-  go.disabled = !target || !shown.length;
-  go.addEventListener('click', () => runMigration(box, st, { fixedTarget, notify, onDone }));
-  box.append(go);
-}
-
-/** 聊天页的迁移框。 */
-function renderMigrateBox() {
-  const box = els.migrateBox;
-  if (!box) return;
-  const show = MODE === 'webllm' && isAdmin();
-  box.hidden = !show;
-  box.replaceChildren();
-  if (!show) return;
-  renderMigrateInto(box, migrateState, { notify: showStatus, onDone: () => renderAdaptList() });
-}
-
-/** 生图管理员面板中的迁移框（目标为当前生图 AI）。 */
-function renderImageMigrateBox() {
-  const box = els.imageMigrateBox;
-  if (!box) return;
-  const model = imageModelById(els.imageModelSelect.value);
-  const show = isAdmin() && !!model;
-  box.hidden = !show;
-  box.replaceChildren();
-  if (!show) return;
-  renderMigrateInto(box, imageMigrateState, {
-    fixedTarget: model.id,
-    notify: setImageStatus,
-    onDone: () => {
-      renderImageAdmin();
-      renderImageEffective();
-    },
-  });
-}
-
-/** 执行迁移：勾选了更正时先做管理员密钥验证。 */
-async function runMigration(box, st, { fixedTarget = '', notify = showStatus, onDone = () => {} } = {}) {
-  if (!requireAdmin('跨模型迁移')) return;
-  const source = st.source;
-  const target = fixedTarget || st.target;
-  if (!source || !target || source === target) {
-    notify('请选择不同的源 AI 与目标 AI。', { error: true });
-    return;
-  }
-  const checked = [...box.querySelectorAll('input[data-kind]:checked')];
-  const pick = (kind) => checked.filter((i) => i.dataset.kind === kind).map((i) => i.dataset.id);
-  const wanted = { correction: pick('correction'), knowledge: pick('knowledge'), note: pick('note'), hint: pick('hint') };
-  const total = Object.values(wanted).reduce((n, ids) => n + ids.length, 0);
-  if (!total) {
-    notify('请先勾选要迁移的条目。', { error: true });
-    return;
-  }
-  const items = migratableItems(source);
-  const chosen = (kind) => items[kind === 'correction' ? 'corrections' : kind === 'knowledge' ? 'knowledge' : kind === 'note' ? 'notes' : 'hints'].filter((x) => wanted[kind].includes(x.id));
-  const pickedCorr = chosen('correction');
-  const from = adminDisplayName(source);
-  const to = adminDisplayName(target);
-  if (pickedCorr.length) {
-    const texts = pickedCorr.map((c) => `- ${c.text}`);
-    const ok = await verifyCorrectionKey(
-      `迁移 ${pickedCorr.length} 条更正（${from} → ${to}）：\n${texts.join('\n')}`,
-      `这些更正将成为「${to}」的底层设定（无条件采纳）。输入管理员密钥验证后执行；取消则不迁移。`,
-    );
-    if (!ok) return;
-  }
-
-  if (isImageAdminId(target)) {
-    let result;
-    try {
-      result = copyIntoImageModel(
-        target,
-        {
-          corrections: pickedCorr.map((c) => ({ text: c.text, from: source })),
-          knowledge: [...chosen('knowledge'), ...chosen('note')].map((k) => ({ text: k.text, from: source })),
-          hints: chosen('hint').map((h) => ({ text: h.text, from: source })),
-        },
-        { allowCorrections: pickedCorr.length > 0 },
-      );
-    } catch (err) {
-      notify(`迁移失败：${err.message}`, { error: true });
-      return;
-    }
-    const over = result.overflow ? `，超过上限未写入 ${result.overflow} 条` : '';
-    notify(
-      `已从「${from}」迁移到「${to}」：更正 ${result.corrections} 条，知识库 ${result.knowledge} 条，风格提示 ${result.hints} 条，重复跳过 ${result.duplicate} 条${over}。`,
-    );
-    onDone();
-    return;
-  }
-
-  // 聊天 AI 之间的迁移（原有逻辑）
-  const includeTraining = !!box.querySelector('#migrateTraining')?.checked;
-  let result;
-  try {
-    result = migrateAdaptation(
-      source,
-      target,
-      { corrections: wanted.correction, knowledge: wanted.knowledge },
-      { includeTraining, allowCorrections: pickedCorr.length > 0 },
-    );
-  } catch (err) {
-    notify(`迁移失败：${err.message}`, { error: true });
-    return;
-  }
-  const missing = result.missing ? `，源中已不存在 ${result.missing} 条` : '';
-  notify(
-    `已从「${from}」迁移到「${to}」：更正 ${result.corrections} 条，知识库 ${result.knowledge} 条，重复跳过 ${result.duplicate} 条${missing}。`,
-  );
-  onDone();
-}
-
-/** AI 适应记录：管理员可查看、删除（仅本机）。 */
+/** AI 适应记录：管理员可查看、删除（仅本机）。全局知识库不在此列（上方输入框单独维护）。 */
 function renderAdaptList() {
   const admin = isAdmin();
   renderExportParamsOption();
-  renderMigrateBox();
   const list = els.adaptList;
   if (!list) return;
   list.replaceChildren();
@@ -4974,16 +4794,14 @@ function renderAdaptList() {
     els.adaptHint.textContent = bridgePanelMode()
       ? '本机版请在上方“直接修改参数”中调整参数；通过对话记录的 AI 适应反馈不在本机版网页中提供。'
       : MODE !== 'webllm'
-        ? '服务端模式下不记录 AI 适应反馈。'
+        ? '服务端模式下不记录 AI 适应反馈（知识库仍为全局一份，在本机浏览器保存）。'
         : 'AI 适应记录仅管理员可见。';
     return;
   }
   els.adaptHint.textContent =
-    '管理员在 AI 回复之后发送的消息会记为该 AI 的反馈（仅本机，不上传）；' +
-    '以“参数：temperature=0.2, maxTokens=800”开头的一行可调整该 AI 的参数；' +
-    '反馈同时写入该 AI 的本地知识库（最高优先级，仅本机，不上传，不随导出文件保存）；' +
-    '以“更正：”开头的一行需输入管理员密钥验证后，才会作为该 AI 的底层设定，无条件采纳（仅本机）；' +
-    '“导出固化数据”可把本 AI 的更正与知识库导出为训练文件（可选，需在本机用 training/ojtrain.py solidify 训练，需要 GPU；只包含记录了对应问题的条目）。';
+    '管理员在 AI 回复之后发送的消息会记为该 AI 的附属说明（仅本机，不上传）；' +
+    '以“参数：temperature=0.2, maxTokens=800”开头的一行可调整该 AI 的参数。' +
+    '需要让所有 AI 都知道的内容，请写到上方“全局知识库”输入框（顶替原按模型知识库）。';
   const ids = adaptedModelIds();
   if (!ids.length) {
     const p = document.createElement('p');
@@ -4994,30 +4812,18 @@ function renderAdaptList() {
   }
   for (const id of ids) {
     const { notes, params } = listAdaptation(id);
-    const kb = listKnowledge(id);
-    const corrections = listCorrections(id);
     const head = document.createElement('div');
     head.className = 'local-row';
     const name = document.createElement('div');
     name.className = 'local-name';
-    name.textContent = `${modelDisplayName(id)}（${notes.length} 条${corrections.length ? `，更正 ${corrections.length} 条` : ''}${kb.length ? `，知识库 ${kb.length} 条` : ''}${Object.keys(params).length ? '，有参数' : ''}）`;
+    name.textContent = `${modelDisplayName(id)}（${notes.length} 条说明${Object.keys(params).length ? '，有参数覆盖' : ''}）`;
     const clear = document.createElement('button');
     clear.type = 'button';
     clear.className = 'btn ghost small';
     clear.dataset.action = 'adapt-clear';
     clear.dataset.id = id;
     clear.textContent = '清空';
-    const solidify = document.createElement('button');
-    solidify.type = 'button';
-    solidify.className = 'btn ghost small';
-    solidify.dataset.action = 'adapt-solidify';
-    solidify.dataset.id = id;
-    solidify.textContent = '导出固化数据';
-    // 多个按钮放进同一个容器，避免它们在网格的同一单元格中重叠
-    const actions = document.createElement('div');
-    actions.className = 'local-actions';
-    actions.append(solidify, clear);
-    head.append(name, actions);
+    head.append(name, clear);
     list.append(head);
     for (const n of notes) {
       const row = document.createElement('div');
@@ -5034,50 +4840,6 @@ function renderAdaptList() {
       del.textContent = '删除';
       row.append(t, del);
       list.append(row);
-    }
-    if (corrections.length) {
-      const title = document.createElement('div');
-      title.className = 'muted small local-meta';
-      title.textContent = '更正（底层设定，无条件采纳，仅本机，经管理员密钥验证）：';
-      list.append(title);
-      for (const c of corrections) {
-        const row = document.createElement('div');
-        row.className = 'local-row';
-        const t = document.createElement('div');
-        t.className = 'muted small local-meta';
-        t.textContent = `更正：${c.text}${c.from ? `（迁入自 ${modelDisplayName(c.from)}）` : ''}`;
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'btn ghost small';
-        del.dataset.action = 'correction-delete';
-        del.dataset.id = id;
-        del.dataset.entry = c.id;
-        del.textContent = '删除';
-        row.append(t, del);
-        list.append(row);
-      }
-    }
-    if (kb.length) {
-      const title = document.createElement('div');
-      title.className = 'muted small local-meta';
-      title.textContent = '本地知识库（最高优先级，仅本机）：';
-      list.append(title);
-      for (const k of kb) {
-        const row = document.createElement('div');
-        row.className = 'local-row';
-        const t = document.createElement('div');
-        t.className = 'muted small local-meta';
-        t.textContent = `${k.text}${k.from ? `（迁入自 ${modelDisplayName(k.from)}）` : ''}`;
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'btn ghost small';
-        del.dataset.action = 'kb-delete';
-        del.dataset.id = id;
-        del.dataset.entry = k.id;
-        del.textContent = '删除';
-        row.append(t, del);
-        list.append(row);
-      }
     }
     renderParamDetails(list, id, params);
   }
@@ -5529,9 +5291,6 @@ document.addEventListener('click', (e) => {
   if (btn && btn.dataset.action === 'local-delete') return deleteLocalModel(btn.dataset.id);
   if (btn && btn.dataset.action === 'adapt-delete') return deleteAdaptNote(btn.dataset.id, btn.dataset.note);
   if (btn && btn.dataset.action === 'adapt-clear') return clearAdaptation(btn.dataset.id);
-  if (btn && btn.dataset.action === 'adapt-solidify') return exportSolidifyData(btn.dataset.id);
-  if (btn && btn.dataset.action === 'kb-delete') return deleteKnowledgeEntry(btn.dataset.id, btn.dataset.entry);
-  if (btn && btn.dataset.action === 'correction-delete') return deleteCorrection(btn.dataset.id, btn.dataset.entry);
   if (btn && btn.dataset.action === 'adapt-reset') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert') return revertParam(btn.dataset.id, btn.dataset.key);
   if (btn && btn.dataset.action === 'param-revert-all') return revertAllParams(btn.dataset.id);
@@ -5747,7 +5506,7 @@ function renderImageEffective() {
     els.imageEffective.textContent = '';
     return;
   }
-  const { params, hints, corrections, knowledge } = getImageSettings(model.id);
+  const { params, hints } = getImageSettings(model.id);
   const eff = effectiveImageSettings(readImageControls(), params);
   const adminKeys = Object.keys(params);
   const parts = [
@@ -5755,8 +5514,7 @@ function renderImageEffective() {
   ];
   if (adminKeys.length) parts.push(`管理员参数已覆盖：${adminKeys.map((k) => `${k}=${params[k]}`).join('，')}`);
   parts.push(`描述输入上限 ${effectiveInputLimit(params)} tokens（超过则拒绝生成；CLIP 每段读取 75 个，描述最多分 ${MAX_PROMPT_CHUNKS} 段，约 ${MAX_PROMPT_CHUNKS * 75} 个 token 参与生图）`);
-  if (corrections.length) parts.push(`更正 ${corrections.length} 条（提示词最前面）`);
-  if (knowledge.length) parts.push(`知识库 ${knowledge.length} 条（提示词最前面）`);
+  if (getKnowledgeText().trim()) parts.push('全局知识库已启用（提示词最前面）');
   if (hints.length) parts.push(`风格提示 ${hints.length} 条`);
   if (isSelectable(model)) parts.push(`模型约 ${formatGB(totalBytes(model))}（可点“下载到本机”保存，之后离线可用）`);
   els.imageEffective.textContent = parts.join('｜');
@@ -5796,32 +5554,10 @@ function renderImageAdmin() {
   const model = imageModelById(els.imageModelSelect.value);
   els.imageAdmin.hidden = !isAdmin() || !model;
   if (!model) return;
-  const { hints, corrections, knowledge } = getImageSettings(model.id);
+  const { hints } = getImageSettings(model.id);
   els.imageHintList.replaceChildren(
     ...hints.map((h) => imageNoteRow(h.text, () => removeImageHint(model.id, h.id), '删除风格提示')),
   );
-  els.imageCorrectionList.replaceChildren(
-    ...corrections.map((c) => imageNoteRow(`更正：${c.text}`, () => removeImageCorrection(model.id, c.id), '删除更正')),
-  );
-  els.imageKnowledgeList.replaceChildren(
-    ...knowledge.map((k) => imageNoteRow(`知识：${k.text}`, () => removeImageKnowledge(model.id, k.id), '删除知识库条目')),
-  );
-  renderImageMigrateBox();
-}
-
-/**
- * 为生图 AI 记录更正。更正会成为该 AI 的底层设定（放在提示词最前面），因此与聊天一样需要管理员密钥验证。
- * 返回新记录的条数；取消或密钥错误返回 null。
- */
-async function recordImageCorrections(model, texts) {
-  const ok = await verifyCorrectionKey(
-    texts.join('\n'),
-    `这些更正将作为「${model.label}」（生图 AI）的底层设定，放在每次生图提示词的最前面（仅本机）。输入管理员密钥验证后保存；取消则不保存。`,
-  );
-  if (!ok) return null;
-  let added = 0;
-  for (const t of texts) if (addImageCorrection(model.id, t)) added += 1;
-  return added;
 }
 
 function imageErrorText(err) {
@@ -6334,27 +6070,9 @@ async function runImageGenerate(event) {
       els.imagePrompt.value = text;
     }
   }
-  // 管理员的“更正：”行：记录为该生图 AI 的更正（需密钥验证），并从提示词中去掉
-  let correctionNote = '';
-  if (isAdmin()) {
-    const corr = parseCorrections(text);
-    if (corr.length) {
-      const added = await recordImageCorrections(model, corr.map((c) => c.text));
-      if (added === null) {
-        setImageStatus('未通过管理员密钥验证，更正未保存。提示词保持不变。', { error: true });
-        return;
-      }
-      correctionNote = added ? `已记录 ${added} 条更正（仅本机，放在提示词最前面）` : '更正已存在，未重复保存';
-      text = stripCorrectionLines(text);
-      els.imagePrompt.value = text;
-    }
-  }
   if (!text.trim()) {
-    if (recorded || correctionNote) {
-      const parts = [];
-      if (recorded) parts.push('已记录管理员生图参数');
-      if (correctionNote) parts.push(correctionNote);
-      setImageStatus(`${parts.join('，')}。`);
+    if (recorded) {
+      setImageStatus('已记录管理员生图参数。');
       renderImageAdmin();
       renderImageEffective();
     } else {
@@ -6366,11 +6084,11 @@ async function runImageGenerate(event) {
     setImageStatus(WEBGPU_MISSING, { error: true });
     return;
   }
-  const { hints, corrections, knowledge } = getImageSettings(model.id);
+  const { hints } = getImageSettings(model.id);
   const eff = currentImageSettings(model);
   if (eff.seed === null) eff.seed = randomSeed();
-  // 管理员前置内容（更正、知识库）放在最前面；lead 单独传给 worker 做预算检查（超出则拒绝，不截断）
-  const leadTexts = imageLeadTexts({ corrections, knowledge });
+  // 全局知识库（非空时）放在最前面；lead 单独传给 worker 做预算检查（超出则拒绝，不截断）
+  const leadTexts = imageLeadTexts(getKnowledgeText());
   const prompt = buildImagePrompt(text, hints, leadTexts);
   const controller = new AbortController();
   imageState.controller = controller;
@@ -6543,40 +6261,6 @@ function initImageMode() {
     setImageStatus('已添加风格提示（仅本机，之后每次生图都会附加）。');
   };
   els.imageHintAdd.addEventListener('click', addHint);
-  els.imageCorrectionAdd.addEventListener('click', async () => {
-    const model = imageModelById(els.imageModelSelect.value);
-    if (!model || !requireAdmin('添加更正')) return;
-    const text = els.imageCorrectionInput.value.trim();
-    if (!text) {
-      setImageStatus('请先输入更正内容。', { error: true });
-      return;
-    }
-    const added = await recordImageCorrections(model, [text]);
-    if (added === null) {
-      setImageStatus('未通过管理员密钥验证，更正未保存。', { error: true });
-      return;
-    }
-    if (added === 0) {
-      setImageStatus('该更正已存在，未重复保存。', { error: true });
-      return;
-    }
-    els.imageCorrectionInput.value = '';
-    renderImageAdmin();
-    renderImageEffective();
-    setImageStatus('已添加更正（仅本机，放在该生图 AI 提示词的最前面）。');
-  });
-  els.imageKnowledgeAdd.addEventListener('click', () => {
-    const model = imageModelById(els.imageModelSelect.value);
-    if (!model || !requireAdmin('添加知识库条目')) return;
-    if (!addImageKnowledge(model.id, els.imageKnowledgeInput.value)) {
-      setImageStatus('知识库条目为空，或与已有条目相同。', { error: true });
-      return;
-    }
-    els.imageKnowledgeInput.value = '';
-    renderImageAdmin();
-    renderImageEffective();
-    setImageStatus('已添加知识库条目（仅本机，放在该生图 AI 提示词的最前面）。');
-  });
   els.imageHintInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -6604,6 +6288,7 @@ async function loadAppConfig() {
       apiBaseUrl: c.apiBaseUrl || '/v1',
       apiKeyAuth: !!c.apiKeyAuth,
       apiKeyManagerEnabled: !!c.apiKeyManagerEnabled,
+      accounts: !!c.accounts,
       localBrowserBridge: !!c.localBrowserBridge,
       apiDefaultTemperature: Number.isFinite(Number(c.apiDefaultTemperature)) ? Number(c.apiDefaultTemperature) : 0.3,
       apiMaxTokens: Number.isInteger(Number(c.apiMaxTokens)) && Number(c.apiMaxTokens) > 0 ? Number(c.apiMaxTokens) : 8192,
@@ -6631,7 +6316,6 @@ async function init() {
   const appName = state.appConfig.appName || 'OJ 刷题助手';
   if (els.releasePageLink) els.releasePageLink.href = releasePageUrl(state.appConfig?.release);
   els.brandName.textContent = appName;
-  els.loginTitle.textContent = appName;
   document.title = appName;
 
   // 联网资料检索：站点配置 + 本机偏好 + 管理员搜索源设置
@@ -6707,13 +6391,10 @@ async function init() {
 
   notifyParentReady();
 
-  if (MODE === 'remote') {
-    if (getToken() && (await checkSession())) showMain();
-    else showLogin();
-  } else {
-    // webllm 模式：默认无需口令，直接进入聊天；管理员权限在“管理员面板”中升级
-    showMain();
-  }
+  // 两种模式都直接进入主界面：正常使用不上锁（无入口登录）。
+  // 远程模式下再恢复账号登录状态（可选，不影响使用）。
+  showMain();
+  if (MODE === 'remote') await initAccount();
 }
 
 init();

@@ -40,7 +40,7 @@ function walk(dir, out = []) {
 }
 
 /** 把服务版网页（远程构建）输出到 web/dist-api，随网站包一起分发，供本机 API 服务使用。 */
-function buildRemoteIntoPackage(projectRoot) {
+export function buildRemoteIntoPackage(projectRoot) {
   const result = spawnSync(process.execPath, [join(projectRoot, 'scripts', 'build-remote.mjs')], {
     cwd: projectRoot,
     env: { ...process.env, OJ_REMOTE_OUT_DIR: join('web', 'dist-api') },
@@ -55,7 +55,7 @@ function buildRemoteIntoPackage(projectRoot) {
  * 把服务端运行依赖安装到暂存区，返回打入 server/node_modules/ 的 zip 条目。
  * 这样用户解压后不必再运行 npm install，真正做到“下载一次、双击即用”。
  */
-function stageServerDeps(projectRoot) {
+export function stageServerDeps(projectRoot) {
   const staging = join(projectRoot, '.package-staging');
   rmSync(staging, { recursive: true, force: true });
   mkdirSync(staging, { recursive: true });

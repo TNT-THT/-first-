@@ -16,7 +16,7 @@ const NOW = new Date('2026-10-18T08:00:00Z');
 test('只导出所选分区，并解析为结构化数据', () => {
   const s = memoryStorage({
     'oj-ai.sessions.v1': JSON.stringify({ sessions: [{ id: 'a' }] }),
-    'oj-ai.kb.v1': JSON.stringify({ models: {} }),
+    'oj-ai.kbText.v1': '全局知识库内容',
   });
   const out = buildDataExport(s, ['sessions'], { now: NOW });
   assert.equal(out.format, 'oj-ai-data');
