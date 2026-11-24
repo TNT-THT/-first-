@@ -48,12 +48,80 @@ def load_model(model_dir):
         torch_dtype="auto",
         device_map="auto",
         trust_remote_code=False,
+        # 超大权重常常一个文件几十 GB：low_cpu_mem_usage 让 transformers 边加载边搬进
+        # 目标设备，不再先整份读进内存再复制一遍（低内存机器上那一步直接 OOM）。
+        low_cpu_mem_usage=True,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     return model, tokenizer
 
 
 STATE = {"model": None, "tokenizer": None, "lock": threading.Lock()}
+
+
+def _model_max_tokens():
+    tokenizer = STATE["tokenizer"]
+    limit = getattr(tokenizer, "model_max_tokens", None) or getattr(tokenizer, "model_max_length", None)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return 8192
+    # 未设置时 transformers 会填一个天文数字，按 8192 兜底
+    return limit if 512 <= limit <= 4_000_000 else 8192
+
+
+def trim_messages_for_window(messages, reserve=1024):
+    """把对话裁到模型窗口内：保留 system 与最新消息，最旧的先丢。
+
+    只对单条消息的内容数 token（模板固定部分忽略），因此是 O(n)——
+    对整段对话反复套 chat_template 在 8 万字符的历史上会慢到几秒。
+    """
+    if not messages:
+        return messages
+    budget = max(256, _model_max_tokens() - reserve)
+    tokenizer = STATE["tokenizer"]
+
+    def msg_tokens(m):
+        text = str(m.get("content") or "")
+        if not text:
+            return 8
+        try:
+            return len(tokenizer(text, add_special_tokens=False)["input_ids"]) + 8
+        except Exception:  # noqa: BLE001
+            return max(1, len(text)) // 2 + 8
+
+    systems = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+    used = sum(msg_tokens(m) for m in systems)
+    kept = []
+    for m in reversed(rest):
+        cost = msg_tokens(m)
+        if kept and used + cost > budget:
+            break
+        kept.insert(0, m)
+        used += cost
+    if not kept:
+        return messages
+    # 单条最新消息本身超预算：按 token 截断内容（保留头部，尾部补提示）
+    if len(kept) == 1 and used > budget:
+        room = max(64, budget - sum(msg_tokens(m) for m in systems) - 16)
+        text = str(kept[0].get("content") or "")
+        try:
+            ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        except Exception:  # noqa: BLE001
+            ids = None
+        if ids is not None and len(ids) > room:
+            cut = tokenizer.decode(ids[:room], skip_special_tokens=True)
+            kept[0] = {**kept[0], "content": cut + "\n\n…（内容过长，已截断）"}
+        elif ids is None and len(text) > room * 2:
+            kept[0] = {**kept[0], "content": text[: room * 2] + "\n\n…（内容过长，已截断）"}
+    # 裁剪后不能以助手消息开头（很多对话模板要求首条是 user，否则 apply_chat_template 直接报错）
+    while kept and kept[0].get("role") == "assistant":
+        kept.pop(0)
+    dropped = len(rest) - len(kept)
+    if dropped > 0:
+        log(f"conversation too long: dropped {dropped} earliest message(s) to fit context")
+    return systems + kept
 
 
 def build_inputs(messages):
@@ -112,6 +180,9 @@ def make_handler(api_key):
                 return self._send_json(400, {"error": f"bad json: {e}"})
             messages = body.get("messages") or []
             max_new = int(body.get("max_tokens") or 512)
+            # 超大模型上下文有限：历史太长时 transformers 会直接抛 “input is too long”。
+            # 优先用 tokenizer 的真实窗口截断（保留系统提示与最新消息），截不到就退回字符估算。
+            messages = trim_messages_for_window(messages)
             stream = bool(body.get("stream"))
             model = STATE["model"]
             tokenizer = STATE["tokenizer"]

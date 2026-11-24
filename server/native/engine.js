@@ -170,7 +170,7 @@ export class NativeEngine {
     this.converterJob = null;
     this._converterCache = null;
     // 本地 Python 运行时（特殊格式原格式本地运行）
-    this.python = new PythonProcess({ fetchImpl });
+    this.python = new PythonProcess({ fetchImpl, logger });
     this.pythonJobs = new Map(); // id -> {id, state, stage, error, promise}
     this.runnerJob = null;
     this._runtimeCache = null;

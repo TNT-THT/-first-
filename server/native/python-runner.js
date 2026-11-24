@@ -78,7 +78,8 @@ export async function preparePythonRuntime({ dataDir, env = process.env, exec = 
 
 /** Python 模型进程（单实例），接口形状与 LlamaProcess 对齐。 */
 export class PythonProcess {
-  constructor({ spawnImpl = spawn, fetchImpl = fetch } = {}) {
+  constructor({ spawnImpl = spawn, fetchImpl = fetch, logger = null } = {}) {
+    this.logger = logger;
     this.spawnImpl = spawnImpl;
     this.fetchImpl = fetchImpl;
     this.child = null;
@@ -146,11 +147,18 @@ export class PythonProcess {
     return this.readyPromise;
   }
 
+  /** 把日志尾部拼进错误信息：否则用户只看到“已退出（代码 1）”，看不到缺哪个依赖。 */
+  _withLog(message) {
+    const tail = this.logTail.slice(-6).join('\n');
+    return tail ? `${message}\n${tail}` : message;
+  }
+
   async waitHealthy(child) {
     const deadline = Date.now() + 30 * 60 * 1000;
+    let lastNote = 0;
     while (Date.now() < deadline) {
       if (this.child !== child) throw new Error('Python 运行时已被停止或替换。');
-      if (this.state === 'error') throw new Error(this.error);
+      if (this.state === 'error') throw new Error(this._withLog(this.error));
       try {
         const res = await this.fetchImpl(`${this.baseUrl}/health`, {
           headers: { authorization: `Bearer ${this.apiKey}` },
@@ -159,10 +167,16 @@ export class PythonProcess {
           this.state = 'ready';
           return { ok: true };
         }
+        if (Date.now() - lastNote > 10000) {
+          // 加载大权重可能几十分钟且没有进度条：把最后一行日志转进主日志，界面才有东西可看
+          lastNote = Date.now();
+          const line = this.logTail.at(-1);
+          if (line) this.logger?.log?.(`[python] ${line}`);
+        }
       } catch { /* 尚未监听或模型加载中 */ }
       await new Promise((r) => setTimeout(r, 500));
     }
-    throw new Error('Python 运行时加载超时（30 分钟）。大模型在 CPU 上首次加载很慢，可稍后再试或改用 GGUF 路线。');
+    throw new Error(this._withLog('Python 运行时加载超时（30 分钟）。大模型在 CPU 上首次加载很慢，可稍后再试或改用 GGUF 路线。'));
   }
 
   async whenReady() {
