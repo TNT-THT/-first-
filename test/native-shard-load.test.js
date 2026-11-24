@@ -347,3 +347,125 @@ test('流式转发：llama.cpp 在流里报错时，网页/API 能收到明确�
   assert.match(text, /data: \[DONE\]/);
   assert.equal(headers['Content-Type'], 'text/event-stream; charset=utf-8');
 });
+
+// ---- llama-server 崩溃：必须把真实死因带出来，并能自愈 ----
+// 现场日志（Windows，0xC0000005）：
+//   [native] llama-server 加载失败，聊天自动以安全配置重新加载：llama-server 已退出（代码 3221225477…）
+//   [chat] unexpected: Error: llama-server 已被停止或替换。
+// 成因：exit 回调先把 child 置空，waitHealthy 轮询看到 child 变了就抛“已被停止或替换”，
+// 真正的崩溃死因被这句假错误盖掉，上层既看不清原因也无法判断该不该降级重试。
+
+const CRASH_SCRIPT = `#!/usr/bin/env node\nprocess.exit(3221225477);\n`;
+
+test('崩溃：waitHealthy 抛出的是带退出码的真实死因，而不是“已被停止或替换”', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-crash-'));
+  const bin = path.join(dir, 'llama-server');
+  await writeFile(bin, CRASH_SCRIPT);
+  await chmod(bin, 0o755);
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const { LlamaProcess } = await import('../server/native/llama.js');
+  const proc = new LlamaProcess({
+    fetchImpl: async () => { throw new Error('还没监听'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const err = await proc.start({
+    binary: bin, modelFile: '/x/M-00001-of-00002.gguf', modelId: 'm', quant: 'Q4_K_M', port: 18771,
+  }).catch((e) => e);
+  assert.match(err.message, /已退出（代码/, `应带退出码，实际：${err.message}`);
+  assert.ok(!/已被停止或替换/.test(err.message), '真实死因不能被“已被停止或替换”覆盖');
+  assert.equal(proc.state, 'error');
+  assert.equal(proc.status().exitCode, 5);
+  await proc.stop();
+});
+
+test('崩溃：聊天请求自动降级重载，仍然失败时给出可执行建议（502 而不是 unexpected）', { timeout: 60000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-crash2-'));
+  const bin = path.join(dir, 'llama-server');
+  await writeFile(bin, CRASH_SCRIPT);
+  await chmod(bin, 0o755);
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    fetchImpl: async (url, opts) => {
+      if (String(url).startsWith('http://127.0.0.1')) return fetch(url, opts);
+      throw new Error(`测试中不允许访问：${url}`);
+    },
+    env: { LLAMA_SERVER_BIN: bin },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  t.after(async () => {
+    await engine.unload().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  });
+  const quant = 'Q4_K_M';
+  const qdir = engine.modelDir(MODEL_ID, quant);
+  await mkdir(qdir, { recursive: true });
+  await writeFile(path.join(qdir, 'M-00001-of-00002.gguf'), 'x');
+  await writeFile(path.join(qdir, 'M-00002-of-00002.gguf'), 'x');
+  await writeFile(path.join(qdir, 'manifest.json'), JSON.stringify({
+    id: MODEL_ID, quant, repo: 'x/y',
+    files: [{ path: 'M-00001-of-00002.gguf', size: 1 }, { path: 'M-00002-of-00002.gguf', size: 1 }],
+    totalBytes: 2,
+  }));
+  const err = await engine.chatCompletion({ model: MODEL_ID, messages: [{ role: 'user', content: 'hi' }] })
+    .then(() => null, (e) => e);
+  assert.ok(err, '必须抛错');
+  assert.equal(err.status, 502, '应是可读的 502，而不是没有 status 的意外异常');
+  assert.ok(!/已被停止或替换/.test(err.message));
+  assert.match(err.message, /换更小的量化|内存|准备运行库/);
+});
+
+test('崩溃后自愈：state===\x27error\x27 时下一条聊天会重新加载，而不是对着尸体转发', { timeout: 60000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-crash3-'));
+  const marker = path.join(dir, 'crashed-once.flag');
+  // 第一次启动崩溃，之后正常服务
+  const bin = path.join(dir, 'llama-server');
+  await writeFile(bin, `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const http = require('node:http');
+const marker = ${JSON.stringify(marker)};
+if (!fs.existsSync(marker)) { fs.writeFileSync(marker, 'x'); process.exit(3221225477); }
+const args = process.argv.slice(2);
+const port = Number(args[args.indexOf('--port') + 1]);
+http.createServer((req, res) => {
+  if (req.url === '/health') { res.writeHead(200); res.end('{}'); return; }
+  if (req.url === '/v1/chat/completions') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }] }));
+    return;
+  }
+  res.writeHead(404); res.end('nf');
+}).listen(port, '127.0.0.1');
+`);
+  await chmod(bin, 0o755);
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    fetchImpl: async (url, opts) => {
+      if (String(url).startsWith('http://127.0.0.1')) return fetch(url, opts);
+      throw new Error(`测试中不允许访问：${url}`);
+    },
+    env: { LLAMA_SERVER_BIN: bin },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  t.after(async () => {
+    await engine.unload().catch(() => {});
+    await rm(dir, { recursive: true, force: true });
+  });
+  const quant = 'Q4_K_M';
+  const qdir = engine.modelDir(MODEL_ID, quant);
+  await mkdir(qdir, { recursive: true });
+  await writeFile(path.join(qdir, 'M.gguf'), 'x');
+  await writeFile(path.join(qdir, 'manifest.json'), JSON.stringify({
+    id: MODEL_ID, quant, repo: 'x/y', files: [{ path: 'M.gguf', size: 1 }], totalBytes: 1,
+  }));
+  // 管理员先显式设定 16K 上下文（这是用户设定，任何自动降级都不能改它）
+  await engine.load(MODEL_ID, { quant, contextTokens: 16384, gpuLayers: 0 }).catch(() => {});
+  engine.llama.state = 'error'; // 模拟运行中崩溃
+  engine.llama.error = 'llama-server 已退出（代码 3221225477，即 0xC0000005）。';
+  const res = await engine.chatCompletion({ model: MODEL_ID, messages: [{ role: 'user', content: 'hi' }] });
+  const data = await res.json();
+  assert.equal(data.choices[0].message.content, 'ok', '崩溃后应自愈并正常回答');
+  assert.equal(engine.llama.state, 'ready');
+  // 安全重载不能污染用户设定：上下文仍是 16384，不会被悄悄降成 4096
+  assert.equal(engine.loadPrefs?.contextTokens, 16384, '自动降级重载不能覆盖管理员设定的上下文');
+});

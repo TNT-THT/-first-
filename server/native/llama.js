@@ -235,6 +235,8 @@ export class LlamaProcess {
       // 崩溃时把日志尾部一起放进 error：界面上的红色提示要能直接说明死因
       logTail: this.logTail.slice(-20),
       log: this.state === 'error' ? this.logTail.slice(-12) : [],
+      // 进程退出码/信号：0xC0000005 这类崩溃码要能被界面与自动降级直接识别
+      exitCode: this.exitInfo?.code ?? null,
     };
   }
 
@@ -250,6 +252,9 @@ export class LlamaProcess {
     await this.stop();
     this.state = 'loading';
     this.error = '';
+    // 上一次加载失败的死因/退出码不能残留：新进程起来后 _waitHealthyLoop 会先看
+    // state==='error'，残留会让新的一次启动立刻被误判为崩溃。
+    this.exitInfo = null;
     this.logTail = [];
     const apiKey = `sk-local-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
     const args = [
@@ -303,19 +308,37 @@ export class LlamaProcess {
         this.error = `llama-server 启动失败：${err.message}`;
       }
     });
-    child.once('exit', (code) => {
+    child.once('exit', (code, signal) => {
       if (this.child === child) {
-        this.child = null;
+        // 顺序很关键：先记状态与死因，最后才清 child。
+        // 以前先清 child，waitHealthy 的轮询一看 child 变了就抛
+        // “llama-server 已被停止或替换”——真正的崩溃死因（0xC0000005 等）被这句
+        // 假错误盖掉，界面上只剩一句莫名其妙的话，也没法据此自动回退。
+        this.exitInfo = { code, signal, at: Date.now() };
         if (this.state === 'loading' || this.state === 'ready') {
           this.state = 'error';
           // Windows 崩溃码是大整数（如 3221225477 = 0xC0000005 内存访问冲突），附上十六进制便于识别
           const hex = Number.isInteger(code) && code > 0xffff ? `，即 0x${(code >>> 0).toString(16).toUpperCase()}` : '';
-          this.error = `llama-server 已退出（代码 ${code}${hex}）。常见原因：内存不足、权重文件损坏或显卡驱动不支持。日志尾部见状态面板。`;
+          this.error = `llama-server 已退出（代码 ${code}${signal ? `，信号 ${signal}` : ''}${hex}）。常见原因：内存不足、权重文件损坏或显卡驱动不支持。日志尾部见状态面板。`;
         }
+        this.child = null;
+        this._settleReady(new Error(this._withLog(this.error || `llama-server 已退出（代码 ${code}）。`)));
       }
     });
     this.readyPromise = this.waitHealthy(child);
+    // 明确处理拒绝：调用方不 await 时也不能变成 unhandledRejection
+    this.readyPromise.catch(() => {});
     return this.readyPromise;
+  }
+
+  /**
+   * 让正在等待的 waitHealthy 立刻以给定错误结束（进程已崩溃时不必再等到下一次轮询）。
+   * 只影响“当前这一次启动”：stop()/start() 会清掉，避免旧错误串到新进程上。
+   */
+  _settleReady(err) {
+    const reject = this._readyReject;
+    this._readyReject = null;
+    if (reject) reject(err);
   }
 
   /** 把日志尾部拼进错误信息，让上抛的报错自带死因（面板红字才有用）。 */
@@ -325,11 +348,30 @@ export class LlamaProcess {
   }
 
   async waitHealthy(child) {
+    // 崩溃时由 exit 回调直接 reject（见 _settleReady），不必等下一次 500ms 轮询。
+    let rejectSelf = null;
+    const settled = new Promise((_, reject) => { rejectSelf = reject; this._readyReject = reject; });
+    settled.catch(() => {});
+    try {
+      return await Promise.race([this._waitHealthyLoop(child), settled]);
+    } finally {
+      // 只清“自己这一次”的句柄：并发/连续启动时，新的等待的句柄不能被旧的 finally 清掉
+      if (this._readyReject === rejectSelf) this._readyReject = null;
+    }
+  }
+
+  async _waitHealthyLoop(child) {
     const deadline = Date.now() + 30 * 60 * 1000;
     let lastProgressNote = 0;
     while (Date.now() < deadline) {
-      if (this.child !== child) throw new Error('llama-server 已被停止或替换。');
+      // 顺序很重要：先判“有没有明确死因”，再判 child 是否被换掉。
+      // 崩溃时 exit 回调会先写 state/error，如果反过来先判 child，就会把真实死因
+      // 换成“已被停止或替换”，上层据此也无法判断该不该降级重试。
       if (this.state === 'error') throw new Error(this._withLog(this.error));
+      if (this.child !== child) {
+        if (this.error) throw new Error(this._withLog(this.error));
+        throw new Error('llama-server 已被停止或替换。');
+      }
       // 超大模型从磁盘读权重就要几分钟且没有 /health：把加载进度同步到日志尾部，
       // 界面因此能显示“正在加载 xx%”，而不是一直空白。
       const progressLine = [...this.logTail].reverse().find((l) => /load_tensors|loading model|llama_model_loader/i.test(l));
@@ -364,8 +406,12 @@ export class LlamaProcess {
     const child = this.child;
     this.child = null;
     this.info = null;
-    if (this.state !== 'error') this.state = 'idle';
     this.readyPromise = null;
+    // 主动停止：先让正在等待的 waitHealthy 结束，避免它继续对着旧进程轮询。
+    // 用户主动卸载/换模型的“已停止”不该在日志里变成一次崩溃。
+    const stoppingErr = Object.assign(new Error('llama-server 已被停止或替换。'), { stopped: true });
+    this._settleReady(stoppingErr);
+    if (this.state !== 'error') this.state = 'idle';
     if (child) {
       try {
         child.kill('SIGTERM');
