@@ -1518,7 +1518,35 @@ export class NativeEngine {
     this.loadPrefsFor = id;
   }
 
-  async load(id, { quant, contextTokens, gpuLayers, explicit = true } = {}) {
+  /**
+   * 加载入口：并发请求合并、其余排队。
+   *
+   * llama-server 是单实例，而“点加载”与聊天自动加载同时到达很常见：以前它们
+   * 会各自 start() 一次——后一次把前一次的进程停掉，前一个请求收到
+   * “llama-server 已被停止或替换”，磁盘上还要把几十 GB 权重读两遍。
+   * - 完全相同参数的加载：直接共享同一个 promise；
+   * - 不同参数/不同模型：按顺序排队执行（后一个总会停掉前一个的进程）。
+   */
+  load(id, opts = {}) {
+    const key = `${id}|${opts.quant || ''}|${opts.contextTokens ?? ''}|${opts.gpuLayers ?? ''}`;
+    if (!this._loadPendingByKey) this._loadPendingByKey = new Map();
+    const running = this._loadPendingByKey.get(key);
+    if (running) return running;
+    const run = async () => {
+      try {
+        return await this._load(id, opts);
+      } finally {
+        this._loadPendingByKey.delete(key);
+      }
+    };
+    const prev = this._loadChain || Promise.resolve();
+    const promise = prev.catch(() => {}).then(run);
+    this._loadChain = promise.catch(() => {});
+    this._loadPendingByKey.set(key, promise);
+    return promise;
+  }
+
+  async _load(id, { quant, contextTokens, gpuLayers, explicit = true } = {}) {
     // 未显式给值时沿用“同一个模型上一次加载”的参数（聊天自动加载走这条）。
     // 只认同一个模型：把 70B 的 32K 上下文/40 层套到 8B 小模型上只会白白触发回退重试。
     const prefs = (this.loadPrefsFor === id && this.loadPrefs)

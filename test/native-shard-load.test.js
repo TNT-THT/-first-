@@ -287,3 +287,31 @@ test('fitMessagesToContext：短对话原样返回，超长单条消息保留首
   assert.match(text, /^开头重要信息/, '头部内容要保留');
   assert.match(text, /结尾的重要问题$/, '尾部内容要保留');
 });
+
+test('并发加载：同参数只启动一次 llama-server；不同参数按顺序执行', { timeout: 60000 }, async (t) => {
+  const { engine, bin } = await setup(t);
+  const quant = 'Q4_K_M';
+  const qdir = engine.modelDir(MODEL_ID, quant);
+  await mkdir(qdir, { recursive: true });
+  await writeFile(path.join(qdir, 'M.gguf'), 'x');
+  await writeFile(path.join(qdir, 'manifest.json'), JSON.stringify({
+    id: MODEL_ID, quant, repo: 'x/y', files: [{ path: 'M.gguf', size: 1 }], totalBytes: 1,
+  }));
+  // 统计真实 spawn 次数：假 llama-server 每次启动都会重写 argv.json
+  const starts = [];
+  const spawn = engine.llama.spawnImpl;
+  engine.llama.spawnImpl = (...args) => { starts.push(args[0]); return spawn(...args); };
+
+  const [a, b] = await Promise.all([
+    engine.load(MODEL_ID, { quant, contextTokens: 4096 }),
+    engine.load(MODEL_ID, { quant, contextTokens: 4096 }),
+  ]);
+  assert.equal(a.state, 'ready');
+  assert.equal(b.state, 'ready');
+  assert.equal(starts.length, 1, `同参数并发应只启动一次，实际 ${starts.length} 次`);
+
+  await engine.load(MODEL_ID, { quant, contextTokens: 8192 });
+  assert.equal(starts.length, 2);
+  assert.equal(engine.llama.info.contextTokens, 8192);
+  void bin;
+});
