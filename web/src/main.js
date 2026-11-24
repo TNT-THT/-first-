@@ -4033,6 +4033,21 @@ function onBridgeModelChange(id) {
         ? `网页聊天已切换到 ${native.name}（本机大模型），但权重尚未下载：请打开“API 接入 → 本机大模型”下载并加载后再发送。`
         : `网页聊天已切换到 ${native.name}（本机大模型·${stateText}）。下次发送时使用这个模型；API 调用选用的模型不受影响。`,
     );
+    if (stateText !== '未下载' && !state.appConfig.localBrowserBridge && state.apiKeyAdminToken) {
+      // 没有网页模型桥接时，本机大模型只能由服务端原生引擎跑。权重下载好但还没加载时
+      // 聊天会等第一次请求才自动加载（几分钟无输出），这里提前在后台加载，用户发送前就能看到“加载中”。
+      void nativeAdminRequest('/api/native/load', {
+        token: state.apiKeyAdminToken,
+        body: {
+          id: native.id,
+          quant: (native.downloaded || []).find((d) => d.quant !== 'SNAPSHOT')?.quant,
+          contextTokens: Number(els.apiNativeCtx?.value) || 8192,
+          gpuLayers: Math.max(0, Number(els.apiNativeGpuLayers?.value) || 0),
+        },
+      }).catch((err) => {
+        console.warn('本机大模型预加载失败（发送时会再试）：', err?.message || err);
+      });
+    }
     return;
   }
   const label = bridged?.label || id;
@@ -6424,10 +6439,18 @@ async function init() {
     // 模型选择栏：拉取桥接可用模型并定期刷新（新导入模型后自动出现，不用刷新页面）
     localChatModelId = loadLocalChatModel();
     refreshBridgeStatus();
-    // 本机大模型（llama.cpp）：静态版没有该接口，会自动隐藏；网站包/独立软件中可用
-    refreshNativeStatus();
     setInterval(() => {
       if (!document.hidden) refreshBridgeStatus();
+    }, 10000);
+  }
+  // 本机大模型（llama.cpp）：静态版没有该接口，会自动隐藏；网站包/独立软件中可用。
+  // 以前这一步挂在“网页模型桥接”分支里：部署没开 LOCAL_BROWSER_BRIDGE 时，
+  // 连已下载的 GGUF 模型都不会被加载出来，聊天页里根本选不到。
+  if (MODE === 'remote') {
+    refreshNativeStatus();
+    // 下载/加载是后台任务（关掉面板也继续跑）：定期刷新，进度与完成状态才不会停在旧值
+    setInterval(() => {
+      if (!document.hidden) void refreshNativeStatus();
     }, 10000);
   }
   // 生图按钮与事件需要在配置加载之后绑定
