@@ -1105,16 +1105,19 @@ export class NativeEngine {
       this.downloads.delete(key);
       existing = null;
     }
+    // 续传：已落盘的字节不会再占新空间，按“还需下载的部分”判断
+    const alreadyOnDisk = await this._remainingBytes(id, entry);
+    const needBytes = Math.max(0, entry.totalBytes - alreadyOnDisk);
     const free = await freeDiskBytes(this.modelsDir);
-    if (Number.isFinite(free) && free < entry.totalBytes * 1.05) {
-      throw Object.assign(new Error(`磁盘空间不足：该量化需要约 ${(entry.totalBytes / 1e9).toFixed(1)} GB，可用约 ${(free / 1e9).toFixed(1)} GB。`), { status: 507 });
+    if (Number.isFinite(free) && free < needBytes * 1.05) {
+      throw Object.assign(new Error(`磁盘空间不足：该量化还需约 ${(needBytes / 1e9).toFixed(1)} GB，可用约 ${(free / 1e9).toFixed(1)} GB。`), { status: 507 });
     }
     const dir = this.modelDir(id, entry.quant);
     this._expireStaleBrowserJobs();
     const job = existing?.via === 'browser' && existing.state === 'downloading'
       ? existing
       : {
-          id, quant: entry.quant, state: 'downloading', downloaded: 0, total: entry.totalBytes,
+          id, quant: entry.quant, state: 'downloading', downloaded: alreadyOnDisk, total: entry.totalBytes,
           error: '', via: 'browser', entry, receivedByFile: new Map(),
           startedAt: Date.now(), lastChunkAt: Date.now(),
         };
