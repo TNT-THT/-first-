@@ -655,6 +655,9 @@ export class NativeEngine {
     const saved = [];
     for (const file of files) {
       if (/^(\.gitattributes|README)/i.test(file.path)) continue;
+      // 只要是 GGUF 就别算进“原格式快照”：超大模型仓库常常同时放着 GGUF 和其它格式，
+      // 那些文件动辄几十 GB，下载了 Python 路线也用不上（GGUF 直接走 llama.cpp）。
+      if (/\.gguf$/i.test(file.path)) continue;
       const dest = path.join(dir, file.path);
       await mkdir(path.dirname(dest), { recursive: true });
       // expectedSize 让已下完的文件直接跳过：快照中断后重试不从头来

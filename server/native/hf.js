@@ -79,6 +79,19 @@ export async function fetchRepoFiles(repo, { fetchImpl = fetch, timeoutMs = HF_T
     } catch (err) {
       throw hfNetworkError(err, timeoutMs);
     }
+    if (res.status === 401 || res.status === 403) {
+      // 门控/私有仓库：不区分“没填 Token”和“Token 无权访问”，用户两种都要去面板处理
+      throw Object.assign(
+        new Error(`读取模型仓库 ${repo} 需要授权（HTTP ${res.status}）：该仓库是门控/私有仓库，请先在“本机大模型”面板里保存 Hugging Face Token 再试。`),
+        { status: res.status },
+      );
+    }
+    if (res.status === 404) {
+      throw Object.assign(
+        new Error(`模型仓库 ${repo} 不存在（HTTP 404）：仓库可能已改名、转私有或被删除，请重新搜索。`),
+        { status: 404 },
+      );
+    }
     if (!res.ok) {
       throw new Error(`读取模型仓库 ${repo} 失败（HTTP ${res.status}），请确认仓库存在且网络可达 Hugging Face。`);
     }

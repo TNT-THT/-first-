@@ -167,3 +167,20 @@ test('downloadFile：403/404 立即失败并给中文说明，不无谓重试', 
   );
   assert.equal(calls, 1);
 });
+
+test('fetchRepoFiles：门控仓库 401/403 与 404 给出可执行的中文提示（带 status）', async () => {
+  const grab = async (repo, status) => {
+    try {
+      await fetchRepoFiles(repo, { fetchImpl: async () => new Response('{}', { status }) });
+    } catch (err) {
+      return err;
+    }
+    throw new Error('应当抛错');
+  };
+  const gated = await grab('someone/gated', 403);
+  assert.match(gated.message, /Token/);
+  assert.equal(gated.status, 403);
+  const missing = await grab('someone/gone', 404);
+  assert.match(missing.message, /不存在/);
+  assert.equal(missing.status, 404);
+});
