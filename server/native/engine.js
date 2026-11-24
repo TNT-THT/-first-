@@ -33,6 +33,83 @@ import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python
 const QUANT_CACHE_MS = 10 * 60 * 1000;
 
 /**
+ * 粗略估算一段对话要占多少上下文 token。
+ * 中文约 1 token/字、英文约 4 字符/token，模板与特殊符号另有开销，统一按
+ * “每字符 0.6 token”偏保守估算——宁可少留一点历史，也不要让 llama.cpp 直接 400。
+ */
+function estimateTokens(text) {
+  const s = String(text || '');
+  if (!s) return 0;
+  let wide = 0;
+  for (const ch of s) {
+    const code = ch.codePointAt(0);
+    if (code > 0x2e80) wide += 1; // CJK 等宽字符：约 1 token/字
+  }
+  const narrow = s.length - wide;
+  return Math.ceil(wide * 1 + narrow / 3.2 + 4);
+}
+
+/**
+ * 把消息裁剪到上下文窗口内：保留最前面的 system（系统提示/检索证据）与最新的消息。
+ * 超出时从最早的非 system 消息开始丢；仍然装不下再截断超长单条消息的中间部分。
+ * @returns {{messages: Array, estimatedTokens: number, contextTokens: number, droppedMessages: number}}
+ */
+export function fitMessagesToContext(messages, { contextTokens = 8192, reserveForOutput = 1024 } = {}) {
+  const list = Array.isArray(messages) ? messages : [];
+  const ctx = Math.max(512, Math.floor(contextTokens) || 8192);
+  // 至少给输出留 25% 空间：很多模型的 max_tokens 请求值本身就接近窗口
+  const outputReserve = Math.max(256, Math.min(Math.floor(ctx / 2), Math.floor(reserveForOutput) || 1024));
+  const budget = Math.max(256, ctx - outputReserve);
+  const tokensOf = (m) => estimateTokens(m?.content) + 8;
+  const systems = list.filter((m) => m?.role === 'system');
+  const rest = list.filter((m) => m?.role !== 'system');
+  const systemTokens = systems.reduce((n, m) => n + tokensOf(m), 0);
+  // 从最新往回收，直到装不下；再保证最后一条一定是用户消息
+  const kept = [];
+  let used = systemTokens;
+  for (let i = rest.length - 1; i >= 0; i -= 1) {
+    const cost = tokensOf(rest[i]);
+    if (used + cost > budget && kept.length) break;
+    used += cost;
+    kept.unshift(rest[i]);
+    if (used >= budget) break;
+  }
+  let dropped = rest.length - kept.length;
+  // 单条消息本身就超预算（例如一整段长文）：保留头尾，中间省略，明确告知模型。
+  // 字符数用估算函数二分逼近，而不是按固定系数换算——中英文的 token/字符比差 3 倍。
+  if (kept.length === 1 && used > budget) {
+    const only = kept[0];
+    const text = String(only.content || '');
+    const room = budget - systemTokens - 16;
+    const fits = (chars) => estimateTokens(
+      `${text.slice(0, Math.ceil(chars * 0.6))}${text.slice(-Math.floor(chars * 0.4))}`,
+    ) <= room;
+    if (!fits(text.length)) {
+      let lo = 200;
+      let hi = text.length;
+      while (hi - lo > 64) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (fits(mid)) lo = mid; else hi = mid;
+      }
+      const head = Math.ceil(lo * 0.6);
+      const tail = lo - head;
+      kept[0] = {
+        ...only,
+        content: `${text.slice(0, head)}\n\n…（内容过长，中间约 ${text.length - lo} 个字符已省略，请基于首尾内容回答）…\n\n${text.slice(-tail)}`,
+      };
+    }
+  }
+  // 最后一条不是用户消息时（历史以助手消息结尾会长这样），补回来的那条已在上面的循环里
+  const out = [...systems, ...kept];
+  return {
+    messages: out,
+    estimatedTokens: out.reduce((n, m) => n + tokensOf(m), 0),
+    contextTokens: ctx,
+    droppedMessages: dropped,
+  };
+}
+
+/**
  * 两份量化分组是否等价（档位名、分片路径、分片大小全一致）。
  * 用来判断缓存能不能直接用：仓库重新上传过文件时大小会变，继续用缓存会让
  * 下载端以旧的 expectedSize 校验，永远报“文件下载不完整”。
@@ -368,6 +445,8 @@ export class NativeEngine {
       running: this.llama.status(),
       // GPU 卸载自动回退的说明（请求层数装不下时降到了多少层），界面据此提示用户
       loadNote: this.loadNote || null,
+      // 最近一次生成是否因上下文不够而省略了历史（面板据此提示用户）
+      contextTrim: this.contextTrim || null,
       pythonRunning: this.python.status(),
       models,
       hf: {
@@ -1438,8 +1517,11 @@ export class NativeEngine {
   }
 
   async load(id, { quant, contextTokens, gpuLayers, explicit = true } = {}) {
-    // 未显式给值时沿用上一次加载的参数（聊天自动加载走这条）
-    const prefs = this.loadPrefs || { contextTokens: 8192, gpuLayers: 0 };
+    // 未显式给值时沿用“同一个模型上一次加载”的参数（聊天自动加载走这条）。
+    // 只认同一个模型：把 70B 的 32K 上下文/40 层套到 8B 小模型上只会白白触发回退重试。
+    const prefs = (this.loadPrefsFor === id && this.loadPrefs)
+      ? this.loadPrefs
+      : { contextTokens: 8192, gpuLayers: 0 };
     if (!Number.isFinite(Number(contextTokens))) contextTokens = prefs.contextTokens;
     if (!Number.isFinite(Number(gpuLayers))) gpuLayers = prefs.gpuLayers;
     if (explicit) this._rememberLoadPrefs(id, { contextTokens, gpuLayers });
@@ -1691,16 +1773,38 @@ export class NativeEngine {
       await this.load(model, { contextTokens: 4096, gpuLayers: 0, explicit: false });
       await this.llama.whenReady();
     }
+    // 超大模型的上下文窗口往往只有 4K~32K，而网页/API 一次可以送来 8 万字符的历史：
+    // 直接整包发给 llama.cpp，轻则被它悄悄截断（前面的系统提示/关键信息丢了），
+    // 重则直接 400 “exceeds context”。这里按实际上下文预算裁剪历史：
+    // 保留最前面的 system 消息（系统提示、检索证据）与最近的消息，
+    // 被裁掉的部分在日志里说明，用户不会以为模型“忘了”。
+    const fitted = fitMessagesToContext(messages, {
+      contextTokens: this.llama.info?.contextTokens || 8192,
+      reserveForOutput: Number.isInteger(maxTokens) && maxTokens > 0 ? maxTokens : 1024,
+    });
+    if (fitted.droppedMessages > 0) {
+      this.logger.warn?.(`[native] 对话历史超出上下文（约 ${fitted.estimatedTokens} tokens > ${fitted.contextTokens}），已省略最早的 ${fitted.droppedMessages} 条消息以留出输出空间。`);
+      // 面板上给一句说明：不然用户只会觉得“模型怎么忘了我前面说的”
+      this.contextTrim = {
+        droppedMessages: fitted.droppedMessages,
+        estimatedTokens: fitted.estimatedTokens,
+        contextTokens: fitted.contextTokens,
+        at: new Date().toISOString(),
+      };
+    } else {
+      // 这次没裁：清掉上一次的提示，避免面板一直挂着旧记录
+      this.contextTrim = null;
+    }
     const body = {
       model: entry.id,
-      messages,
+      messages: fitted.messages,
       stream: !!stream,
       ...thinkOff,
     };
     if (Number.isFinite(temperature)) body.temperature = temperature;
     if (Number.isInteger(maxTokens) && maxTokens > 0) body.max_tokens = maxTokens;
     if (stream) body.stream_options = { include_usage: true };
-    const res = await this.fetchImpl(`${this.llama.baseUrl}/v1/chat/completions`, {
+    const send = () => this.fetchImpl(`${this.llama.baseUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -1709,9 +1813,35 @@ export class NativeEngine {
       body: JSON.stringify(body),
       signal,
     });
+    let res = await send();
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw Object.assign(new Error(`llama.cpp 生成失败（HTTP ${res.status}）${text ? `：${text.slice(0, 200)}` : ''}`), { status: 502 });
+      let text = await res.text().catch(() => '');
+      // llama.cpp 判定输入超窗（上下文估算比实际小，中文/代码最容易差这一截）：
+      // 不要再把 400 直接甩给用户，把历史按一半预算再裁一次重发，用户几乎无感。
+      if (/exceed|too (long|large)|context (size|length)|n_ctx/i.test(text) && fitted.droppedMessages >= 0) {
+        const tight = fitMessagesToContext(messages, {
+          contextTokens: Math.max(1024, Math.floor((this.llama.info?.contextTokens || 8192) / 2)),
+          reserveForOutput: Number.isInteger(maxTokens) && maxTokens > 0 ? maxTokens : 1024,
+        });
+        if (tight.messages.length !== fitted.messages.length || tight.estimatedTokens < fitted.estimatedTokens) {
+          this.logger.warn?.('[native] llama.cpp 提示输入超窗，已按更小的预算重新裁剪对话历史后重试一次。');
+          this.contextTrim = {
+            droppedMessages: tight.droppedMessages,
+            estimatedTokens: tight.estimatedTokens,
+            contextTokens: tight.contextTokens,
+            at: new Date().toISOString(),
+          };
+          body.messages = tight.messages;
+          res = await send();
+          if (!res.ok) text = await res.text().catch(() => '');
+        }
+      }
+      if (!res.ok) {
+        throw Object.assign(
+          new Error(`llama.cpp 生成失败（HTTP ${res.status}）${text ? `：${text.slice(0, 200)}` : ''}`),
+          { status: 502 },
+        );
+      }
     }
     return res;
   }

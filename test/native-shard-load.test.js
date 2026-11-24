@@ -226,3 +226,64 @@ test('加载：内存不足（llama.cpp 也印成 error loading model）不会�
     true,
   );
 });
+
+test('聊天自动加载：沿用同一模型上次的上下文/层数，换模型时回到默认值', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const putModel = async (id, quant) => {
+    const qdir = engine.modelDir(id, quant);
+    await mkdir(qdir, { recursive: true });
+    await writeFile(path.join(qdir, 'M.gguf'), 'x');
+    await writeFile(path.join(qdir, 'manifest.json'), JSON.stringify({
+      id, quant, repo: 'x/y', files: [{ path: 'M.gguf', size: 1 }], totalBytes: 1,
+    }));
+  };
+  await putModel(MODEL_ID, 'Q4_K_M');
+  await engine.load(MODEL_ID, { quant: 'Q4_K_M', contextTokens: 16384, gpuLayers: 0 });
+  assert.equal(engine.loadPrefs.contextTokens, 16384);
+  assert.equal(engine.loadPrefsFor, MODEL_ID);
+  // 另一个模型走自动加载：不该继承上面那个模型的 16384
+  await putModel('Qwen3-32B', 'Q4_K_M');
+  await engine.load('Qwen3-32B', { explicit: false });
+  assert.equal(engine.llama.info.contextTokens, 8192);
+});
+
+// ---- 使用阶段：长对话超出上下文窗口 ----
+test('fitMessagesToContext：保留系统提示与最新消息，丢弃最早历史并给出说明', async () => {
+  const { fitMessagesToContext } = await import('../server/native/engine.js');
+  const history = [{ role: 'system', content: '系统提示：你是刷题助手' }];
+  for (let i = 0; i < 40; i += 1) {
+    history.push({ role: i % 2 === 0 ? 'user' : 'assistant', content: `第 ${i} 条：${'内容'.repeat(600)}` });
+  }
+  history.push({ role: 'user', content: '最后的问题' });
+  const out = fitMessagesToContext(history, { contextTokens: 4096, reserveForOutput: 512 });
+  assert.equal(out.contextTokens, 4096);
+  assert.ok(out.droppedMessages > 0, '必须真的裁掉了历史');
+  assert.equal(out.messages[0].role, 'system', '系统提示不能被裁掉');
+  assert.equal(out.messages.at(-1).content, '最后的问题', '最新的用户消息必须保留');
+  // 估算必须落在预算内（含输出预留），否则 llama.cpp 还是会 400
+  assert.ok(out.estimatedTokens <= 4096, `估算 ${out.estimatedTokens} 应不超过 4096`);
+  // 历史顺序不能被打乱
+  const roles = out.messages.slice(1).map((m) => m.role);
+  assert.notEqual(roles[0], 'assistant', '裁剪后第一条历史应是用户消息，不能从助手消息开始');
+});
+
+test('fitMessagesToContext：短对话原样返回，超长单条消息保留首尾并标注省略', async () => {
+  const { fitMessagesToContext } = await import('../server/native/engine.js');
+  const short = fitMessagesToContext(
+    [{ role: 'system', content: 's' }, { role: 'user', content: '你好' }],
+    { contextTokens: 8192 },
+  );
+  assert.equal(short.droppedMessages, 0);
+  assert.equal(short.messages.length, 2);
+  assert.equal(short.messages.at(-1).content, '你好');
+
+  const long = fitMessagesToContext(
+    [{ role: 'user', content: `开头重要信息${'很长的正文'.repeat(5000)}结尾的重要问题` }],
+    { contextTokens: 4096, reserveForOutput: 512 },
+  );
+  const text = long.messages.at(-1).content;
+  assert.ok(text.length < 20000, `应被截短，实际 ${text.length}`);
+  assert.match(text, /已省略/);
+  assert.match(text, /^开头重要信息/, '头部内容要保留');
+  assert.match(text, /结尾的重要问题$/, '尾部内容要保留');
+});

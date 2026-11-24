@@ -3698,11 +3698,19 @@ function renderNativePanel() {
     if (running.state === 'ready' && running.gpuLayers !== null && running.gpuLayers !== undefined) {
       gpuBits.push(`当前模型实际卸载到 GPU 的层数：${running.gpuLayers} 层`);
     }
+    // 最近一次生成因上下文不够而省略了历史：明确告诉用户“模型不是失忆，是窗口不够”
+    if (nativeStatus.contextTrim) {
+      const t = nativeStatus.contextTrim;
+      gpuBits.push(`上一次对话太长，已省略最早的 ${t.droppedMessages} 条历史（约 ${t.estimatedTokens} tokens / 窗口 ${t.contextTokens}）以留出回答空间；需要模型记住更多内容请调大上下文或新建会话`);
+    }
     if (nativeStatus.loadNote) {
       const n = nativeStatus.loadNote;
       gpuBits.push(typeof n === 'string'
         ? n
-        : `加载时已自动回退（GPU 层数 请求 ${n.requested} → 实际 ${n.used}${n.contextTokens ? `，上下文 ${n.contextTokens}` : ''}）`);
+        : n.reason && Number(n.used) === Number(n.requested)
+          // 只是上下文被模型上限截断（层数没动）：别写成“自动回退”，会被误读成显存不足
+          ? `${n.reason}（实际上下文 ${n.contextTokens || n.used}）`
+          : `加载时已自动回退（GPU 层数 请求 ${n.requested} → 实际 ${n.used}${n.contextTokens ? `，上下文 ${n.contextTokens}` : ''}）：${n.reason || '疑似显存/内存不足'}`);
     }
     els.apiNativeHint.textContent = gpuBits.length ? `${base} ${gpuBits.join('；')}。` : base;
   }

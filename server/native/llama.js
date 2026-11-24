@@ -257,11 +257,29 @@ export class LlamaProcess {
       '--jinja',
       '--reasoning-format', 'deepseek',
       '--api-key', apiKey,
+      // 历史里带上完整对话即可：每个请求都会把整段 messages 发来，llama.cpp 在 -c 满后
+      // 默认不再复用 prompt 前缀缓存，长对话每次都要重新预填充（超大模型极慢）。
+      // 显式打开它，前缀命中才生效。
+      '--cache-reuse', '256',
       // flash attention：长上下文（超大模型常用 32K~256K）下省显存/内存的关键开关
       '--flash-attn', 'on',
     ];
     this.info = { modelId, quant, port, apiKey, binary, contextTokens, gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0) };
-    const child = this.spawnImpl(binary, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    // CUDA 版的 cudart 运行库就放在二进制同目录（随包下载时平铺在一起）：
+    // Linux/macOS 的动态链接器不会自动搜“可执行文件所在目录”，必须显式加进
+    // LD_LIBRARY_PATH / DYLD_LIBRARY_PATH，否则 CUDA 版一启动就报找不到 libcudart.so。
+    const binEnv = {};
+    const binDir = path.dirname(binary);
+    const win = process.platform === 'win32';
+    if (!win) {
+      const varName = process.platform === 'darwin' ? 'DYLD_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
+      const prev = process.env[varName];
+      binEnv[varName] = prev ? `${binDir}${path.delimiter}${prev}` : binDir;
+    }
+    const child = this.spawnImpl(binary, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(win ? {} : { env: { ...process.env, ...binEnv } }),
+    });
     this.child = child;
     const pushLog = (chunk) => {
       for (const line of String(chunk).split(/\r?\n/)) {

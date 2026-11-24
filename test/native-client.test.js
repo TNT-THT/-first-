@@ -526,3 +526,32 @@ test('useRepoViaBrowser：浏览器下载失败时回退直连且带回真实原
   assert.equal(downloadState, 'fallback');
   assert.match(downloadError, /无法连接 Hugging Face/);
 });
+
+test('downloadModelViaBrowser：门控仓库 403 直接给“需要 Token”，不做无意义的 Range 重试', async () => {
+  const fileUrl = 'https://huggingface.co/someone/Gated-GGUF/resolve/main/Gated-Q4_K_M.gguf';
+  const { state, apiFetch } = fakeLocalApi({
+    prepFiles: [{ path: 'Gated-Q4_K_M.gguf', size: 10, url: fileUrl, offset: 4, done: false }],
+    initialReceived: 4,
+  });
+  let hits = 0;
+  const hfFetch = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('/tree/main')) {
+      return new Response(JSON.stringify([{ type: 'file', path: 'Gated-Q4_K_M.gguf', lfs: { size: 10 } }]), { headers: { 'content-type': 'application/json' } });
+    }
+    if (u === fileUrl) {
+      hits += 1;
+      return new Response('forbidden', { status: 403 });
+    }
+    return apiFetch(url, opts);
+  };
+  await assert.rejects(
+    () => downloadModelViaBrowser({
+      id: 'hf/someone/Gated-GGUF', repo: 'someone/Gated-GGUF', quant: 'Q4_K_M',
+      adminToken: 'adm', fetchImpl: hfFetch, chunkBytes: 4, retryDelayMs: 1,
+    }),
+    /Token/,
+  );
+  assert.equal(hits, 1, '鉴权失败不该反复重试同一个 URL');
+  assert.equal(state.failed, true);
+});

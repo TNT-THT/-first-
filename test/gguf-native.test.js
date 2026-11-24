@@ -137,3 +137,40 @@ test('pickCudartAsset：CUDA 主包要能配上同版本的 cudart 运行库', (
   );
   assert.equal(pickCudartAsset(assets, asset('llama-b9-bin-win-cpu-x64.zip')), null);
 });
+
+// ---- llama-server 启动环境：CUDA 版的 cudart 依赖必须能被动态链接器找到 ----
+test('LlamaProcess：非 Windows 启动时把 bin 目录加进 LD_LIBRARY_PATH/DYLD_LIBRARY_PATH', async () => {
+  const { LlamaProcess } = await import("../server/native/llama.js");
+  const calls = [];
+  const fakeChild = () => {
+    const handlers = {};
+    return {
+      stdout: { on() {} },
+      stderr: { on() {} },
+      once: (ev, fn) => { handlers[ev] = fn; },
+      kill() {},
+    };
+  };
+  const server = new LlamaProcess({
+    spawnImpl: (bin, args, opts) => { calls.push({ bin, args, opts }); return fakeChild(); },
+    fetchImpl: async () => { throw new Error('not listening'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  // 不让 waitHealthy 拖住：只验证 spawn 参数，随后主动 stop
+  const p = server.start({
+    binary: '/data/native/bin/llama-server',
+    modelFile: '/data/native/m/Q4_K_M/M-00001-of-00002.gguf',
+    modelId: 'x', quant: 'Q4_K_M', contextTokens: 4096, gpuLayers: 0, port: 18999,
+  }).catch(() => {});
+  await new Promise((r) => setTimeout(r, 50));
+  await server.stop();
+  await p;
+  assert.equal(calls.length, 1);
+  const { args, opts } = calls[0];
+  if (process.platform === 'win32') return;
+  const varName = process.platform === 'darwin' ? 'DYLD_LIBRARY_PATH' : 'LD_LIBRARY_PATH';
+  assert.ok(opts.env[varName].split(path.delimiter)[0] === '/data/native/bin', `首个搜索路径应是 bin 目录，实际 ${opts.env[varName]}`);
+  // 关键参数仍在：分片入口 + flash attention
+  assert.match(args[args.indexOf('-m') + 1], /-00001-of-00002\.gguf$/);
+  assert.equal(args[args.indexOf('--flash-attn') + 1], 'on');
+});
