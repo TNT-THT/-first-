@@ -3293,6 +3293,7 @@ async function refreshNativeStatus() {
 function buildNativeModelRow(m, admin) {
   const row = document.createElement('div');
   row.className = 'native-model-row';
+  row.dataset.nativeId = m.id; // 从 HF 搜索“一键使用”回来时靠它定位到这一行
   const running = nativeStatus?.running || {};
   const isRunning = running.modelId === m.id && running.state === 'ready';
   const isLoading = running.modelId === m.id && running.state === 'loading';
@@ -3893,6 +3894,20 @@ async function hfUseRepo(repo, mode = 'auto') {
 }
 
 async function hfUseRepoInner(repo, mode = 'auto') {
+  // 已经下载/正在下载过的仓库：直接带用户回模型列表，而不是再跑一遍浏览器的“取树→判定”
+  // （几步网络请求 + 一秒多等待，最后也只会得到“已开始下载”的旧结论）。
+  const known = nativeModels().find((m) => m.repo === repo && m.kind === 'hf');
+  if (known && ((known.downloaded || []).length || (known.downloads || []).length || known.conversion?.state === 'running')) {
+    const stateText = nativeStateText(known);
+    const msg = `这个仓库已经处理过了（${stateText}）：在下面的模型列表里选量化、“加载”即可；也可以在聊天页模型选择里直接选它。`;
+    if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = msg;
+    showStatus(msg);
+    // 滚到对应行，省得用户在一长串模型里找
+    const row = els.apiNativeList?.querySelector?.(`[data-native-id="${known.id}"]`);
+    row?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+    await refreshNativeStatus();
+    return;
+  }
   try {
     let out;
     let downloadState = 'none';
@@ -3985,7 +4000,12 @@ function renderBridgeModelOptions() {
   }
   if (!ids.includes(localChatModelId)) {
     const saved = loadLocalChatModel();
-    localChatModelId = ids.includes(saved) ? saved : ids[0];
+    // 默认选中“马上能用”的那一个：以前一律取 ids[0]，在没有网页模型桥接的部署里
+    // 就是内置目录的第一个（可能是 405B 这种根本没下载的模型），一发消息就报“尚未下载”。
+    const usableNative = nativeModels().find((m) => (m.downloaded || []).length
+      && !(m.downloaded || []).every((d) => d.quant === 'SNAPSHOT'));
+    const fallback = apiBridgeModels[0]?.id || usableNative?.id || nativeModels()[0]?.id || ids[0];
+    localChatModelId = ids.includes(saved) ? saved : fallback;
     // 保存的选择已失效（如模型被删除）时把纠正后的选择写回，避免旧值一直残留
     if (saved !== localChatModelId) saveLocalChatModel(localChatModelId);
   }
