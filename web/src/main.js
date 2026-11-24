@@ -3976,6 +3976,9 @@ function nativeStateText(m) {
   if (nativeStatus?.running?.modelId === m.id && nativeStatus.running.state === 'loading') return '加载中';
   const dl = (m.downloads || []).find((d) => d.state === 'downloading');
   if (dl) return `下载中 ${dl.total ? Math.floor((dl.downloaded / dl.total) * 100) : 0}%`;
+  // 上次中断（换页面/断网/软件重启）：不能说“已下载”，否则用户点加载才发现分片不全
+  const broken = (m.downloads || []).find((d) => d.state === 'error');
+  if (broken && !(m.downloaded || []).length) return '下载中断（可续传）';
   if ((m.downloaded || []).length) return '已下载';
   if (m.conversion?.state === 'running') return '转换中';
   if (m.remote) return '云端可用';
