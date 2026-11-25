@@ -30,6 +30,7 @@ import { extractZip } from './archive.js';
 import { readGgufBlockCount, readGgufMeta } from './gguf.js';
 import { findConverter, prepareConverter, runConvert } from './convert.js';
 import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python-runner.js';
+import { planPagefile, readMemoryBudget } from './sysmem.js';
 
 const QUANT_CACHE_MS = 10 * 60 * 1000;
 
@@ -1933,7 +1934,7 @@ export class NativeEngine {
    *
    * @returns {{neededGB: number, totalGB: number, freeGB: number, tight: boolean, summary: string}}
    */
-  _memoryReport(weights, gpuLayers = 0, contextTokens = 8192, { mmap = true, blockCount = null } = {}) {
+  _memoryReport(weights, gpuLayers = 0, contextTokens = 8192, { mmap = true, blockCount = null, budget: budgetOverride = null } = {}) {
     const round = (n) => Math.round(n * 10) / 10;
     // weights 可以是总字节数，也可以是 {totalBytes, blockCount}（有层数时算得更准）
     const w = typeof weights === 'object' && weights ? weights : { totalBytes: weights, blockCount: null };
@@ -1954,31 +1955,78 @@ export class NativeEngine {
     const neededGB = round(weightsGB + residentGB + kvGB + runtimeGB);
     let totalGB = 0;
     let freeGB = 0;
+    // 提交上限（= 物理内存 + 页面文件/swap）。这是“硬盘能不能兜底”的唯一真实指标：
+    // 需求超过物理内存但没超过提交上限 → 能跑，只是慢；超过提交上限 → 申请内存直接失败。
+    let budget = { commitLimitBytes: null, commitFreeBytes: null, canSpill: false, pagefileBytes: 0, source: 'os-only' };
     try {
-      totalGB = round(os.totalmem() / 1e9);
-      freeGB = round(os.freemem() / 1e9);
+      if (budgetOverride) {
+        // budget 可注入：测试要能模拟“用户的机器”（16.6 GB / 7.4 GB 可用 / 配了多大页面文件），
+        // 否则只能依赖跑测试那台机器本身的配置，边界情形根本测不到。
+        budget = budgetOverride;
+        totalGB = budgetOverride.totalBytes ? round(budgetOverride.totalBytes / 1e9) : 0;
+        freeGB = budgetOverride.freeBytes ? round(budgetOverride.freeBytes / 1e9) : 0;
+      } else {
+        totalGB = round(os.totalmem() / 1e9);
+        freeGB = round(os.freemem() / 1e9);
+        budget = readMemoryBudget();
+      }
     } catch { /* 某些受限环境拿不到内存信息 */ }
-    // 真正决定 Windows 会不会 0xC0000005 的是“提交内存上限 / 可用物理内存”，
-    // 不是“总内存”。给出三档判断：
-    //  - exceedsFree：连当前可用物理内存都不够（哪怕关掉别的程序也危险）
-    //  - exceedsTotal：比整机物理内存还多（必须换量化）
+    const commitLimitGB = budget.commitLimitBytes ? round(budget.commitLimitBytes / 1e9) : 0;
+    const commitFreeGB = budget.commitFreeBytes ? round(budget.commitFreeBytes / 1e9) : 0;
+    const pagefileGB = budget.pagefileBytes ? round(budget.pagefileBytes / 1e9) : 0;
+    // 三四档判断，各自给不同的建议（以前把“物理内存不够”和“页面文件也不够”混成一句）：
+    //  - exceedsTotal：连物理内存都能装下 → 没事
+    //  - exceedsFree ：放不进当前可用物理内存，但装得进物理内存总量 → 关程序即可
+    //  - exceedsCommit：连“物理内存 + 页面文件”都不够 → 必须换量化/换机器
+    //  - spillOnly   ：物理内存装不下，但页面文件能兜住 → 能跑，会慢很多
     const exceedsFree = totalGB > 0 && freeGB > 0 && neededGB > freeGB;
     const exceedsTotal = totalGB > 0 && neededGB > totalGB;
-    const tight = exceedsTotal || exceedsFree;
+    const exceedsCommit = commitLimitGB > 0 && neededGB > commitLimitGB;
+    const spillOnly = exceedsTotal && !exceedsCommit && pagefileGB > 0;
+    // tight 只表示“这份模型值得提醒用户”：装不进物理内存总量就算提醒。
+    // 不能把 exceedsCommit 也算进来——某些环境（容器、禁用 overcommit 的内核）
+    // 提交上限比物理内存还小，那样连 1.5 GB 的小模型都会被报“装不下”。
+    const tight = exceedsTotal;
     const parts = [`这份权重约需 ${neededGB} GB 内存（权重 ${round(weightsGB)} GB + KV 缓存 ${round(kvGB)} GB + 运行时 ${runtimeGB} GB），本机总内存 ${totalGB} GB、当前可用 ${freeGB} GB`];
-    if (exceedsTotal) parts.push('：比整机物理内存还多，就算关掉所有程序也装不下，必须换更小的量化或换机器。');
-    else if (exceedsFree) parts.push('：当前可用内存不够，关掉其它占内存的程序后可以再试（总内存足够）。');
-    else parts.push('，内存够用。');
+    if (commitLimitGB > 0) {
+      parts.push(`（含页面文件/swap 可提交上限 ${commitLimitGB} GB${pagefileGB > 0 ? `，其中页面文件 ${pagefileGB} GB` : '，未配页面文件'}）`);
+    }
+    if (totalGB > 0) {
+      if (exceedsCommit && exceedsTotal) {
+        parts.push('：连“物理内存 + 页面文件”的上限都超过了，系统无法再分配这么多内存，必须换更小的量化或换机器。');
+      } else if (exceedsCommit && !exceedsTotal) {
+        // 提交上限比物理内存还小（容器/禁用 overcommit）：说明这台机器限制很紧
+        parts.push('：物理内存本身够，但系统的可提交内存上限比物理内存还小，可能需要调大页面文件/放宽限制。');
+      } else if (spillOnly) {
+        parts.push(`：物理内存装不下，但页面文件还能兜住，理论上可以跑——只是会频繁换页到硬盘（SSD 慢几十倍、机械硬盘更慢），`
+          + '生成速度会低到几乎不可用，还容易超时。建议换更小的量化，装进物理内存才是正常速度。');
+      } else if (exceedsFree) {
+        parts.push('：当前可用内存不够，关掉其它占内存的程序后可以再试（总内存足够）。');
+      } else {
+        parts.push('，内存够用。');
+      }
+    }
     const summary = totalGB > 0 ? parts.join('') : `这份权重约需 ${neededGB} GB 内存（含上下文 ${ctx} 的 KV 缓存）。`;
+    // 真的要“拿硬盘顶”时到底该开多大页面文件：给出具体数字，用户才能照着做
+    const pagefilePlan = totalGB > 0 ? planPagefile({ neededGB, totalGB, pagefileGB }) : null;
     return {
       neededGB,
       weightsGB: round(weightsGB),
       kvGB: round(kvGB),
       totalGB,
       freeGB,
+      // 硬盘兜底相关（界面据此解释“为什么不能靠 C/D 盘”，而不是让用户以为软件不会用硬盘）
+      commitLimitGB,
+      commitFreeGB,
+      pagefileGB,
+      canSpill: !!budget.canSpill,
+      memSource: budget.source,
       tight,
       exceedsTotal,
       exceedsFree,
+      exceedsCommit,
+      spillOnly,
+      pagefilePlan,
       gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0),
       contextTokens: ctx,
       blockCount: layers || null,
@@ -2278,8 +2326,12 @@ export class NativeEngine {
         const alreadyExplained = /判断：/.test(inner);
         // 按证据给建议，而不是每次都把三条建议全倒给用户：
         // “换更小的量化”对缺 DLL 的故障毫无用处，只会让人白折腾一次。
+        // 内存类故障：如果有可操作的页面文件数字，就一起给出来——
+        // 这才是“用硬盘顶内存”唯一真实可行的做法，比空口说“内存不够”有用得多。
+        const pf = mem?.pagefilePlan;
+        const pfTip = pf && !pf.enough ? `③ 或把页面文件调到约 ${pf.requiredPagefileGB} GB（能用硬盘顶住不崩，但会很慢）。` : '';
         const tips = {
-          memory: '① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；② 关闭其它占用内存的程序后重试。',
+          memory: `① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；② 关闭其它占用内存的程序后重试。${pfTip}`,
           runtime: '① 点“准备运行库”重装 llama.cpp 运行库；② 若装的是 CUDA/Vulkan 版，把 OJ_LLAMA_VARIANT 设为 cpu；③ 确认已安装 VC++ 运行库。',
           corrupt: '① 删除这一档量化后重新下载（会断点续传）；② 再点加载。',
           silent: '① 点“准备运行库”重装 llama.cpp 运行库；② 把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版；③ 仍失败时用系统命令行直接运行 llama-server，把系统报错发给开发者。',
