@@ -17,17 +17,30 @@ test('内存预算：任何平台都不抛错，拿不到的信息就是 null/0�
   }
 });
 
-test('内存预算：本机读到的提交上限不小于物理内存时，才认为“硬盘能兜底”', () => {
+test('内存预算：pagefileBytes 是实测值，不从“提交上限 − 物理内存”反推', () => {
   const b = readMemoryBudget();
   if (!b.commitLimitBytes) return; // 环境不支持，跳过
-  if (b.commitLimitBytes <= b.totalBytes) {
-    // 典型：容器/未配 swap —— 硬盘帮不上忙，必须如实说不能
-    assert.equal(b.pagefileBytes, 0);
-    assert.equal(b.canSpill, false);
-  } else {
-    assert.ok(b.pagefileBytes > 0);
-    assert.equal(b.canSpill, true);
+  // 这条用例最初写成了“commitLimit <= total 时 pagefileBytes 必为 0”，
+  // 结果在 GitHub Actions 上失败：runner 有 3 GB swap，但 overcommit 模式下
+  // CommitLimit 反而小于物理内存。用差值反推会得出负数或错值，所以改成
+  // 只断言“不变量”：
+  assert.ok(b.pagefileBytes >= 0, '页面文件大小不能是负数');
+  // 有页面文件就应该标记为“硬盘能兜底”
+  assert.equal(b.canSpill, b.pagefileBytes > 0);
+  // 三者关系必须自洽：能兜底意味着提交上限 > 物理内存；不能兜底时最多等于物理内存
+  if (b.canSpill) {
+    assert.ok(b.commitLimitBytes >= b.totalBytes,
+      `有页面文件时提交上限应不小于物理内存：${b.commitLimitBytes} vs ${b.totalBytes}`);
   }
+});
+
+test('内存预算：overcommit 下调紧的内核（提交上限 < 物理内存）也不能算出负数', async () => {
+  // 直接验证算法本身：模拟 GitHub runner 那种“有 swap 但 CommitLimit 偏小”的输入，
+  // planPagefile 不能因为提交上限小而给出负的建议值。
+  const { planPagefile } = await import('../server/native/sysmem.js');
+  const plan = planPagefile({ neededGB: 20, totalGB: 16, pagefileGB: 3 });
+  assert.ok(plan.requiredPagefileGB >= 0, `建议值不能为负：${plan.requiredPagefileGB}`);
+  assert.ok(plan.requiredCommitGB >= 20, '要有余量');
 });
 
 test('页面文件建议：按“需求 ×1.2 余量 − 物理内存”算，且给到具体数字', () => {
