@@ -27,10 +27,13 @@ jobs:
           node --version
           grep -E 'MemTotal|MemAvailable|CommitLimit|SwapTotal' /proc/meminfo || true
           nproc
-          npm test > test.log 2>&1
+          df -h / /tmp | tail -3
+          echo "=== 普通环境 ===" >> test.log
+          npm test >> test.log 2>&1
           echo "exit=$?" >> test.log
-          tail -c 200000 test.log > tail.log
-          wc -l test.log
+          echo "=== 模拟 tag 触发（GITHUB_REF_TYPE=tag, GITHUB_REF=refs/tags/v1.0.18） ===" >> test.log
+          GITHUB_REF=refs/tags/v1.0.18 GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.0.18 npm test >> test.log 2>&1
+          echo "exit=$?" >> test.log
         continue-on-error: true
       - uses: actions/upload-artifact@v4
         if: always()
