@@ -357,7 +357,13 @@ test('流式转发：llama.cpp 在流里报错时，网页/API 能收到明确�
 // 成因：exit 回调先把 child 置空，waitHealthy 轮询看到 child 变了就抛“已被停止或替换”，
 // 真正的崩溃死因被这句假错误盖掉，上层既看不清原因也无法判断该不该降级重试。
 
-const CRASH_SCRIPT = `#!/usr/bin/env node\nprocess.exit(3221225477);\n`;
+// 注意：`--version` 必须成功。启动前自检会先跑一次 --version，
+// 零输出崩溃的二进制现在会在启动前就被拦下（这是修复后的正确行为，
+// 见下面“启动前自检”的用例）；这里要测的是“能启动、加载时崩溃”的回退阶梯。
+const CRASH_SCRIPT = `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('version: 4999 (deadbeef)'); process.exit(0); }
+process.exit(3221225477);
+`;
 
 test('崩溃：waitHealthy 抛出的是带退出码的真实死因，而不是“已被停止或替换”', { timeout: 30000 }, async (t) => {
   const dir = await mkdtemp(path.join(tmpdir(), 'oj-crash-'));
@@ -651,9 +657,10 @@ test('救命重载：上一次加载失败的组合不会被原样再跑一遍�
   const { engine } = await setup(t);
   const quant = 'Q4_K_M';
   await putQuant(engine, quant, [{ path: 'M.gguf', content: ggufHead() }]);
-  // 先换成“永远崩溃”的 llama-server：第一阶段所有组合都会失败
+  // 先换成“永远崩溃”的 llama-server：第一阶段所有组合都会失败。
+  // --version 必须成功，否则会被启动前自检拦在门外（那是另一个用例覆盖的行为）。
   const crashBin = path.join(path.dirname(engine.env.LLAMA_SERVER_BIN), 'crash-llama');
-  await writeFile(crashBin, '#!/usr/bin/env node\nprocess.exit(3221225477);\n');
+  await writeFile(crashBin, CRASH_SCRIPT);
   await chmod(crashBin, 0o755);
   engine.env.LLAMA_SERVER_BIN = crashBin;
   const tried = [];
@@ -782,6 +789,8 @@ test('启动前自检：探测到版本不支持某参数时自动省略（而�
   // 一个“老版本”：--help 里没有 --flash-attn / --cache-reuse
   await writeFile(bin, `#!/usr/bin/env node
 const args = process.argv.slice(2);
+// --version 要成功：这是启动前自检的第一关（零输出崩溃会被直接拦下）
+if (args.includes('--version')) { console.log('version: 3000 (cafe)'); process.exit(0); }
 if (args.includes('--help')) {
   console.log('usage: llama-server [options]\\n  -m, --model PATH\\n  --host HOST\\n  --port PORT\\n  -c, --ctx-size N\\n  -ngl N\\n  --jinja');
   process.exit(0);
@@ -826,8 +835,14 @@ test('最终报错不重复刷同一段内存说明，且结论与建议一致',
   const quant = 'Q4_K_M';
   await putQuant(engine, quant, [{ path: 'M.gguf', content: ggufHead() }]);
   const dir = path.dirname(engine.env.LLAMA_SERVER_BIN);
-  // 一句日志都没有就退出的 llama-server（用户现场）
-  await writeFile(path.join(dir, 'silent-llama'), '#!/usr/bin/env node\nprocess.exit(3221225477);\n');
+  // 一句日志都没有就退出的 llama-server（用户现场）。
+  // 注意：这种二进制现在会在**启动前自检**就被拦下（见下一个用例），
+  // 不会走到 7 档回退。这里让 --version 冒充成功，以便继续验证“回退都失败后”
+  // 的最终文案不重复、且结论与建议一致。
+  await writeFile(path.join(dir, 'silent-llama'), `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('version: 4000 (beef)'); process.exit(0); }
+process.exit(3221225477);
+`);
   await chmod(path.join(dir, 'silent-llama'), 0o755);
   engine.env.LLAMA_SERVER_BIN = path.join(dir, 'silent-llama');
   const err = await engine.chatCompletion({ model: MODEL_ID, messages: [{ role: 'user', content: 'hi' }] })
@@ -841,4 +856,186 @@ test('最终报错不重复刷同一段内存说明，且结论与建议一致',
   // 静默退出时不该引导用户去换量化（那是内存类故障的建议）
   assert.ok(!/换更小的量化/.test(err.message), `静默退出不该建议换量化：\n${err.message}`);
   assert.match(err.message, /准备运行库|OJ_LLAMA_VARIANT/);
+});
+
+// ---- 用户实测：llama-server --version 零输出、退出码 0xC0000005 ----
+// 文件存在、DLL 也都在，却一句日志都没有就崩。这种二进制必须被拦在启动之前，
+// 并且说清是“运行库/系统兼容”问题，而不是让他对着崩溃码猜。
+
+test('启动前自检：文件在、但 --version 零输出崩溃 → 启动前就拦下并说清是运行库/系统问题', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-probe-'));
+  const bin = path.join(dir, 'llama-server');
+  // 模拟 Windows 加载器在 main() 之前终止进程：零输出 + 访问违例
+  await writeFile(bin, '#!/usr/bin/env node\nprocess.exit(3221225477);\n');
+  await chmod(bin, 0o755);
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const { LlamaProcess } = await import('../server/native/llama.js');
+  let spawned = false;
+  const proc = new LlamaProcess({
+    spawnImpl: () => { spawned = true; throw new Error('不该被启动'); },
+    fetchImpl: async () => { throw new Error('不该联网'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const err = await proc.start({ binary: bin, modelFile: '/x/M.gguf', modelId: 'm', quant: 'Q4_K_M', port: 18782 })
+    .then(() => null, (e) => e);
+  assert.ok(err, '必须在启动前失败');
+  assert.equal(spawned, false, '已经确认跑不起来的二进制不该再被启动（省掉一轮无用的等待）');
+  assert.match(err.message, /零输出|启动不了/);
+  assert.match(err.message, /VC\+\+|运行库/, '要指向运行库这一层');
+  assert.match(err.message, /vc_redist|较早的|构建/, '要给出可执行的动作');
+  // 注意：Linux 上 process.exit(3221225477) 会被截成 5，所以只断言“带上了退出码”，
+  // 具体数值由 Windows 的真实崩溃码决定（那时会显示 3221225477，即 0xC0000005）。
+  assert.match(err.message, /退出码/, '要带上真实的退出码');
+});
+
+test('启动前自检：--version 能正常打印版本 → 放行，并记下版本号', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-probe2-'));
+  const bin = path.join(dir, 'llama-server');
+  await writeFile(bin, `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('version: 8421 (deadbeef)'); console.log('built with clang'); process.exit(0); }
+process.exit(0);
+`);
+  await chmod(bin, 0o755);
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const { LlamaProcess } = await import('../server/native/llama.js');
+  const proc = new LlamaProcess({ fetchImpl: async () => { throw new Error('no'); }, logger: { warn() {}, log() {}, error() {} } });
+  const pf = await proc._preflight({ binary: bin, args: [] });
+  assert.equal(pf.fatal, false, `能跑就不该拦：${pf.message}`);
+  assert.match((pf.notes || []).join(' '), /版本/);
+  assert.match((pf.notes || []).join(' '), /8421/);
+});
+
+// ---- 架构不支持：用户真实遇到 unknown model architecture: 'qwen35moe' ----
+// 以前这条会被 "failed to load model" 命中内存正则，于是报“内存不足”，
+// 用户去换量化、调页面文件，全走错方向。
+
+test('架构不支持：必须判为 architecture，而不是内存不足', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  engine.llama.logTail = [
+    'llama_model_loader: loaded meta data with 43 key-value pairs',
+    "llama_model_load: error loading model: error loading model architecture: unknown model architecture: 'qwen35moe'",
+    'llama_load_model_from_file: failed to load model',
+  ];
+  engine.llama.exitInfo = { code: 1, silent: false };
+  const diag = engine._diagnoseFailure(new Error('llama-server 已退出（代码 1）'));
+  assert.equal(diag.kind, 'architecture');
+  assert.match(diag.title, /qwen35moe/);
+  // 要给出确切的最低版本，用户才知道该升到哪一版
+  assert.match(diag.advice, /b8239/);
+  // 关键：不能同时被判成内存问题，否则会白跑 7 档回退
+  assert.equal(engine._looksLikeMemoryFailure(new Error('llama-server 已退出（代码 1）')), false);
+  // 真正的内存不足仍要判内存
+  engine.llama.logTail = ['failed to allocate buffer, out of memory'];
+  assert.equal(engine._diagnoseFailure(new Error('x')).kind, 'memory');
+});
+
+test('架构识别：从日志里读出架构名，并给出最低构建号', async () => {
+  const { matchUnsupportedArch, minBuildForArch, buildNumber } = await import('../server/native/llama.js');
+  assert.equal(matchUnsupportedArch("unknown model architecture: 'qwen35moe'"), 'qwen35moe');
+  assert.equal(matchUnsupportedArch('unknown model architecture: llama'), 'llama');
+  assert.equal(matchUnsupportedArch('一切正常'), '');
+  assert.equal(matchUnsupportedArch(''), '');
+  assert.equal(minBuildForArch('qwen35moe'), 8239);
+  assert.equal(minBuildForArch('QWEN35MOE'), 8239, '大小写不敏感');
+  assert.equal(minBuildForArch('unknown-arch'), 0);
+  assert.equal(buildNumber('b8421'), 8421);
+  assert.equal(buildNumber('8421'), 8421);
+  assert.equal(buildNumber('v1.2.3'), 0);
+});
+
+// ---- “我的系统支持不了最新的 llama 吗 / 当前的 llama 是不是太旧” ----
+
+test('运行库健康度：构建号低于架构要求时判 tooOld，并说清需要哪一版', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-health-'));
+  const bin = path.join(dir, 'llama-server');
+  // 用户现场的 B4000：能启动，但不认识 qwen35moe
+  await writeFile(bin, `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('version: 4000 (abc123)'); process.exit(0); }
+process.exit(0);
+`);
+  await chmod(bin, 0o755);
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    env: { LLAMA_SERVER_BIN: bin },
+    fetchImpl: async () => { throw new Error('不该联网'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const health = await engine.checkBinaryHealth({ forArch: 'qwen35moe' });
+  assert.equal(health.state, 'tooOld');
+  assert.equal(health.ok, false);
+  assert.equal(health.build, 4000);
+  assert.equal(health.minBuild, 8239);
+  assert.match(health.message, /b4000/);
+  assert.match(health.message, /b8239/);
+  assert.match(health.hint, /准备运行库/);
+
+  // 架构没要求时，同一个二进制是健康的
+  const plain = await engine.checkBinaryHealth({});
+  assert.equal(plain.state, 'ok');
+  assert.equal(plain.build, 4000);
+});
+
+test('运行库健康度：跑不起来的二进制判 unrunnable，并提示可锁定较早版本', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-health2-'));
+  const bin = path.join(dir, 'llama-server');
+  await writeFile(bin, '#!/usr/bin/env node\nprocess.exit(3221225477);\n');
+  await chmod(bin, 0o755);
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    env: { LLAMA_SERVER_BIN: bin },
+    fetchImpl: async () => { throw new Error('不该联网'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const health = await engine.checkBinaryHealth({});
+  assert.equal(health.state, 'unrunnable');
+  assert.equal(health.ok, false);
+  assert.match(health.message, /零输出|启动不了/);
+  // 这是“系统支持不了这个构建”时唯一的出路：锁定较早版本
+  assert.match(health.hint, /OJ_LLAMA_TAG/);
+});
+
+test('运行库健康度：完全没装时判 missing，并给出安装指引', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-health3-'));
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    env: {},
+    fetchImpl: async () => { throw new Error('不该联网'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const health = await engine.checkBinaryHealth({});
+  assert.equal(health.state, 'missing');
+  assert.match(health.message, /准备运行库/);
+});
+
+// ---- “准备运行库”以前是空操作：找到旧二进制就返回，点了永远升不上去 ----
+
+test('ensureBinary：force 才会重新下载（否则已有二进制时点“准备运行库”没有任何效果）', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-force-'));
+  const bin = path.join(dir, 'llama-server');
+  await writeFile(bin, `#!/usr/bin/env node
+if (process.argv.includes('--version')) { console.log('version: 4000 (abc)'); process.exit(0); }
+process.exit(0);
+`);
+  await chmod(bin, 0o755);
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  let downloads = 0;
+  const engine = new NativeEngine({
+    dataDir: path.join(dir, 'native'),
+    env: { LLAMA_SERVER_BIN: bin },
+    fetchImpl: async () => { downloads += 1; throw new Error('测试里不真的下载'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  // 不带 force：直接返回现有二进制，不联网
+  const found = await engine.ensureBinary({});
+  assert.equal(found.path, bin);
+  assert.equal(downloads, 0, '已有可用二进制时不该联网');
+
+  // 带 force：真的去下载（这里让网络失败，验证它确实尝试了）
+  const err = await engine.ensureBinary({ force: true }).then(() => null, (e) => e);
+  assert.ok(err, 'force 时应真的尝试下载');
+  assert.ok(downloads > 0, 'force 必须触发下载，而不是又返回旧的那个');
+  assert.equal(engine.binaryJob.state, 'error');
 });

@@ -20,15 +20,64 @@ const SERVER_DIR = import.meta.url && String(import.meta.url).startsWith('file:'
 export const LLAMA_RELEASE_API = 'https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10';
 
 /**
+ * 新模型架构 → 最早支持它的 llama.cpp 构建号。
+ *
+ * 这张表是为了解决“版本太旧”这类故障：llama.cpp 遇到不认识的架构只会打印
+ * `unknown model architecture: 'qwen35moe'` 然后退出，用户完全不知道该升到哪一版，
+ * 只能一个版本一个版本去试。这里给出确切的最低版本。
+ *
+ * 来源：ggml-org/llama.cpp 的模型支持 PR。b7973 首次加入 Qwen3.5 后被回滚（#19453），
+ * 直到 b8239 才真正可用，社区实测 b8239/b8245 可以正常加载。
+ */
+export const ARCH_MIN_BUILD = {
+  qwen35moe: 8239,
+  qwen35: 8239,
+  qwen3next: 7900,
+};
+
+/** 从 llama.cpp 日志里读出“不认识的架构”；没有则返回空字符串。 */
+export function matchUnsupportedArch(text) {
+  const m = String(text || '').match(/unknown model architecture:\s*['"]?([A-Za-z0-9_.-]+)['"]?/i);
+  return m ? m[1] : '';
+}
+
+/** 已知架构的最低构建号（未知架构返回 0）。 */
+export function minBuildForArch(arch) {
+  return ARCH_MIN_BUILD[String(arch || '').toLowerCase()] || 0;
+}
+
+/**
  * 从发布列表里挑最新的 b 系列正式构建（/releases/latest 指向的可能不是 b 系列，
  * 直接用它会挑错）。返回 {tag_name, assets} 或 null。
  */
-export function pickLlamaRelease(releases) {
-  for (const rel of Array.isArray(releases) ? releases : []) {
+export function pickLlamaRelease(releases, { tag = '' } = {}) {
+  const list = Array.isArray(releases) ? releases : [];
+  // 指定版本优先：某些新构建会在老系统上静默崩溃，必须能钉在已知可用的版本上
+  const want = String(tag || '').trim();
+  if (want) {
+    const hit = list.find((r) => String(r?.tag_name || '') === want && Array.isArray(r.assets) && r.assets.length);
+    // 指定了版本却找不到时必须明确失败，绝不能悄悄退回最新版：
+    // 用户锁定旧版正是因为新版跑不了，静默给他装回新版等于白折腾一轮。
+    return hit || null;
+  }
+  for (const rel of list) {
     if (!/^b\d+$/.test(String(rel?.tag_name || ''))) continue;
     if (Array.isArray(rel.assets) && rel.assets.length) return rel;
   }
   return null;
+}
+
+/**
+ * 把各种版本写法统一成构建号：`b8421` / `8421` / `version: 8421 (deadbeef)` → 8421。
+ * 解析不出来返回 0（调用方据此判断“版本未知”，不要拿 0 去和最低版本比较）。
+ */
+export function buildNumber(tag) {
+  const raw = String(tag || '').trim();
+  const strict = raw.match(/^b?(\d+)$/i);
+  if (strict) return Number(strict[1]);
+  // llama-server --version 的输出形如 "version: 8421 (deadbeef)"
+  const loose = raw.match(/\bb?(\d{3,7})\b/);
+  return loose ? Number(loose[1]) : 0;
 }
 
 export function llamaBinaryName(platform = process.platform) {
@@ -111,8 +160,12 @@ export async function downloadLlamaBinary({ dataDir, fetchImpl = fetch, variant 
     headers: { accept: 'application/vnd.github+json', 'user-agent': 'llm-host-skyblue' },
   });
   if (!relRes.ok) throw new Error(`读取 llama.cpp 发布信息失败（HTTP ${relRes.status}），请检查网络后重试。`);
-  const release = pickLlamaRelease(await relRes.json());
-  if (!release) throw new Error('没有找到 llama.cpp 的 b 系列正式发布，请稍后重试或手动安装 llama.cpp。');
+  const release = pickLlamaRelease(await relRes.json(), { tag });
+  if (!release) {
+    throw new Error(tag
+      ? `没有找到指定的 llama.cpp 版本 ${tag}（可能已下架），请换一个版本号或留空使用最新版。`
+      : '没有找到 llama.cpp 的 b 系列正式发布，请稍后重试或手动安装 llama.cpp。');
+  }
   const assets = release.assets || [];
   const asset = pickReleaseAsset(assets, { variant });
   if (!asset) {
@@ -384,13 +437,25 @@ export class LlamaProcess {
           this.state = 'error';
           // Windows 崩溃码是大整数（如 3221225477 = 0xC0000005 内存访问冲突），附上十六进制便于识别
           const hex = Number.isInteger(code) && code > 0xffff ? `，即 0x${(code >>> 0).toString(16).toUpperCase()}` : '';
+          // 死因要从 llama.cpp 自己的输出里读，不能一律套“内存不足”：
+          // 用户实际遇到过“unknown model architecture”（版本太旧）却被报成内存不足，
+          // 于是白白去换量化、调页面文件，全走错方向。
+          const tail = (this.logTail || []).join('\n');
+          const arch = matchUnsupportedArch(tail);
+          const noMem = /out of memory|failed to allocate|bad_alloc|not enough memory|cannot allocate|cuda.*out of memory/i.test(tail);
           if (silent) {
             // 静默退出是另一类故障：内存不足时 llama.cpp 一定会先打印加载进度，
             // 所以这里不改口说“内存不够”，而是指向真正的原因（缺 DLL / 参数不支持 / 程序不对）。
             // 文案保持短：这段会被回退阶梯的每一步打印一次，太长会把日志刷满。
             this.error = `llama-server 一句话都没输出就退出了（代码 ${code}${hex}）：运行库/驱动/参数不匹配，不是内存不足`;
+          } else if (arch) {
+            // 版本太旧：换量化/调内存都没用，只有换 llama.cpp 版本一条路
+            this.error = `这个 llama.cpp 版本不认识 ${arch} 架构（代码 ${code}${hex}）：模型文件本身没问题，是这个 llama-server 太旧。`
+              + `请把它换成 ${ARCH_MIN_BUILD[arch] ? `b${ARCH_MIN_BUILD[arch]} 或更新的版本` : '更新的版本'}（点“准备运行库”可更新）。`;
+          } else if (noMem) {
+            this.error = `llama-server 因内存不足退出（代码 ${code}${hex}）：日志里有分配失败，请换更小的量化或关掉其它占内存的程序。`;
           } else {
-            this.error = `llama-server 已退出（代码 ${code}${signal ? `，信号 ${signal}` : ''}${hex}）。常见原因：内存不足、权重文件损坏或显卡驱动不支持。日志尾部见状态面板。`;
+            this.error = `llama-server 已退出（代码 ${code}${signal ? `，信号 ${signal}` : ''}${hex}）。日志尾部见状态面板。`;
           }
         }
         this.child = null;
@@ -437,6 +502,17 @@ export class LlamaProcess {
       out.notes.push(`llama-server 只有 ${Math.round(st.size / 1024)} KB，官方构建通常几十 MB；若启动失败请重装运行库。`);
     }
     const dir = path.dirname(binary);
+    // 真的跑一次：文件存在 ≠ 能启动。用户遇到过 llama-server.exe 明明在、
+    // --version 却以 0xC0000005 静默退出（VC++ 运行库版本太旧 / 构建与系统不兼容）。
+    // 只查文件大小是发现不了的，必须实际执行一次看退出码。
+    const run = this._probeRun(binary, dir);
+    out.run = run;
+    if (run.ok === false) {
+      return fail(run.message);
+    }
+    if (run.ok === true && run.version) {
+      out.notes.push(`llama.cpp 版本：${run.version}`);
+    }
     // 依赖库：CUDA/Vulkan 构建把 DLL/so 平铺在二进制旁边，缺一个就静默退出
     const deps = await this._checkDeps(binary, dir);
     out.deps = deps;
@@ -459,6 +535,76 @@ export class LlamaProcess {
   }
 
   /** 检查二进制的依赖库是否齐全：Windows 用 where，Linux 用 ldd，macOS 用 otool。 */
+  /**
+   * 实际执行一次 `llama-server --version`，确认这个二进制在这台机器上真的能跑。
+   *
+   * 为什么要这么做：Windows 上缺运行库、运行库版本太旧、构建与系统不兼容时，
+   * 加载器会在程序打印任何东西之前就终止它 —— 得到的是零输出 + 一个退出码
+   * （0xC0000005 / 0xC0000135）。用户对着这个码毫无办法。这里在启动服务之前
+   * 就把这种情况拦下来，并说清是哪一类问题。
+   *
+   * 返回 { ok: true|false|null, version, code, silent, message }
+   * ok === null 表示探测本身无法进行（超时/被杀），此时不拦，交给后续流程。
+   */
+  _probeRun(binary, dir) {
+    let probe;
+    try {
+      probe = spawnSync(binary, ['--version'], {
+        encoding: 'utf8',
+        timeout: 20000,
+        cwd: dir,
+        windowsHide: true,
+        maxBuffer: 4 * 1024 * 1024,
+      });
+    } catch (err) {
+      return { ok: null, message: `无法执行 llama-server 自检：${err.message}` };
+    }
+    if (probe.error) {
+      // 超时或无法创建进程：不判死（有些环境限制 spawn），交给真正的启动流程
+      return { ok: null, message: `llama-server 自检未完成：${probe.error.code || probe.error.message}` };
+    }
+    const out = `${probe.stdout || ''}${probe.stderr || ''}`;
+    const versionLine = (probe.stdout || '').split(/\r?\n/).find((l) => /build|version/i.test(l)) || '';
+    const result = {
+      ok: probe.status === 0,
+      code: probe.status,
+      silent: !out.trim(),
+      version: versionLine.trim().slice(0, 120),
+    };
+    if (result.ok) return result;
+    // 退出码归一化：Windows 崩溃码在 Node 里可能是负数或大整数
+    const raw = Number(probe.status);
+    const unsigned = raw < 0 ? (raw + 0x100000000) >>> 0 : raw >>> 0;
+    const hex = unsigned > 0xffff ? `0x${unsigned.toString(16).toUpperCase()}` : '';
+    // 名称与含义都写清楚：Windows 用户看到的是 3221225477 这个十进制大数，
+    // 而十六进制 0xC0000005 才是搜索/对号入座时真正有用的形式。
+    const codeText = `${raw}${hex ? `，即 ${hex}` : ''}`;
+    if (hex === '0XC0000135') {
+      return {
+        ...result,
+        ok: false,
+        message: `这个 llama-server 缺少依赖 DLL（退出码 ${codeText}）。\n`
+          + 'Windows 在程序启动前就把它终止了，所以一行日志都不会有。\n'
+          + '请点“准备运行库”重新安装 llama.cpp；若仍不行，安装 Microsoft Visual C++ 2015-2022 Redistributable (x64)：'
+          + 'https://aka.ms/vs/17/release/vc_redist.x64.exe',
+      };
+    }
+    if (!result.silent) {
+      // 有输出就说明能启动，失败是这个构建自身报的错，交给后续流程判断
+      return { ...result, ok: null };
+    }
+    // 零输出 + 非零退出：加载器/运行库/系统兼容性三类之一
+    return {
+      ...result,
+      ok: false,
+      message: `这个 llama-server 在本机启动不了（零输出，退出码 ${codeText}）：Windows 在它打印任何东西之前就终止了它。\n`
+        + '常见原因是两类：\n'
+        + '  ① VC++ 运行库缺失或版本过旧 —— 装这个（x64）：https://aka.ms/vs/17/release/vc_redist.x64.exe\n'
+        + '  ② 这个构建对你的 Windows 版本太新 —— 换一个较早的 llama.cpp 构建（或升级 Windows）。\n'
+        + '可以先在命令行里手动运行一次 `llama-server.exe --version` 确认；'
+        + '仍失败时把 Windows 事件查看器（eventvwr.msc → Windows 日志 → 应用程序）里的“错误模块名称”发出来。',
+    };
+  }
   async _checkDeps(binary, dir) {
     const missing = [];
     const platform = process.platform;

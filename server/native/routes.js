@@ -225,10 +225,33 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
     }
   });
 
-  app.post('/api/native/binary', requireAdmin, async (_req, res) => {
+  // 准备 / 更新 llama.cpp 运行库。
+  // body: { force?: true, tag?: 'b8421' }
+  //   force —— 已有二进制也重新下载。没有这个开关时“准备运行库”在已装旧版的情况下
+  //            是空操作，用户永远升不到支持新模型架构的版本。
+  //   tag   —— 锁定到指定构建号。新版在某个系统上跑不起来时，这是唯一的出路。
+  app.post('/api/native/binary', requireAdmin, async (req, res) => {
     try {
-      const got = await engine.ensureBinary();
-      return res.json({ ok: true, source: got.source || 'downloaded' });
+      const force = req.body?.force === true || req.body?.force === 'true';
+      const tag = typeof req.body?.tag === 'string' ? req.body.tag.trim() : '';
+      const got = await engine.ensureBinary({ force, tag });
+      return res.json({
+        ok: true,
+        source: got.source || 'downloaded',
+        version: got.version || '',
+        job: engine.binaryJob || null,
+      });
+    } catch (err) {
+      return errJson(res, err);
+    }
+  });
+
+  // 运行库健康度：这个 llama.cpp 在本机能不能跑、版本够不够新。
+  // 界面据此在用户点“加载”之前就提示，而不是等他等半天看到一个崩溃码。
+  app.get('/api/native/binary/health', requireAdmin, async (req, res) => {
+    try {
+      const forArch = typeof req.query?.arch === 'string' ? req.query.arch : '';
+      return res.json(await engine.checkBinaryHealth({ forArch }));
     } catch (err) {
       return errJson(res, err);
     }
