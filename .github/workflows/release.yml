@@ -94,26 +94,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # 失败时把真实错误写进 Release 说明，否则日志拿不到（存储策略阻止下载日志），
-      # 只能看到“exit code 1”这一句，排查等于瞎猜。
-      - name: Build standalone
-        shell: pwsh
-        run: |
-          node standalone/build-standalone.mjs --with-llama *>&1 | Tee-Object -FilePath standalone-error.log
-          $code = $LASTEXITCODE
-          if ($code -ne 0) {
-            $raw = Get-Content standalone-error.log -Raw
-            if (-not $raw) { $raw = "(no output)" }
-            $body = @{
-              tag_name = "${{ inputs.tag || github.ref_name }}"
-              body = "> [standalone build failed, exit=$code]`n`n$raw"
-            } | ConvertTo-Json -Compress -Depth 5
-            [System.IO.File]::WriteAllText("$PWD\fail.json", $body)
-            try { gh api -X PATCH "repos/${{ github.repository }}/releases/tags/${{ inputs.tag || github.ref_name }}" --input fail.json } catch { Write-Output "upload failed" }
-            exit $code
-          }
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: node standalone/build-standalone.mjs --with-llama
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
