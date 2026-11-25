@@ -33,6 +33,22 @@ import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python
 
 const QUANT_CACHE_MS = 10 * 60 * 1000;
 
+/** 失败定性的统一文案：内外层共用，避免两处各写一套导致结论互相矛盾。 */
+const DIAG_TITLES = {
+  memory: { title: '内存/显存不足', advice: '换更小的量化，或关掉其它占用内存/显存的程序后重试。' },
+  runtime: {
+    title: '运行库或程序本身有问题',
+    advice: '点“准备运行库”重装 llama.cpp；若装的是 CUDA/Vulkan 版，把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版；并确认已安装 VC++ 运行库。',
+  },
+  corrupt: { title: '权重文件损坏或不完整', advice: '删除这一档量化后重新下载（会断点续传），再点加载。' },
+  silent: {
+    title: 'llama-server 启动即退出且没有任何日志',
+    advice: '这通常不是内存不够（内存不足时会先打印加载进度）。请点“准备运行库”重装 llama.cpp；'
+      + '若仍失败，把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版，或用系统命令行直接运行 llama-server 看系统报错。',
+  },
+  unknown: { title: 'llama-server 启动失败', advice: '请把状态面板里的日志尾部发给开发者。' },
+};
+
 /** 一组加载参数的指纹：用于去重/判断“这一组是不是刚试过”。 */
 function attemptKey(a) {
   return `${a.layers}|${a.contextTokens}|${a.flashAttn}|${a.cacheReuse}|${a.mmap}|${a.batch}`;
@@ -1748,7 +1764,9 @@ export class NativeEngine {
     // 但这台机器内存装不下 / 剩余内存不够”。以前系统只丢一个崩溃码给用户，
     // 现在把“需要多少、现在有多少”直接写进日志与状态面板，用户一眼就知道是换量化还是关程序。
     const reportCtx = Math.min(Math.max(1024, Math.floor(contextTokens) || 8192), Number(model.context) > 0 ? Number(model.context) : 8192);
-    const ram = this._memoryReport(manifest.totalBytes, gpuLayers, reportCtx);
+    // 用体检读到的真实层数算 KV 缓存：以前完全不看层数，48 层 MoE 的 KV 被低估 6~8 倍，
+    // 于是给出“16.6 GB 总内存 < 15.5 GB 需求”却自相矛盾的结论。
+    const ram = this._memoryReport({ totalBytes: manifest.totalBytes, blockCount: verdict.blockCount }, gpuLayers, reportCtx);
     this.memoryReport = ram;
     if (ram.tight) this.logger.warn?.(`[native] 内存可能不够：${ram.summary}`);
     const wantCtx = Math.max(1024, Math.floor(contextTokens) || 8192);
@@ -1770,17 +1788,25 @@ export class NativeEngine {
     const extraArgs = String(this.env.OJ_LLAMA_EXTRA_ARGS || '').trim().split(/\s+/).filter(Boolean);
     let lastErr = null;
     if (safe && !attempts.length) {
+      const diag = this._diagnoseFailure(lastErr);
       const mem = this.memoryReport;
-      throw Object.assign(
+      const err = Object.assign(
         new Error(
           '这组权重在本机把能试的启动配置都试过了（纯 CPU、关 flash-attention、关 KV 缓存复用、不用 mmap、小上下文），仍然起不来。\n'
-          + `最后一次错误：${String(lastErr?.message || '').slice(0, 300)}\n`
-          + (mem?.summary ? `内存情况：${mem.summary}\n` : '')
-          + '\n这基本可以确定是权重文件本身或运行库的问题：① 删除这一档量化后重新下载一次；'
-          + '② 点“准备运行库”重装 llama.cpp；③ 或换更小的量化/上下文再试。',
+          + `判断：${diag.title}。${diag.advice}`
+          // 只有真判定为内存问题、且内存确实不够时才摆数字；够用就直说够用，
+          // 免得出现“需求 2.3 GB、可用 3.8 GB，内存够用”却仍提示换量化的怪结论。
+          + (diag.kind === 'memory' && mem?.summary ? `\n内存情况：${mem.summary}` : '')
+          // 日志说内存不够、但估算说够：这在显存/提交限制/碎片化时很常见，必须点明，
+          // 否则用户只会觉得“软件自己都前后矛盾”。
+          + (diag.kind === 'memory' && mem && mem.tight === false
+            ? '\n说明：上面的内存估算是按权重体积粗算的；实际可能是显存不够、系统提交内存上限（页面文件）不够，'
+              + '或其它程序正占着大块连续内存。仍然建议先换更小的量化，或把页面文件调大后重试。'
+            : ''),
         ),
-        { status: 502, loadFailed: true },
+        { status: 502, loadFailed: true, diag: diag.kind, rawMessage: String(lastErr?.message || '') },
       );
+      throw err;
     }
     for (const [i, attempt] of attempts.entries()) {
       try {
@@ -1839,7 +1865,10 @@ export class NativeEngine {
         this._failedAttempts.get(failKey).add(attemptKey(attempt));
         const retryable = kinds.context || this._looksLikeMemoryFailure(err) || this._looksLikeCrash(err);
         if (i === attempts.length - 1 || !retryable) throw err;
-        this.logger.warn?.(`[native] 加载失败（${attempt.layers} 层 / 上下文 ${attempt.contextTokens}${attempt.flashAttn !== 'auto' ? ` / fa=${attempt.flashAttn}` : ''}${attempt.batch ? ` / batch=${attempt.batch}` : ''}${attempt.mmap === false ? ' / no-mmap' : ''}），自动回退重试：${err.message}`);
+        // 日志只写“哪一组、为什么短一句话”，完整诊断留在状态面板与最终报错里。
+        // 以前把整段长解释每档打印一次，日志被同一段话刷了 7 遍，反而更难读。
+        const why = this.llama.exitInfo?.silent ? 'llama-server 无任何输出即退出' : String(err?.message || '').split('\n')[0].slice(0, 160);
+        this.logger.warn?.(`[native] 加载失败（${attempt.layers} 层 / 上下文 ${attempt.contextTokens}${attempt.flashAttn !== 'auto' ? ` / fa=${attempt.flashAttn}` : ''}${attempt.batch ? ` / batch=${attempt.batch}` : ''}${attempt.mmap === false ? ' / no-mmap' : ''}），自动回退重试：${why}`);
         await this.llama.stop().catch(() => {});
       }
     }
@@ -1904,32 +1933,55 @@ export class NativeEngine {
    *
    * @returns {{neededGB: number, totalGB: number, freeGB: number, tight: boolean, summary: string}}
    */
-  _memoryReport(totalBytes, gpuLayers = 0, contextTokens = 8192) {
+  _memoryReport(weights, gpuLayers = 0, contextTokens = 8192, { mmap = true, blockCount = null } = {}) {
     const round = (n) => Math.round(n * 10) / 10;
-    const weightsGB = (Number(totalBytes) || 0) / 1e9;
-    // 权重按 1.06 倍计（GGUF 落内存后还有少量对齐/索引开销）；
-    // KV 缓存按上下文估算：每 16K 上下文约 1 GB（MoE 与 GQA 模型量级）；
-    // 再留 1.2 GB 给运行时（llama.cpp 自身的缓冲区、模板、Tokenizer）。
-    const kvGB = Math.max(0.3, (Number(contextTokens) || 8192) / 16384);
-    const neededGB = round(weightsGB * 1.06 + kvGB + 1.2);
+    // weights 可以是总字节数，也可以是 {totalBytes, blockCount}（有层数时算得更准）
+    const w = typeof weights === 'object' && weights ? weights : { totalBytes: weights, blockCount: null };
+    const totalBytes = Number(w.totalBytes) || 0;
+    const layers = Number(w.blockCount) || Number(blockCount) || 0;
+    const ctx = Math.max(1024, Number(contextTokens) || 8192);
+    const weightsGB = totalBytes / 1e9;
+    // KV 缓存：按“每 token 每层”估算，默认 llama.cpp 是 f16（2 字节）+ 8 头 GQA、
+    // 每头 128 维。以前拍成“每 16K 上下文 1 GB”，对 48~64 层的 MoE 会低估 6~8 倍，
+    // 于是出现“明明超了却说够 / 明明不够却说超”的离谱结论。
+    const perLayerPerToken = 2 * 2 * 8 * 128; // K 与 V、2 字节、8 个 KV 头、每头 128 维
+    const kvBytes = layers ? perLayerPerToken * layers * ctx : 0;
+    const kvGB = layers ? kvBytes / 1e9 : Math.max(0.3, ctx / 16384);
+    // 权重常驻内存：mmap 时专家张量仍会被读进内存，resident 只取一部分；
+    // 不用 mmap 时整份权重都必须先读进来。
+    const residentGB = weightsGB * (mmap ? 0.06 : 1.0);
+    const runtimeGB = 1.5; // llama.cpp 自身缓冲、模板、tokenizer、日志
+    const neededGB = round(weightsGB + residentGB + kvGB + runtimeGB);
     let totalGB = 0;
     let freeGB = 0;
     try {
       totalGB = round(os.totalmem() / 1e9);
       freeGB = round(os.freemem() / 1e9);
     } catch { /* 某些受限环境拿不到内存信息 */ }
-    const tight = totalGB > 0 && neededGB > totalGB * 0.92;
-    const summary = totalGB > 0
-      ? `这份权重约需 ${neededGB} GB 内存（含上下文 ${contextTokens} 的 KV 缓存），本机总内存 ${totalGB} GB、当前可用 ${freeGB} GB`
-        + (tight ? '：总内存都不够，很可能启动即崩（0xC0000005）。请换更小的量化，或换内存更大的机器。' : '。')
-      : `这份权重约需 ${neededGB} GB 内存（含上下文 ${contextTokens} 的 KV 缓存）。`;
+    // 真正决定 Windows 会不会 0xC0000005 的是“提交内存上限 / 可用物理内存”，
+    // 不是“总内存”。给出三档判断：
+    //  - exceedsFree：连当前可用物理内存都不够（哪怕关掉别的程序也危险）
+    //  - exceedsTotal：比整机物理内存还多（必须换量化）
+    const exceedsFree = totalGB > 0 && freeGB > 0 && neededGB > freeGB;
+    const exceedsTotal = totalGB > 0 && neededGB > totalGB;
+    const tight = exceedsTotal || exceedsFree;
+    const parts = [`这份权重约需 ${neededGB} GB 内存（权重 ${round(weightsGB)} GB + KV 缓存 ${round(kvGB)} GB + 运行时 ${runtimeGB} GB），本机总内存 ${totalGB} GB、当前可用 ${freeGB} GB`];
+    if (exceedsTotal) parts.push('：比整机物理内存还多，就算关掉所有程序也装不下，必须换更小的量化或换机器。');
+    else if (exceedsFree) parts.push('：当前可用内存不够，关掉其它占内存的程序后可以再试（总内存足够）。');
+    else parts.push('，内存够用。');
+    const summary = totalGB > 0 ? parts.join('') : `这份权重约需 ${neededGB} GB 内存（含上下文 ${ctx} 的 KV 缓存）。`;
     return {
       neededGB,
+      weightsGB: round(weightsGB),
+      kvGB: round(kvGB),
       totalGB,
       freeGB,
       tight,
+      exceedsTotal,
+      exceedsFree,
       gpuLayers: Math.max(0, Math.floor(gpuLayers) || 0),
-      contextTokens: Number(contextTokens) || 8192,
+      contextTokens: ctx,
+      blockCount: layers || null,
       summary,
     };
   }
@@ -2009,11 +2061,68 @@ export class NativeEngine {
     return { ok: true, blockCount: meta.blockCount, architecture: meta.architecture || '' };
   }
 
-  /** 失败是否疑似显存/内存不足（决定要不要自动减少 GPU 卸载层数重试）。 */
+  /**
+   * 失败是否疑似显存/内存不足（决定要不要自动减少 GPU 卸载层数重试）。
+   *
+   * 注意：以前这里把"llama-server 已退出"一律当成内存不足，于是静默退出（缺 DLL、
+   * 参数不认、程序损坏）也被套上"内存不够"的结论，用户被彻底误导。
+   * 现在只有日志里真的出现分配失败/显存不足的措辞才算；一行日志都没有的静默退出
+   * 属于另一类故障（见 _diagnoseFailure）。
+   */
   _looksLikeMemoryFailure(err) {
+    // 证据只认 llama.cpp 自己的输出（logTail）与未包装的原始错误。
+    // 绝不能把我们自己生成的解释文本（例如“这不是内存不足”）也算成证据——
+    // 那样会自我命中原生提示里的“内存不足”四个字，把结论判反。
+    const own = (this.llama.logTail || []).join('\n');
+    const raw = String(err?.rawMessage ?? err?.message ?? '');
+    const text = `${raw}\n${own}`;
+    // 我们包装过的长句（含“判断：”“建议：”等）不参与判定
+    if (/判断：|建议：|内存情况：/.test(raw)) return /out of memory|failed to allocate|bad_alloc|not enough memory|cannot allocate/i.test(own);
+    return /out of memory|failed to allocate|failed to load model|cuda error|vulkan.*(error|failed)|bad_alloc|内存不足|显存|not enough memory|cannot allocate/i.test(text);
+  }
+
+  /**
+   * 根据日志与退出码给失败定性，并给出一句用户能照做的结论。
+   *
+   * 这是本次修复的重点：用户拿到的报错必须能区分这几种完全不同的情况——
+   *   silent   ：一句日志都没有 → 缺 DLL / 参数不认 / 运行库不匹配（不是内存问题）
+   *   memory   ：日志里有分配失败 → 内存/显存不够
+   *   corrupt  ：读权重时报错 → 文件损坏/不完整
+   *   unknown  ：有日志但没有已知特征 → 原文给用户看
+   */
+  _diagnoseFailure(err) {
+    // 内层已经定过性（我们自己包装过的 502）：直接沿用，避免拿解释文本再判一次把结论判反
+    if (err?.diag && DIAG_TITLES[err.diag]) {
+      return { kind: err.diag, ...DIAG_TITLES[err.diag] };
+    }
     const text = `${err?.message || ''}\n${(this.llama.logTail || []).join('\n')}`;
-    return /out of memory|failed to allocate|failed to load model|cuda error|vulkan.*(error|failed)|bad_alloc|内存不足|显存|not enough memory|cannot allocate/i.test(text)
-      || /llama-server 已退出/.test(err?.message || '');
+    const silent = !!this.llama.exitInfo?.silent || /一句话都没输出/.test(err?.message || '');
+    const missingDll = /missing|not found|cannot open shared object|找不到|\b0xc0000135\b/i.test(text);
+    const badFlag = /invalid argument|unrecognized|unknown argument|invalid option|error: (unrecognized|invalid)/i.test(text);
+    if (missingDll || badFlag) {
+      return {
+        kind: 'runtime',
+        title: missingDll ? '运行库不完整（缺 DLL/so）' : 'llama.cpp 不认某个命令行参数',
+        advice: missingDll
+          ? '点“准备运行库”重装；若装的是 CUDA/Vulkan 版，把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版。'
+          : '点“准备运行库”更新到新版 llama.cpp（当前版本缺少这些参数）。',
+      };
+    }
+    if (this._looksLikeMemoryFailure(err)) {
+      return { kind: 'memory', title: '内存/显存不足', advice: '换更小的量化，或关掉其它占用内存/显存的程序后重试。' };
+    }
+    if (this._looksLikeContextOrModelFailure(err).corrupt) {
+      return { kind: 'corrupt', title: '权重文件损坏或不完整', advice: '删除这一档量化后重新下载（会断点续传），再点加载。' };
+    }
+    if (silent) {
+      return {
+        kind: 'silent',
+        title: 'llama-server 启动即退出且没有任何日志',
+        advice: '这通常不是内存不够（内存不足时会先打印加载进度）。请点“准备运行库”重装 llama.cpp；'
+          + '若仍失败，把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版，或用系统命令行直接运行 llama-server 看系统报错。',
+      };
+    }
+    return { kind: 'unknown', title: 'llama-server 启动失败', advice: '请把状态面板里的日志尾部发给开发者。' };
   }
 
   /** 失败是否为原生程序崩溃（如 Windows 0xC0000005 内存访问冲突、段错误）。 */
@@ -2161,19 +2270,29 @@ export class NativeEngine {
         if (retryErr?.corrupt) throw retryErr;
         // 连纯 CPU + 4096 上下文都起不来：不是配置问题，而是权重/内存/驱动问题，
         // 直接告诉用户下一步该干什么，别让他们对着退出码猜。
+        const diag = this._diagnoseFailure(retryErr);
         const mem = this.memoryReport;
-        throw Object.assign(
-          new Error(
-            `llama-server 无法启动（已自动降级为纯 CPU + 4096 上下文 + 精简参数重试，仍然失败）。\n`
-            + `最后一次错误：${String(retryErr.message || retryErr).slice(0, 300)}\n`
-            // 把内存的实际数字带上：用户才知道该换量化还是该关程序，而不是盲试
-            + (mem?.summary ? `内存情况：${mem.summary}\n` : '')
-            + `\n建议依次尝试：① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；`
-            + '② 关闭其它占用内存的程序后重试；③ 若日志显示缺 DLL/驱动，点“准备运行库”重装，'
-            + '或把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版。',
-          ),
-          { status: 502, loadFailed: true },
-        );
+        const inner = String(retryErr?.message || '');
+        // 内层已经给出完整判断与建议时，外层只补"这次是降级后的第二次尝试"，
+        // 不再把同样的内存数字和建议重复一遍（用户看到的就是一大坨重复文字）。
+        const alreadyExplained = /判断：/.test(inner);
+        // 按证据给建议，而不是每次都把三条建议全倒给用户：
+        // “换更小的量化”对缺 DLL 的故障毫无用处，只会让人白折腾一次。
+        const tips = {
+          memory: '① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；② 关闭其它占用内存的程序后重试。',
+          runtime: '① 点“准备运行库”重装 llama.cpp 运行库；② 若装的是 CUDA/Vulkan 版，把 OJ_LLAMA_VARIANT 设为 cpu；③ 确认已安装 VC++ 运行库。',
+          corrupt: '① 删除这一档量化后重新下载（会断点续传）；② 再点加载。',
+          silent: '① 点“准备运行库”重装 llama.cpp 运行库；② 把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版；③ 仍失败时用系统命令行直接运行 llama-server，把系统报错发给开发者。',
+          unknown: '请把状态面板里的日志尾部发给开发者。',
+        };
+        const message = alreadyExplained
+          ? `llama-server 无法启动（自动降级到纯 CPU + 最小上下文后仍然失败）。\n\n${inner}`
+          : `llama-server 无法启动（已自动降级并逐档重试，仍然失败）。\n`
+            + `最后一次错误：${inner.slice(0, 300)}\n`
+            + `\n判断：${diag.title}。\n`
+            + (diag.kind === 'memory' && mem?.summary ? `内存情况：${mem.summary}\n` : '')
+            + `\n建议：${tips[diag.kind] || tips.unknown}`;
+        throw Object.assign(new Error(message), { status: 502, loadFailed: true, diag: diag.kind, rawMessage: inner });
       }
     }
     // 超大模型的上下文窗口往往只有 4K~32K，而网页/API 一次可以送来 8 万字符的历史：

@@ -155,6 +155,7 @@ test('LlamaProcess：非 Windows 启动时把 bin 目录加进 LD_LIBRARY_PATH/D
     spawnImpl: (bin, args, opts) => { calls.push({ bin, args, opts }); return fakeChild(); },
     fetchImpl: async () => { throw new Error('not listening'); },
     logger: { warn() {}, log() {}, error() {} },
+    preflight: false, // 这个用例验证 spawn 参数；自检有独立用例
   });
   // 不让 waitHealthy 拖住：只验证 spawn 参数，随后主动 stop
   const p = server.start({
@@ -199,6 +200,7 @@ test('LlamaProcess：extraArgs 追加到 llama-server 参数末尾（MoE 专家�
   const { LlamaProcess } = await import('../server/native/llama.js');
   const calls = [];
   const server = new LlamaProcess({
+    preflight: false,
     spawnImpl: (bin, args, opts) => {
       calls.push({ bin, args, opts });
       return { stdout: { on() {} }, stderr: { on() {} }, once() {}, kill() {} };

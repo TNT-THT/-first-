@@ -67,8 +67,9 @@ test('加载分片 GGUF：传给 llama.cpp 的是 -00001-of- 而不是字典序�
   await engine.load(MODEL_ID, { quant, contextTokens: 4096 });
   const argv = JSON.parse(await readFile(path.join(path.dirname(bin), 'argv.json'), 'utf8'));
   assert.equal(argv[argv.indexOf('-m') + 1], path.join(qdir, names[0]));
-  // 长上下文/超大模型的两个关键参数应该在
-  assert.ok(argv.includes('--flash-attn'));
+  // 长上下文/超大模型的关键参数应该在
+  assert.ok(argv.includes('--flash-attn'), `实际参数：${argv.join(' ')}`);
+  assert.ok(argv.includes('--cache-reuse'));
 });
 
 test('加载：清单里缺分片时明确提示重新下载，而不是让 llama.cpp 含糊崩溃', { timeout: 30000 }, async (t) => {
@@ -372,10 +373,15 @@ test('崩溃：waitHealthy 抛出的是带退出码的真实死因，而不是�
   const err = await proc.start({
     binary: bin, modelFile: '/x/M-00001-of-00002.gguf', modelId: 'm', quant: 'Q4_K_M', port: 18771,
   }).catch((e) => e);
-  assert.match(err.message, /已退出（代码/, `应带退出码，实际：${err.message}`);
+  assert.match(err.message, /代码 5/, `应带退出码，实际：${err.message}`);
   assert.ok(!/已被停止或替换/.test(err.message), '真实死因不能被“已被停止或替换”覆盖');
+  // 这个桩一句话都不输出就退出：必须按“缺 DLL/参数/程序不对”解释，
+  // 而不是继续告诉用户“内存不足”——用户正是被这句话误导的。
+  assert.match(err.message, /一句话都没输出|缺少 DLL/);
+  assert.ok(!/常见原因：内存不足/.test(err.message), '静默退出不能沿用“内存不足”的结论');
   assert.equal(proc.state, 'error');
   assert.equal(proc.status().exitCode, 5);
+  assert.equal(proc.status().silentExit, true);
   await proc.stop();
 });
 
@@ -683,4 +689,156 @@ test('救命重载：上一次加载失败的组合不会被原样再跑一遍�
   engine.env.LLAMA_SERVER_BIN = path.join(path.dirname(crashBin), 'llama-server');
   await engine.load(MODEL_ID, { quant, contextTokens: 4096 }).catch(() => {});
   assert.equal(engine._failedAttempts?.get(`${MODEL_ID}@${quant}`), undefined, '加载成功后失败记录必须清空');
+});
+
+// ---- 用户报告：16.6 GB 总内存 vs 15.5 GB 需求，软件却说“总内存都不够” ----
+// 两个真问题：① 内存公式根本没读层数，KV 缓存被低估；② “总内存够不够”与
+// “当前可用够不够”混为一谈，结论自相矛盾；③ 更关键的是：用户那次 llama-server
+// 一句日志都没有，根本不是内存问题，软件却一直往内存上引。
+
+test('内存体检：层数参与 KV 计算，且区分“总内存不够”与“当前可用不够”', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  const weights = 13.5e9; // 35B-A3B 的 Q2_K 量级
+  const withLayers = engine._memoryReport({ totalBytes: weights, blockCount: 48 }, 0, 8192);
+  const noLayers = engine._memoryReport({ totalBytes: weights, blockCount: null }, 0, 8192);
+  // 48 层 × 8192 上下文的 KV 必须真的被算进去（以前固定 0.5 GB）
+  // 48 层 × 8192 上下文 × (K+V) × 2 字节 × 8 KV 头 × 128 维 ≈ 1.6 GB
+  assert.ok(withLayers.kvGB > 1.4, `48 层 8192 上下文的 KV 应约 1.6 GB（以前恒为 0.5），实际 ${withLayers.kvGB}`);
+  assert.ok(withLayers.kvGB < 2.2, `KV 估算不应离谱偏高，实际 ${withLayers.kvGB}`);
+  assert.ok(withLayers.neededGB > noLayers.neededGB, '读到层数后需求必须更高（说明层数真的参与了计算）');
+  // 上下文翻倍，KV 也要翻倍
+  const big = engine._memoryReport({ totalBytes: weights, blockCount: 48 }, 0, 16384);
+  assert.ok(Math.abs(big.kvGB - withLayers.kvGB * 2) < 0.5, '上下文翻倍时 KV 应近似翻倍');
+  // 结论必须自洽：需求没超过总内存时，绝不能报“总内存都不够”
+  assert.equal(withLayers.exceedsTotal, withLayers.neededGB > withLayers.totalGB);
+  if (!withLayers.exceedsTotal) assert.ok(!/总内存都不够|比整机物理内存还多/.test(withLayers.summary));
+  // 超过总内存时，建议必须是“换量化/换机器”；仅仅可用不够时，建议是“关掉别的程序”
+  const huge = engine._memoryReport({ totalBytes: 300e9, blockCount: 80 }, 0, 8192);
+  assert.equal(huge.exceedsTotal, true);
+  assert.match(huge.summary, /换更小的量化|换机器/);
+  assert.ok(withLayers.summary.includes('内存'), withLayers.summary);
+});
+
+test('诊断：llama-server 一句日志都没有就退出 → 判“运行库/程序问题”，不再说成内存不足', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  // 造一个静默崩溃：不输出任何东西就退出
+  engine.llama.logTail = [];
+  engine.llama.exitInfo = { code: 3221225477, silent: true };
+  engine.llama.state = 'error';
+  engine.llama.error = 'llama-server 启动后一句话都没输出就退出了';
+  const silent = engine._diagnoseFailure(new Error(engine.llama.error));
+  assert.equal(silent.kind, 'silent');
+  assert.match(silent.advice, /准备运行库|OJ_LLAMA_VARIANT/);
+  // 关键：静默退出不能被判成内存不足
+  assert.notEqual(silent.kind, 'memory');
+  assert.equal(engine._looksLikeMemoryFailure(new Error('llama-server 已退出（代码 1）')), false,
+    '只有“已退出”这一句不足以判定内存不足');
+
+  // 有真实分配失败日志时才算内存问题
+  engine.llama.logTail = ['llama_model_load: error loading model: failed to allocate buffer (out of memory)'];
+  engine.llama.exitInfo = { code: 3, silent: false };
+  assert.equal(engine._diagnoseFailure(new Error('llama-server 已退出（代码 3）')).kind, 'memory');
+
+  // 缺 DLL 的说法要指向运行库
+  engine.llama.logTail = ['error while loading shared libraries: libcudart.so.12: cannot open shared object file'];
+  const runtime = engine._diagnoseFailure(new Error('llama-server 已退出（代码 127）'));
+  assert.equal(runtime.kind, 'runtime');
+  assert.match(runtime.advice, /准备运行库|OJ_LLAMA_VARIANT/);
+});
+
+test('启动前自检：可执行文件 0 字节时直接判死，并给出重装指引（不必等 6 次崩溃）', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-pre-'));
+  const bin = path.join(dir, 'llama-server');
+  await writeFile(bin, '');
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const { LlamaProcess } = await import('../server/native/llama.js');
+  const proc = new LlamaProcess({
+    spawnImpl: () => { throw new Error('不该被启动'); },
+    fetchImpl: async () => { throw new Error('不该联网'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const err = await proc.start({ binary: bin, modelFile: '/x/M.gguf', modelId: 'm', quant: 'Q4_K_M', port: 18779 })
+    .then(() => null, (e) => e);
+  assert.ok(err, '必须直接失败');
+  assert.match(err.message, /0 字节|重新下载/);
+});
+
+test('启动前自检：路径不存在时给出明确提示，而不是让 spawn 抛系统错', { timeout: 30000 }, async t => {
+  const { LlamaProcess } = await import('../server/native/llama.js');
+  const proc = new LlamaProcess({
+    spawnImpl: () => { throw new Error('不该被启动'); },
+    fetchImpl: async () => { throw new Error('不该联网'); },
+    logger: { warn() {}, log() {}, error() {} },
+  });
+  const err = await proc.start({ binary: '/nonexistent/llama-server', modelFile: '/x/M.gguf', modelId: 'm', quant: 'Q4_K_M', port: 18780 })
+    .then(() => null, (e) => e);
+  assert.ok(err);
+  assert.match(err.message, /找不到 llama-server|准备运行库/);
+});
+
+test('启动前自检：探测到版本不支持某参数时自动省略（而不是让它把进程打崩）', { timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(tmpdir(), 'oj-caps-'));
+  const bin = path.join(dir, 'llama-server');
+  // 一个“老版本”：--help 里没有 --flash-attn / --cache-reuse
+  await writeFile(bin, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args.includes('--help')) {
+  console.log('usage: llama-server [options]\\n  -m, --model PATH\\n  --host HOST\\n  --port PORT\\n  -c, --ctx-size N\\n  -ngl N\\n  --jinja');
+  process.exit(0);
+}
+require('node:fs').writeFileSync(require('node:path').join(__dirname, 'argv.json'), JSON.stringify(args));
+process.exit(3221225477);
+`);
+  await chmod(bin, 0o755);
+  t.after(async () => { await rm(dir, { recursive: true, force: true }); });
+  const { LlamaProcess } = await import('../server/native/llama.js');
+  const proc = new LlamaProcess({ fetchImpl: async () => { throw new Error('no'); }, logger: { warn() {}, log() {}, error() {} } });
+  await proc.start({ binary: bin, modelFile: '/x/M.gguf', modelId: 'm', quant: 'Q4_K_M', port: 18781, flashAttn: 'auto', cacheReuse: 256 })
+    .then(() => null, (e) => e);
+  const argv = JSON.parse(await readFile(path.join(dir, 'argv.json'), 'utf8'));
+  assert.ok(!argv.includes('--flash-attn'), `不支持的参数必须省略：${argv.join(' ')}`);
+  assert.ok(!argv.includes('--cache-reuse'), `不支持的参数必须省略：${argv.join(' ')}`);
+  assert.ok(argv.includes('--jinja'), '支持的参数必须保留');
+  await proc.stop();
+});
+
+test('诊断不自我误导：外层不会把内层生成的解释文本当成新证据（“这不是内存不足”不能被判成内存不足）', { timeout: 30000 }, async (t) => {
+  const { engine } = await setup(t);
+  // 静默退出的原始证据
+  engine.llama.logTail = [];
+  engine.llama.exitInfo = { code: 3221225477, silent: true };
+  const inner = Object.assign(
+    new Error('判断：llama-server 启动即退出且没有任何日志。这通常不是内存不够（内存不足时会先打印加载进度）。'),
+    { diag: 'silent' },
+  );
+  // 已经定过性的错误：必须沿用，不能被句子里“内存不足”四个字带偏
+  const again = engine._diagnoseFailure(inner);
+  assert.equal(again.kind, 'silent');
+  // 我们自己的包装文本不参与“内存不足”判定
+  assert.equal(engine._looksLikeMemoryFailure(inner), false);
+  // 真正的 out of memory 日志仍然要判内存
+  engine.llama.logTail = ['llama_model_load: error loading model: failed to allocate buffer, out of memory'];
+  assert.equal(engine._looksLikeMemoryFailure(new Error('llama-server 已退出（代码 3）')), true);
+});
+
+test('最终报错不重复刷同一段内存说明，且结论与建议一致', { timeout: 60000 }, async (t) => {
+  const { engine } = await setup(t);
+  const quant = 'Q4_K_M';
+  await putQuant(engine, quant, [{ path: 'M.gguf', content: ggufHead() }]);
+  const dir = path.dirname(engine.env.LLAMA_SERVER_BIN);
+  // 一句日志都没有就退出的 llama-server（用户现场）
+  await writeFile(path.join(dir, 'silent-llama'), '#!/usr/bin/env node\nprocess.exit(3221225477);\n');
+  await chmod(path.join(dir, 'silent-llama'), 0o755);
+  engine.env.LLAMA_SERVER_BIN = path.join(dir, 'silent-llama');
+  const err = await engine.chatCompletion({ model: MODEL_ID, messages: [{ role: 'user', content: 'hi' }] })
+    .then(() => null, (e) => e);
+  assert.ok(err);
+  assert.equal(err.status, 502);
+  assert.equal(err.diag, 'silent', `静默退出必须定性为 silent，实际 ${err.diag}`);
+  // 同一句“内存情况”不能出现两次
+  const memCount = (err.message.match(/内存情况：/g) || []).length;
+  assert.ok(memCount <= 1, `内存说明重复了 ${memCount} 次：\n${err.message}`);
+  // 静默退出时不该引导用户去换量化（那是内存类故障的建议）
+  assert.ok(!/换更小的量化/.test(err.message), `静默退出不该建议换量化：\n${err.message}`);
+  assert.match(err.message, /准备运行库|OJ_LLAMA_VARIANT/);
 });

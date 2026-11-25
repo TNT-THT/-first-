@@ -3690,6 +3690,11 @@ function describeFlags(flags) {
 /** 崩溃码 → 用户能直接照做的话（面板红字用）。 */
 function crashAdvice(exitCode, errText = '') {
   const text = String(errText || '');
+  // 静默退出 / 缺 DLL：这两类必须先讲清楚，否则用户会一直按“内存不够”去折腾
+  if (/缺少运行库|一句话都没输出|not found|DLL/i.test(text)) return '';
+  if (exitCode === 3221225781 || /0xC0000135/i.test(text)) {
+    return '（0xC0000135 = 找不到依赖 DLL：点“准备运行库”重装；或用 OJ_LLAMA_VARIANT=cpu 改用纯 CPU 版。）';
+  }
   if (exitCode === 3221225477 || /0xC0000005|-1073741819|access violation/i.test(text)) {
     return '（0xC0000005 = 程序访问了不该访问的内存：最常见是内存/显存不够，其次才是权重文件损坏或显卡驱动/运行库不匹配。软件已自动逐档回退；全部失败时请换更小的量化，或关掉其它占内存的程序后重试。）';
   }
@@ -3747,7 +3752,8 @@ function renderNativePanel() {
           ? `${n.reason}（实际上下文 ${n.contextTokens || n.used}）`
           : `加载时已自动回退（GPU 层数 请求 ${n.requested} → 实际 ${n.used}${n.contextTokens ? `，上下文 ${n.contextTokens}` : ''}${describeFlags(n.flags)}）：${n.reason || '疑似显存/内存不足'}`);
     }
-    // 内存体检：把“要多少 / 本机有多少”直接摆给用户看，别让他们对着 0xC0000005 猜
+    // 内存体检：把“要多少 / 本机有多少”摆给用户看。只有真的判定不够时才警告，
+    // 够用就明说够用——以前无条件套一句“总内存都不够”，连 16.6 > 15.5 都这么说。
     const mem = nativeStatus.memory;
     if (mem && mem.neededGB) {
       gpuBits.push(mem.summary
@@ -3763,10 +3769,14 @@ function renderNativePanel() {
     if (show) {
       if (running.state === 'error') els.apiNativeLogWrap.open = true;
       const advice = running.state === 'error' ? crashAdvice(running.exitCode, running.error) : '';
+      // 一句话都没输出的崩溃：这本身就是重要线索，别只写“暂无日志输出”让人以为日志功能坏了
+      const emptyHint = running.silentExit
+        ? '（llama-server 一句话都没有输出就被系统结束了 —— 这通常不是内存不够，而是缺 DLL / 驱动不匹配 / 可执行文件损坏。详见上方错误说明。）'
+        : '（暂无日志输出）';
       els.apiNativeLogTail.textContent =
         (running.error ? `错误：${running.error}\n` : '')
         + (advice ? `说明：${advice}\n` : '')
-        + (lines.length ? lines.join('\n') : '（暂无日志输出）');
+        + (lines.length ? lines.join('\n') : emptyHint);
     }
   }
   if (els.apiHfTokenStatus) {
