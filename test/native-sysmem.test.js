@@ -17,20 +17,33 @@ test('内存预算：任何平台都不抛错，拿不到的信息就是 null/0�
   }
 });
 
-test('内存预算：pagefileBytes 是实测值，不从“提交上限 − 物理内存”反推', () => {
+test('内存预算：pagefileBytes 是实测值，canSpill 只看提交上限（与 swap 大小无关）', () => {
   const b = readMemoryBudget();
   if (!b.commitLimitBytes) return; // 环境不支持，跳过
-  // 这条用例最初写成了“commitLimit <= total 时 pagefileBytes 必为 0”，
-  // 结果在 GitHub Actions 上失败：runner 有 3 GB swap，但 overcommit 模式下
-  // CommitLimit 反而小于物理内存。用差值反推会得出负数或错值，所以改成
-  // 只断言“不变量”：
+  // 这条用例被 CI 纠正过两次，值得写下来：
+  //  ① 最初假设“commitLimit ≤ 物理内存 ⇒ 没有页面文件”——错，有 swap 时也可能如此；
+  //  ② 接着假设“有页面文件 ⇒ 提交上限 ≥ 物理内存”——也错。
+  //     实测 GitHub runner：物理 16.7 GB、swap 3 GB，但 CommitLimit 只有 11.6 GB
+  //     （overcommit_memory=2 + overcommit_ratio）。
+  // 真正成立的不变量只有下面这些：
   assert.ok(b.pagefileBytes >= 0, '页面文件大小不能是负数');
-  // 有页面文件就应该标记为“硬盘能兜底”
-  assert.equal(b.canSpill, b.pagefileBytes > 0);
-  // 三者关系必须自洽：能兜底意味着提交上限 > 物理内存；不能兜底时最多等于物理内存
-  if (b.canSpill) {
-    assert.ok(b.commitLimitBytes >= b.totalBytes,
-      `有页面文件时提交上限应不小于物理内存：${b.commitLimitBytes} vs ${b.totalBytes}`);
+  assert.ok(b.commitLimitBytes > 0);
+  // “硬盘能顶上来”的唯一判据是提交上限是否超过物理内存
+  assert.equal(b.canSpill, b.commitLimitBytes > b.totalBytes);
+  // 剩余可提交量不能超过提交上限
+  if (b.commitFreeBytes !== null) {
+    assert.ok(b.commitFreeBytes >= 0 && b.commitFreeBytes <= b.commitLimitBytes);
+  }
+});
+
+test('内存预算：overcommit 调紧的机器（swap 有 3 GB 但提交上限小于物理内存）如实报告不能兜底', async () => {
+  // 复刻 GitHub runner 的真实形态：16.7 GB 物理 / 3 GB swap / CommitLimit 11.6 GB。
+  // 若实现按“swap > 0 就算能兜底”，这里就会误报，把用户引到不可能的方案上。
+  const { readMemoryBudget: read } = await import('../server/native/sysmem.js');
+  const b = read();
+  if (!b.commitLimitBytes) return;
+  if (b.commitLimitBytes <= b.totalBytes && b.pagefileBytes > 0) {
+    assert.equal(b.canSpill, false, '提交上限没超过物理内存时，不能声称硬盘能兜底');
   }
 });
 

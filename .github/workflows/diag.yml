@@ -18,14 +18,14 @@ jobs:
       - name: Test
         run: |
           set +e
+          echo "=== 本机内存事实 ===" >> test.log
+          grep -E 'MemTotal|MemAvailable|CommitLimit|Committed_AS|SwapTotal' /proc/meminfo >> test.log
+          node -e "import('./server/native/sysmem.js').then(m=>console.log(JSON.stringify(m.readMemoryBudget(),null,1)))" >> test.log 2>&1
           echo "=== 普通 ===" >> test.log
           npm test >> test.log 2>&1
           echo "exit=$?" >> test.log
           echo "=== 模拟 tag ===" >> test.log
           GITHUB_REF=refs/tags/v1.0.18 GITHUB_REF_TYPE=tag GITHUB_REF_NAME=v1.0.18 GITHUB_EVENT_NAME=push npm test >> test.log 2>&1
-          echo "exit=$?" >> test.log
-          echo "=== 模拟 tag + 并发 4 ===" >> test.log
-          GITHUB_REF=refs/tags/v1.0.18 GITHUB_REF_TYPE=tag npm test -- --test-concurrency=4 >> test.log 2>&1
           echo "exit=$?" >> test.log
         continue-on-error: true
       - name: Comment

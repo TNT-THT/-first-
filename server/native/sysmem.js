@@ -161,17 +161,20 @@ export function readMemoryBudget({ forcePlatform = null } = {}) {
   const totalBytes = Number(os.totalmem?.()) || 0;
   const freeBytes = Number(os.freemem?.()) || 0;
   const commitLimitBytes = Number(commit?.commitLimitBytes) || 0;
-  // 页面文件没配时 commitLimit 往往就等于物理内存
-  const pagefileBytes = commit?.pagefileBytes != null
-    ? Number(commit.pagefileBytes)
-    : (commitLimitBytes > totalBytes ? commitLimitBytes - totalBytes : 0);
+  // 页面文件大小只作说明用：真实上限是 commitLimit 本身。
+  // 不能因为“有 swap”就推断提交上限大于物理内存——实测某些内核
+  // （overcommit_memory=2 + overcommit_ratio）里 16.7 GB 物理内存配 3 GB swap，
+  // CommitLimit 只有 11.6 GB，比物理内存还小。
+  const pagefileBytes = Number(commit?.pagefileBytes) || 0;
   return {
     totalBytes,
     freeBytes,
     commitLimitBytes: commitLimitBytes || null,
     commitFreeBytes: commit?.commitFreeBytes ?? null,
     pagefileBytes,
-    canSpill: !!(commitLimitBytes && pagefileBytes > 0),
+    // canSpill 的含义：这套系统是否允许提交超过物理内存的量（也就是“硬盘真能顶上来”）。
+    // 判据只能是提交上限本身，与 swap 大小无关。
+    canSpill: !!(commitLimitBytes && commitLimitBytes > totalBytes),
     source: commit?.source || 'os-only',
   };
 }
@@ -200,13 +203,17 @@ export const STORAGE_AS_MEMORY_NOTE = [
  * @param {number} p.pagefileGB  现有页面文件
  * @returns {{enough:boolean, requiredCommitGB:number, requiredPagefileGB:number, tip:string}|null}
  */
-export function planPagefile({ neededGB, totalGB, pagefileGB = 0 } = {}) {
+export function planPagefile({ neededGB, totalGB, pagefileGB = 0, commitLimitGB = 0 } = {}) {
   const need = Number(neededGB) || 0;
   const total = Number(totalGB) || 0;
+  const commitLimit = Number(commitLimitGB) || 0;
   if (!need || !total) return null;
+  // 以“当前实际能提交多少”为基准，而不是物理内存：某些系统提交上限比物理内存还小，
+  // 拿物理内存作基准会低估需要补的页面文件。
+  const base = commitLimit > 0 ? commitLimit : total;
   // 提交上限要留 20% 余量给系统与其它进程，否则刚好卡在边界上照样失败
   const requiredCommitGB = Math.round(need * 1.2 * 10) / 10;
-  const requiredPagefileGB = Math.max(0, Math.round((requiredCommitGB - total) * 10) / 10);
+  const requiredPagefileGB = Math.max(0, Math.round((requiredCommitGB - base) * 10) / 10);
   if (requiredPagefileGB <= 0) {
     return {
       enough: true,
