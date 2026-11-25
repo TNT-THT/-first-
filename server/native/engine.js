@@ -1372,14 +1372,20 @@ export class NativeEngine {
     const model = this.resolveModel(id);
     // 上下文按模型登记值算：KV 缓存估算对 48~64 层的 MoE 差别很大
     const contextTokens = Number(model?.context) || 8192;
-    let budget = { totalGB: 0, freeGB: 0, commitLimitGB: 0, pagefileGB: 0, source: 'os-only' };
+    let budget = { totalGB: 0, freeGB: 0, commitLimitGB: 0, pagefileGB: null, commitFreeGB: 0, source: 'os-only' };
     try {
       const b = readMemoryBudget();
       budget = {
         totalGB: round((Number(b.totalBytes) || 0) / 1e9),
         freeGB: round((Number(b.freeBytes) || 0) / 1e9),
         commitLimitGB: round((Number(b.commitLimitBytes) || 0) / 1e9),
-        pagefileGB: round((Number(b.pagefileBytes) || 0) / 1e9),
+        // pagefileGB 保留 null 语义：null = 查不到（不能断言“没有兜底”），
+        // 0 = 确认没配。以前这里 `|| 0` 会把两者糊成一个 0，
+        // 导致配了页面文件但探测失败的机器被一律判成“装不下”。
+        pagefileGB: b.pagefileBytes === null || b.pagefileBytes === undefined
+          ? null
+          : round(b.pagefileBytes / 1e9),
+        commitFreeGB: round((Number(b.commitFreeBytes) || 0) / 1e9),
         source: b.source,
       };
     } catch { /* 受限环境读不到内存：budget 全 0，pickQuantForBudget 会退回纯偏好 */ }
@@ -2218,7 +2224,10 @@ export class NativeEngine {
     } catch { /* 某些受限环境拿不到内存信息 */ }
     const commitLimitGB = budget.commitLimitBytes ? round(budget.commitLimitBytes / 1e9) : 0;
     const commitFreeGB = budget.commitFreeBytes ? round(budget.commitFreeBytes / 1e9) : 0;
-    const pagefileGB = budget.pagefileBytes ? round(budget.pagefileBytes / 1e9) : 0;
+    // null（查不到）与 0（确实没配）必须分开：下面 spillOnly 的判断依赖它。
+    // 「没配页面文件」可以断言“硬盘顶不上来”，“查不到”不行——那时只能说“不知道”。
+    const pagefileKnown = budget.pagefileBytes !== null && budget.pagefileBytes !== undefined;
+    const pagefileGB = pagefileKnown ? round(budget.pagefileBytes / 1e9) : 0;
     // 三四档判断，各自给不同的建议（以前把“物理内存不够”和“页面文件也不够”混成一句）：
     //  - exceedsTotal：连物理内存都能装下 → 没事
     //  - exceedsFree ：放不进当前可用物理内存，但装得进物理内存总量 → 关程序即可
@@ -2227,14 +2236,19 @@ export class NativeEngine {
     const exceedsFree = totalGB > 0 && freeGB > 0 && neededGB > freeGB;
     const exceedsTotal = totalGB > 0 && neededGB > totalGB;
     const exceedsCommit = commitLimitGB > 0 && neededGB > commitLimitGB;
-    const spillOnly = exceedsTotal && !exceedsCommit && pagefileGB > 0;
+    // spillOnly 的语义是“物理内存装不下，但确实有硬盘兜底、能跑只是慢”。
+    // 必须要求 pagefileKnown：否则探测不到页面文件的机器会被误报成“能跑”，
+    // 把用户引到一个不存在的方案上。
+    const spillOnly = exceedsTotal && !exceedsCommit && pagefileKnown && pagefileGB > 0;
     // tight 只表示“这份模型值得提醒用户”：装不进物理内存总量就算提醒。
     // 不能把 exceedsCommit 也算进来——某些环境（容器、禁用 overcommit 的内核）
     // 提交上限比物理内存还小，那样连 1.5 GB 的小模型都会被报“装不下”。
     const tight = exceedsTotal;
     const parts = [`这份权重约需 ${neededGB} GB 内存（权重 ${round(weightsGB)} GB + KV 缓存 ${round(kvGB)} GB + 运行时 ${runtimeGB} GB），本机总内存 ${totalGB} GB、当前可用 ${freeGB} GB`];
     if (commitLimitGB > 0) {
-      parts.push(`（含页面文件/swap 可提交上限 ${commitLimitGB} GB${pagefileGB > 0 ? `，其中页面文件 ${pagefileGB} GB` : '，未配页面文件'}）`);
+      parts.push(`（含页面文件/swap 可提交上限 ${commitLimitGB} GB${
+        pagefileGB > 0 ? `，其中页面文件 ${pagefileGB} GB`
+          : pagefileKnown ? '，未配页面文件' : '，页面文件大小未能探测'}）`);
     }
     if (totalGB > 0) {
       if (exceedsCommit && exceedsTotal) {
@@ -2264,6 +2278,9 @@ export class NativeEngine {
       commitLimitGB,
       commitFreeGB,
       pagefileGB,
+      // 页面文件是否真的探测到了：界面据此区分“确实没配”（可以断言没有硬盘兜底）
+      // 和“没探测到”（只能说不知道），别再把两者说成同一句话。
+      pagefileKnown,
       canSpill: !!budget.canSpill,
       memSource: budget.source,
       tight,

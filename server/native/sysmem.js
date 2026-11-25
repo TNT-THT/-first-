@@ -45,12 +45,22 @@ function windowsCommit() {
     '$ErrorActionPreference="Stop"',
     'try { $os = Get-CimInstance Win32_OperatingSystem } catch { $os = Get-WmiObject Win32_OperatingSystem }',
     // TotalVirtualMemorySize / FreeVirtualMemory 单位是 KB，语义即“提交限制 / 可提交余量”
+    // AllocatedBaseSize 是页面文件总量（MB）：这是“有没有配页面文件”的直接证据。
+    // 以前这里返回 null 让调用方去反推，结果反推没实现，pagefileBytes 永远是 0 ——
+    // 于是“配了 30 GB 页面文件、勉强能跑的档位”被一律标成“装不下”。
     '$o = [ordered]@{',
     '  commitLimitKB = [double]$os.TotalVirtualMemorySize',
     '  commitFreeKB  = [double]$os.FreeVirtualMemory',
     '  physKB        = [double]$os.TotalVisibleMemorySize',
     '  physFreeKB    = [double]$os.FreePhysicalMemory',
     '}',
+    // 系统托管/自建的页面文件都算：Win32_PageFileUsage 每项 AllocatedBaseSize 是 MB。
+    // 必须把两种“拿不到数字”分开，否则会把“查不到”当成“没配”：
+    //   pfOK=true  查询成功，$pf 为空 ⇒ 确实没有页面文件（pagefileMB=0）
+    //   pfOK=false 查询本身失败     ⇒ 不知道（pagefileMB=null）
+    'try { $pf = @(Get-CimInstance Win32_PageFileUsage | Measure-Object -Property AllocatedBaseSize -Sum).Sum; $pfOK = $true } catch { $pf = $null; $pfOK = $false }',
+    '$o.pagefileMB = $pf',
+    '$o.pagefileKnown = $pfOK',
     '$o | ConvertTo-Json -Compress',
   ].join('; ');
   const out = run('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 8000 });
@@ -60,10 +70,19 @@ function windowsCommit() {
     const commitLimitBytes = Math.round((Number(j.commitLimitKB) || 0) * 1024);
     const commitFreeBytes = Math.round((Number(j.commitFreeKB) || 0) * 1024);
     if (!commitLimitBytes) return null;
+    // 三种情况必须区分清楚（写成“pagefileMB || 0”会把它们糊成一个 0）：
+    //   查询成功 + 没有页面文件  → 0     ：确实没配，不存在硬盘兜底
+    //   查询成功 + 有页面文件    → 字节数
+    //   查询失败                 → null  ：不知道，调用方不能据此断言没有兜底
+    let pagefileBytes = null;
+    if (j.pagefileKnown === true) {
+      const mb = Number(j.pagefileMB);
+      pagefileBytes = Number.isFinite(mb) && mb >= 0 ? Math.round(mb * 1024 * 1024) : 0;
+    }
     return {
       commitLimitBytes,
       commitFreeBytes: commitFreeBytes || null,
-      pagefileBytes: null, // 由调用方用“提交上限 - 物理内存”推算，避免再跑一次查询
+      pagefileBytes,
       source: 'windows-cim',
     };
   } catch {
@@ -165,13 +184,25 @@ export function readMemoryBudget({ forcePlatform = null } = {}) {
   // 不能因为“有 swap”就推断提交上限大于物理内存——实测某些内核
   // （overcommit_memory=2 + overcommit_ratio）里 16.7 GB 物理内存配 3 GB swap，
   // CommitLimit 只有 11.6 GB，比物理内存还小。
-  const pagefileBytes = Number(commit?.pagefileBytes) || 0;
+  //
+  // 但“多少字节”和“知不知道”是两件事，不能糊：
+  //   0    = 确认没有页面文件 → 不存在硬盘兜底（判「装不下」）
+  //   >0   = 确实配了这么多
+  //   null = 查不到（例如 PowerShell/WMI 不可用）
+  // 以前这里有 `Number(...) || 0`，把 null 也压成 0，于是所有“查不到”的机器
+  // 都被当成“没配页面文件”——结论会过于悲观（该标 🐌 的标成 ⛔）。
+  const rawPagefile = commit?.pagefileBytes;
+  const pagefileBytes = rawPagefile === null || rawPagefile === undefined
+    ? null
+    : Math.max(0, Number(rawPagefile) || 0);
   return {
     totalBytes,
     freeBytes,
     commitLimitBytes: commitLimitBytes || null,
     commitFreeBytes: commit?.commitFreeBytes ?? null,
     pagefileBytes,
+    // 页面文件是否已知：界面/判定据此决定能不能下“没有兜底”的结论
+    pagefileKnown: pagefileBytes !== null,
     // canSpill 的含义：这套系统是否允许提交超过物理内存的量（也就是“硬盘真能顶上来”）。
     // 判据只能是提交上限本身，与 swap 大小无关。
     canSpill: !!(commitLimitBytes && commitLimitBytes > totalBytes),
