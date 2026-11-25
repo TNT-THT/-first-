@@ -108,7 +108,7 @@ jobs:
               tag_name = "${{ inputs.tag || github.ref_name }}"
               body = "> [standalone build failed, exit=$code]`n`n$raw"
             } | ConvertTo-Json -Compress -Depth 5
-            [System.IO.File]::WriteAllText("$PWDail.json", $body)
+            [System.IO.File]::WriteAllText("$PWD\fail.json", $body)
             try { gh api -X PATCH "repos/${{ github.repository }}/releases/tags/${{ inputs.tag || github.ref_name }}" --input fail.json } catch { Write-Output "upload failed" }
             exit $code
           }
