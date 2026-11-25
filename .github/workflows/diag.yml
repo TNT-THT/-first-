@@ -32,15 +32,25 @@ jobs:
           tail -c 200000 test.log > tail.log
           wc -l test.log
         continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-log
+          path: test.log
+          if-no-files-found: warn
       - name: Publish failure detail as commit comment
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          BODY=$(node -e "
-            const fs = require('fs');
-            let t = '';
-            try { t = fs.readFileSync('tail.log', 'utf8'); } catch (e) { t = 'no test.log'; }
-            fs.writeFileSync('body.json', JSON.stringify({ body: '### CI 测试输出\n\n```\n' + t.slice(-60000) + '\n```' }));
-          ")
-          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" --input body.json | head -c 300
+          node -e '
+            const fs = require("fs");
+            let t = "";
+            for (const f of ["tail.log", "test.log"]) {
+              try { t = fs.readFileSync(f, "utf8"); if (t) break; } catch {}
+            }
+            if (!t) t = "(没有读到 test.log)";
+            fs.writeFileSync("body.json", JSON.stringify({ body: "### CI 测试输出\n\n```\n" + t.slice(-55000) + "\n```" }));
+            console.log("body bytes:", fs.statSync("body.json").size);
+          '
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" --input body.json --jq '.id'
