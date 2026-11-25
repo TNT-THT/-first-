@@ -16,7 +16,7 @@
 import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { buildZip } from '../scripts/lib/zip.mjs';
 import { extractZip } from '../server/native/archive.js';
 import { LLAMA_RELEASE_API, pickLlamaRelease, pickReleaseAsset } from '../server/native/llama.js';
@@ -152,9 +152,52 @@ function stageServerDeps() {
   return walk(join(staging, 'node_modules'), join(staging, 'node_modules'));
 }
 
+/**
+ * 带超时与重试的 GET：构建机（尤其 GitHub Actions 的 Windows runner）到
+ * objects.githubusercontent.com 的链路会偶发抽风，裸 fetch 一次失败就让整个
+ * Release 少两个产物。
+ *
+ * 这不是假想：v1.0.20 和 v1.0.22 两次都在这一步失败，而单独重跑同样的脚本
+ * 又完全成功（48 秒 vs 失败那次只用了 23 秒 —— 连下载都没开始）。失败发生在
+ * `fetch` 本身，一个字节都没收到。
+ *
+ * @param {string} url
+ * @param {object} opts
+ * @param {number} [opts.timeoutMs] 单次尝试的超时
+ * @param {number} [opts.attempts]  总尝试次数
+ */
+export async function fetchWithRetry(url, {
+  timeoutMs = 180000, attempts = 4, headers = {},
+  // 只为测试可注入；生产路径就是全局 fetch
+  fetchImpl = fetch, retryDelayMs = 2000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+} = {}) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i += 1) {
+    if (i > 0) {
+      // 退避：2s / 4s / 8s。构建机的时间不宝贵，把事情做完更重要。
+      const wait = retryDelayMs * 2 ** (i - 1);
+      console.log(`[standalone] 第 ${i} 次重试（${wait / 1000}s 后）：${lastErr?.message || ''}`);
+      await sleep(wait);
+    }
+    try {
+      const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+      // 5xx / 429 属于“值得再试一次”；4xx 重试也没用，直接抛出
+      if (!res.ok && (res.status >= 500 || res.status === 429)) {
+        lastErr = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+      return res;
+    } catch (err) {
+      // fetch 本身失败（DNS/连接被重置/超时）——这正是那两次 Release 的失败形态
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`请求失败：${url}`);
+}
+
 /** --with-llama：下载 llama.cpp 官方 Windows CPU 构建到 .build/llama。 */
 async function fetchLlamaWindows() {
-  const res = await fetch(LLAMA_RELEASE_API, {
+  const res = await fetchWithRetry(LLAMA_RELEASE_API, {
     headers: { accept: 'application/vnd.github+json', 'user-agent': 'llm-host-skyblue' },
   });
   if (!res.ok) throw new Error(`读取 llama.cpp 发布失败（HTTP ${res.status}）`);
@@ -164,7 +207,9 @@ async function fetchLlamaWindows() {
   const asset = pickReleaseAsset(release.assets || [], { platform: 'win32', arch: 'x64', variant: 'cpu' });
   if (!asset) throw new Error(`llama.cpp ${release.tag_name} 没有 Windows CPU 构建。`);
   console.log(`[standalone] 下载 llama.cpp ${release.tag_name}（${asset.name}）…`);
-  const dl = await fetch(asset.browser_download_url, { headers: { 'user-agent': 'llm-host-skyblue' } });
+  const dl = await fetchWithRetry(asset.browser_download_url, {
+    headers: { 'user-agent': 'llm-host-skyblue' },
+  });
   if (!dl.ok) throw new Error(`下载 llama.cpp 失败（HTTP ${dl.status}）`);
   const dir = join(buildDir, 'llama');
   rmSync(dir, { recursive: true, force: true });
@@ -200,13 +245,30 @@ function buildStandaloneZip(exePath, llamaDir) {
   return zipPath;
 }
 
-const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-const version = `${pkg.version}+${new Date().toISOString().slice(0, 10)}`;
-mkdirSync(buildDir, { recursive: true });
-buildWeb();
-const payloadZipPath = buildPayload(version);
-const bundlePath = await bundleLauncher();
-const exePath = buildExe(bundlePath, payloadZipPath, version);
-const llamaDir = withLlama ? await fetchLlamaWindows() : null;
-buildStandaloneZip(exePath, llamaDir);
-console.log('[standalone] 构建完成。');
+/**
+ * 只有“直接运行这个文件”才执行构建。
+ *
+ * 以前这里是无条件执行的顶层语句：测试为了验证 fetchWithRetry 而 import 本模块，
+ * 结果会**真的把整个构建跑一遍**（几十秒、写出上百 MB 产物），还依赖本机有 vite。
+ * 被导入和被执行必须分开。
+ */
+async function main() {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const version = `${pkg.version}+${new Date().toISOString().slice(0, 10)}`;
+  mkdirSync(buildDir, { recursive: true });
+  buildWeb();
+  const payloadZipPath = buildPayload(version);
+  const bundlePath = await bundleLauncher();
+  const exePath = buildExe(bundlePath, payloadZipPath, version);
+  const llamaDir = withLlama ? await fetchLlamaWindows() : null;
+  buildStandaloneZip(exePath, llamaDir);
+  console.log('[standalone] 构建完成。');
+}
+
+// 入口判定：只有被 node 直接执行时才构建（被 import 时什么都不做）
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err) => {
+    console.error(`[standalone] 构建失败：${err?.message || err}`);
+    process.exitCode = 1;
+  });
+}
