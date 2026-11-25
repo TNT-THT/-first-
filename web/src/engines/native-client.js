@@ -152,7 +152,7 @@ export async function fetchModelInfoViaBrowser(repo, token, { fetchImpl = defaul
  * 浏览器取数失败抛错，调用方回退服务端直连的 /use。
  * @returns {Promise<{out: object, downloadState: 'browser'|'fallback'|'none'}>}
  */
-export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetchImpl = defaultFetch, onStatus } = {}) {
+export async function useRepoViaBrowser({ repo, mode = 'auto', quant = '', adminToken, fetchImpl = defaultFetch, onStatus } = {}) {
   const note = (text) => { try { onStatus?.(text); } catch { /* 忽略回调错误 */ } };
   note('正在经浏览器读取仓库信息（和网页版同一条网络路）…');
   const [meta, files] = await Promise.all([
@@ -161,8 +161,10 @@ export async function useRepoViaBrowser({ repo, mode = 'auto', adminToken, fetch
   ]);
   const out = await adminJson(fetchImpl, '/api/native/hf/use', {
     token: adminToken,
-    body: { repo, mode, viaBrowser: true, info: { meta, files: slimFiles(files) } },
+    body: { repo, mode, quant: quant || undefined, viaBrowser: true, info: { meta, files: slimFiles(files) } },
   });
+  // 多档量化：服务端把清单交回来让用户选，这里不下载任何字节
+  if (out.action === 'choose-quant') return { out, downloadState: 'none' };
   if (out.action !== 'download' || out.via !== 'browser') return { out, downloadState: 'none' };
   // 如果下载已在服务端完成（已下载过），downloadModelViaBrowser 会在 prepare 秒回 done
   try {

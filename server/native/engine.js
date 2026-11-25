@@ -17,10 +17,12 @@ import { appendFile, mkdir, readFile, readdir, rename, rm, stat, writeFile } fro
 import path from 'node:path';
 import {
   describeQuant,
+  estimateRamGB,
   groupFilesByQuant,
   nativeModelById,
   pickDefaultQuant,
   pickEntryFile,
+  pickQuantForBudget,
   NATIVE_MODELS,
 } from './catalog.js';
 import { detectFormats, detectVariants, hfModelId, optionsForFormats, routeForFormats, safeDirName } from './formats.js';
@@ -845,7 +847,7 @@ export class NativeEngine {
    *   info：浏览器通道已取回并在本地判定好的详情（有它就不再直连 HF）；
    *   viaBrowser：下载路线改由浏览器负责传字节，这里只登记与推荐量化。
    */
-  async useRepo(repo, mode = 'auto', { info: preloaded = null, viaBrowser = false } = {}) {
+  async useRepo(repo, mode = 'auto', { info: preloaded = null, viaBrowser = false, quant = '' } = {}) {
     const info = preloaded || await this.hfInfo(repo);
     const id = await this.registerCustom(repo, { formats: info.formats, name: info.name });
     // 浏览器通道顺手把 GGUF 量化分组写入缓存：后续下载/回退直连选档不必再列树
@@ -874,10 +876,41 @@ export class NativeEngine {
         // 浏览器通道：只返回推荐量化，字节由浏览器逐块传（和网页版同一条路）；
         // 不在这里触发服务端直连下载，否则用户电脑上又变成立即失败。
         const grouped = this.quantCache.get(repo)?.grouped || [];
-        const entry = this._pickQuantEntry(grouped, undefined);
+        if (!grouped.length) {
+          return { id, action: 'download', via: 'browser', route, options, quant: null, formats: info.formats };
+        }
+        // **多档量化时不再替用户决定。**
+        // 以前这里直接 pickDefaultQuant（偏好表里 Q4_K_M 排第一），完全不管本机
+        // 内存装不装得下：16 GB 机器上挑了 15.5 GB 那档，用户下完一整晚才发现跑不动。
+        // 现在默认把选择权交回去；只有“用户明确指定了量化”或“仓库只有一档”才直接开下。
+        const chosen = String(quant || '').trim().toUpperCase();
+        if (!chosen && grouped.length > 1) {
+          const pick = this.quantChoice(id, grouped);
+          return {
+            id, action: 'choose-quant', via: 'browser', route, options,
+            formats: info.formats,
+            // 整张清单都交给界面（带大小/内存/装不装得下/推荐理由），
+            // 用户看得到“这档要 19.4 GB、你的机器装不下”才不会再走进坑里。
+            quants: pick.quants,
+            recommended: pick.recommended,
+            reason: pick.reason,
+            budget: pick.budget,
+          };
+        }
+        const entry = this._pickQuantEntry(grouped, chosen || undefined);
         return { id, action: 'download', via: 'browser', route, options, quant: entry?.quant || null, formats: info.formats };
       }
-      const job = await this.download(id);
+      // 服务端直连：同样先让用户选（多档时），避免又替用户下错一大坨
+      const groupedDirect = await this.availableQuants(id).catch(() => []);
+      const chosenDirect = String(quant || '').trim().toUpperCase();
+      if (!chosenDirect && groupedDirect.length > 1) {
+        const pick = this.quantChoice(id, groupedDirect);
+        return {
+          id, action: 'choose-quant', route, options, formats: info.formats,
+          quants: pick.quants, recommended: pick.recommended, reason: pick.reason, budget: pick.budget,
+        };
+      }
+      const job = await this.download(id, chosenDirect || undefined);
       return { id, action: 'download', route, options, quant: job.quant, formats: info.formats };
     }
     if (route.route === 'convert') {
@@ -1323,6 +1356,55 @@ export class NativeEngine {
     if (typeof p !== 'string' || !p || p.length > 512) return false;
     if (p.includes('\\') || p.includes('\0') || p.startsWith('/') || /^[a-zA-Z]:/.test(p)) return false;
     return p.split('/').every((seg) => seg !== '..' && seg !== '');
+  }
+
+  /**
+   * 给界面用的量化清单：每档带上“多大 / 要多少内存 / 这台机器装不装得下”。
+   *
+   * 这是 HF 一键使用选量化的数据源。关键点是 **fits** 字段：它不是让用户自己去
+   * 心算 7.4 GB 可用内存能塞下哪档，而是直接把结论摆出来（装得下 / 只能靠页面
+   * 文件硬顶 / 装不下），并且推荐项是按本机真实内存算出来的，不是拍脑袋的偏好表。
+   *
+   * @returns {{quants:Array, recommended:string|null, reason:string, budget:object}}
+   */
+  quantChoice(id, grouped) {
+    const round = (n) => Math.round(n * 10) / 10;
+    const model = this.resolveModel(id);
+    // 上下文按模型登记值算：KV 缓存估算对 48~64 层的 MoE 差别很大
+    const contextTokens = Number(model?.context) || 8192;
+    let budget = { totalGB: 0, freeGB: 0, commitLimitGB: 0, pagefileGB: 0, source: 'os-only' };
+    try {
+      const b = readMemoryBudget();
+      budget = {
+        totalGB: round((Number(b.totalBytes) || 0) / 1e9),
+        freeGB: round((Number(b.freeBytes) || 0) / 1e9),
+        commitLimitGB: round((Number(b.commitLimitBytes) || 0) / 1e9),
+        pagefileGB: round((Number(b.pagefileBytes) || 0) / 1e9),
+        source: b.source,
+      };
+    } catch { /* 受限环境读不到内存：budget 全 0，pickQuantForBudget 会退回纯偏好 */ }
+
+    const pick = pickQuantForBudget(grouped, { ...budget, contextTokens });
+    const byQuant = new Map((pick.candidates || []).map((c) => [c.quant, c]));
+    const quants = grouped.map((g) => {
+      const c = byQuant.get(g.quant);
+      const neededGB = c ? c.neededGB : null;
+      return {
+        quant: g.quant,
+        files: g.files.length,
+        totalBytes: g.totalBytes,
+        sizeGB: round((g.totalBytes || 0) / 1e9),
+        ramGB: neededGB ?? estimateRamGB(g.totalBytes, contextTokens),
+        // fits：free（现在就能跑）/ total（关点程序能跑）/ spill（只能靠硬盘顶，很慢）/ never（装不下）
+        fits: c ? c.fits : 'unknown',
+        recommended: g.quant === pick.quant,
+        ...describeQuant(g.quant),
+      };
+    });
+    // 让界面不用自己排序：装得下的排前面，同档内大的（质量高的）在前
+    const rank = { free: 0, total: 1, spill: 2, never: 3, unknown: 4 };
+    quants.sort((a, b) => (rank[a.fits] - rank[b.fits]) || (b.totalBytes - a.totalBytes));
+    return { quants, recommended: pick.quant, reason: pick.reason, budget };
   }
 
   _pickQuantEntry(grouped, quant) {

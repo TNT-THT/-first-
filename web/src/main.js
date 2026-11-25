@@ -284,6 +284,11 @@ const els = {
   apiHfRunnerBtn: $('#apiHfRunnerBtn'),
   apiHfRunnerStatus: $('#apiHfRunnerStatus'),
   apiHfSearchStatus: $('#apiHfSearchStatus'),
+  apiHfQuantWrap: $('#apiHfQuantWrap'),
+  apiHfQuantSelect: $('#apiHfQuantSelect'),
+  apiHfQuantBtn: $('#apiHfQuantBtn'),
+  apiHfQuantCancelBtn: $('#apiHfQuantCancelBtn'),
+  apiHfQuantHint: $('#apiHfQuantHint'),
   apiHfResults: $('#apiHfResults'),
   main: $('#main'),
   brandName: $('#brandName'),
@@ -3973,18 +3978,98 @@ function renderHfResults() {
   els.apiHfResults.replaceChildren(...rows);
 }
 
-/** 使用 HF 模型：mode = auto（一键）| local（下载到本地）| cloud（云端，不下载）。 */
-async function hfUseRepo(repo, mode = 'auto') {
-  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `正在处理 ${repo}（优先经浏览器，和网页版同一条网络路）…`;
-  // 下载可能持续很久：期间保持状态轮询，下方模型列表里会长出实时进度条
-  await withNativePolling(() => hfUseRepoInner(repo, mode));
+/** 量化档位 → 界面上的“装得下吗”标记与说明。 */
+const QUANT_FIT_LABELS = {
+  free: { icon: '✅', text: '当前可用内存装得下，能正常速度跑' },
+  total: { icon: '⚠️', text: '超过当前可用内存，但装得进总内存（关掉其它程序再跑）' },
+  spill: { icon: '🐌', text: '物理内存装不下，只能靠页面文件硬顶——能跑但会慢到几乎不可用' },
+  never: { icon: '⛔', text: '这台机器装不下，下载了也跑不动' },
+  unknown: { icon: '❔', text: '内存信息读不到，自行判断' },
+};
+
+/**
+ * 显示量化选择器（HF 一键使用遇到多档 GGUF 时）。
+ *
+ * 以前这里是“软件替用户挑一档直接下”——它只看质量偏好，完全不管本机内存，
+ * 于是在 16 GB 机器上挑了 15.5 GB 那档，用户下一整晚才发现跑不动。
+ * 现在把清单和“装不装得下”的结论一起摆出来，让用户在下载前就做决定。
+ */
+function showHfQuantPicker({ quants, reason, repo, mode }) {
+  const wrap = els.apiHfQuantWrap;
+  const sel = els.apiHfQuantSelect;
+  if (!wrap || !sel) return false;
+  const list = Array.isArray(quants) ? quants : [];
+  if (!list.length) return false;
+  const rank = { free: 0, total: 1, spill: 2, never: 3, unknown: 4 };
+  const sorted = [...list].sort((a, b) => (rank[a.fits] ?? 9) - (rank[b.fits] ?? 9) || (b.sizeGB || 0) - (a.sizeGB || 0));
+  sel.replaceChildren(...sorted.map((q) => {
+    const fit = QUANT_FIT_LABELS[q.fits] || QUANT_FIT_LABELS.unknown;
+    const opt = document.createElement('option');
+    opt.value = q.quant;
+    // 全都装不下时，最小档也不该标“推荐”——它只是最不坏的选项，
+    // 标成推荐会让人以为有救。这种情况把实话写在标签上。
+    const tag = q.fits === 'never'
+      ? (q.recommended ? ' · 最小档（仍装不下）' : '')
+      : (q.recommended ? ' · 推荐' : '');
+    opt.textContent = `${fit.icon} ${q.quant} · ${q.sizeGB} GB · 约需 ${q.ramGB} GB 内存${tag}`;
+    if (q.recommended) opt.selected = true;
+    return opt;
+  }));
+  const updateHint = () => {
+    const q = sorted.find((x) => x.quant === sel.value);
+    if (!els.apiHfQuantHint) return;
+    if (!q) { els.apiHfQuantHint.hidden = true; return; }
+    const fit = QUANT_FIT_LABELS[q.fits] || QUANT_FIT_LABELS.unknown;
+    const bits = q.bitsPerWeight ? ` · ${q.bitsPerWeight} bit/权重` : '';
+    els.apiHfQuantHint.hidden = false;
+    els.apiHfQuantHint.textContent = `${q.quant}：下载 ${q.sizeGB} GB，运行时约需 ${q.ramGB} GB 内存${bits}。`
+      + `${fit.icon} ${fit.text}。${q.qualityNote || ''}`;
+  };
+  sel.onchange = updateHint;
+  updateHint();
+  wrap.hidden = false;
+  if (els.apiHfQuantHint) els.apiHfQuantHint.hidden = false;
+  if (els.apiHfSearchStatus) {
+    els.apiHfSearchStatus.textContent = reason
+      || `这个仓库有 ${sorted.length} 档量化。选一档再点“下载所选量化”——不同档位体积能差好几倍，选大了下完也跑不动。`;
+  }
+
+  // 选了就带着这一档回到正常下载流程
+  if (els.apiHfQuantBtn) {
+    els.apiHfQuantBtn.onclick = () => {
+      const quant = sel.value;
+      hideHfQuantPicker();
+      void hfUseRepo(repo, mode, quant);
+    };
+  }
+  if (els.apiHfQuantCancelBtn) {
+    els.apiHfQuantCancelBtn.onclick = () => {
+      hideHfQuantPicker();
+      if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = '已取消，什么都没下载。想看别的模型可以继续搜索。';
+    };
+  }
+  return true;
 }
 
-async function hfUseRepoInner(repo, mode = 'auto') {
+function hideHfQuantPicker() {
+  if (els.apiHfQuantWrap) els.apiHfQuantWrap.hidden = true;
+  if (els.apiHfQuantHint) { els.apiHfQuantHint.hidden = true; els.apiHfQuantHint.textContent = ''; }
+}
+
+/** 使用 HF 模型：mode = auto（一键）| local（下载到本地）| cloud（云端，不下载）。 */
+async function hfUseRepo(repo, mode = 'auto', quant = '') {
+  if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = `正在处理 ${repo}（优先经浏览器，和网页版同一条网络路）…`;
+  // 下载可能持续很久：期间保持状态轮询，下方模型列表里会长出实时进度条
+  await withNativePolling(() => hfUseRepoInner(repo, mode, quant));
+}
+
+async function hfUseRepoInner(repo, mode = 'auto', quant = '') {
   // 已经下载/正在下载过的仓库：直接带用户回模型列表，而不是再跑一遍浏览器的“取树→判定”
   // （几步网络请求 + 一秒多等待，最后也只会得到“已开始下载”的旧结论）。
   const known = nativeModels().find((m) => m.repo === repo && m.kind === 'hf');
-  if (known && ((known.downloaded || []).length || (known.downloads || []).length || known.conversion?.state === 'running')) {
+  // 用户明确选了量化档位时不能走这个快捷路径：他可能是想再下另一档（比如内存不够
+  // 想换成更小的那档），直接跳回列表等于把他的选择吞掉。
+  if (!quant && known && ((known.downloaded || []).length || (known.downloads || []).length || known.conversion?.state === 'running')) {
     const stateText = nativeStateText(known);
     const msg = `这个仓库已经处理过了（${stateText}）：在下面的模型列表里选量化、“加载”即可；也可以在聊天页模型选择里直接选它。`;
     if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = msg;
@@ -4003,6 +4088,7 @@ async function hfUseRepoInner(repo, mode = 'auto') {
       const via = await useRepoViaBrowser({
         repo,
         mode,
+        quant,
         adminToken: state.apiKeyAdminToken,
         onStatus: (text) => { if (els.apiHfSearchStatus) els.apiHfSearchStatus.textContent = text; },
       });
@@ -4017,7 +4103,12 @@ async function hfUseRepoInner(repo, mode = 'auto') {
       // 其余情况（代理/网络抖动）才回退软件直连（直连不通时错误会如实显示在下方）
       out = await nativeAdminRequest('/api/native/hf/use', { token: state.apiKeyAdminToken, body: { repo, mode } });
     }
-    if (out.action === 'download') {
+    if (out.action === 'choose-quant') {
+      // 多档量化：先让用户选，别替他把 15 GB 下满一晚上。
+      if (!showHfQuantPicker({ quants: out.quants, reason: out.reason, repo, mode })) {
+        els.apiHfSearchStatus.textContent = `${repo}：没能读取到量化清单，请稍后重试。`;
+      }
+    } else if (out.action === 'download') {
       if (downloadState === 'browser') {
         els.apiHfSearchStatus.textContent = `${repo}（${out.quant || '推荐量化'}）已通过浏览器通道下载完成，下方模型列表里点“加载”即可使用；之后在聊天页模型选择里也能选它。`;
       } else if (downloadState === 'fallback') {
