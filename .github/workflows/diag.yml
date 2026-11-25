@@ -1,0 +1,29 @@
+name: Diag
+on:
+  push:
+    branches: ['arena/**']
+permissions:
+  contents: write
+jobs:
+  diag:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Reproduce standalone --with-llama
+        shell: pwsh
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node standalone/build-standalone.mjs --with-llama *> out.log
+          $code = $LASTEXITCODE
+          Write-Output "EXITCODE=$code"
+          Get-Content out.log -Tail 60
+          $body = @{ body = "### Windows 复现（exit=$code）`n``````n" + ((Get-Content out.log -Raw) -replace '`','`'+'`' | Select-Object -Last 1) + "`n``````" } | ConvertTo-Json
+          $body | Out-File -Encoding utf8 body.json
+          try { gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" --input body.json } catch { Write-Output "comment failed: $_" }
