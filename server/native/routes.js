@@ -492,7 +492,10 @@ export function registerNativeRoutes(app, { engine, requireSession, requireAdmin
       // 浏览器已取到详情时优先用本地判定，不再为判定而直连 HF
       const pre = req.body?.info && typeof req.body.info === 'object' ? req.body.info : null;
       const info = pre ? engine.hfInfoFromMeta(repo, pre.meta || {}, pre.files) : null;
-      const out = await engine.useRepo(repo, mode, { info, viaBrowser: !!info || req.body?.viaBrowser === true });
+      // quant：用户选定的量化档位。不传时，“多档 GGUF”仓库会返回
+      // action='choose-quant' 让界面先让用户选，而不是替用户下错一整晚。
+      const quant = typeof req.body?.quant === 'string' ? req.body.quant : '';
+      const out = await engine.useRepo(repo, mode, { info, viaBrowser: !!info || req.body?.viaBrowser === true, quant });
       return res.status(202).json(out);
     } catch (err) {
       return errJson(res, err);

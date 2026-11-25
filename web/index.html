@@ -361,6 +361,12 @@
               <span id="apiHfRunnerStatus" class="muted small" role="status"></span>
             </div>
             <p class="muted small">每个模型都可以切换：下载到本地运行，或云端使用（不下载、需 Token）。特殊格式（ONNX/AWQ 等）也能下载到本地用 Python 运行时跑，只是 CPU 上会慢一些。</p>
+            <div id="apiHfQuantWrap" class="api-access-actions" hidden>
+              <select id="apiHfQuantSelect" aria-label="选择量化档位"></select>
+              <button id="apiHfQuantBtn" type="button" class="btn primary small">下载所选量化</button>
+              <button id="apiHfQuantCancelBtn" type="button" class="btn ghost small">取消</button>
+            </div>
+            <p id="apiHfQuantHint" class="muted small" role="status" hidden></p>
             <p id="apiHfSearchStatus" class="muted small" role="status"></p>
             <div id="apiHfResults" class="native-model-list"></div>
           </div>
