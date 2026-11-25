@@ -46,11 +46,22 @@ jobs:
           node -e '
             const fs = require("fs");
             let t = "";
-            for (const f of ["tail.log", "test.log"]) {
-              try { t = fs.readFileSync(f, "utf8"); if (t) break; } catch {}
+            try { t = fs.readFileSync("test.log", "utf8"); } catch {}
+            if (!t) { fs.writeFileSync("body.json", JSON.stringify({ body: "没有读到 test.log" })); process.exit(0); }
+            const lines = t.split("\n");
+            const keep = [];
+            for (let i = 0; i < lines.length; i++) {
+              if (/^not ok /.test(lines[i])) {
+                // 失败用例：名字 + 紧随其后的 20 行（含 error 块）
+                keep.push("", "---", lines[i]);
+                for (let j = 1; j <= 22 && i + j < lines.length; j++) keep.push(lines[i + j]);
+              }
+              if (/^# (tests|pass|fail|cancelled)/.test(lines[i])) keep.push(lines[i]);
+              if (/^exit=/.test(lines[i])) keep.push(lines[i]);
+              if (/^(MemTotal|MemAvailable|CommitLimit|SwapTotal|\d+$)/.test(lines[i])) keep.push("[env] " + lines[i]);
             }
-            if (!t) t = "(没有读到 test.log)";
-            fs.writeFileSync("body.json", JSON.stringify({ body: "### CI 测试输出\n\n```\n" + t.slice(-55000) + "\n```" }));
-            console.log("body bytes:", fs.statSync("body.json").size);
+            const body = "### CI 测试摘要（仅失败项）\n\n```\n" + keep.join("\n").slice(0, 55000) + "\n```";
+            fs.writeFileSync("body.json", JSON.stringify({ body }));
+            console.log("fail lines:", keep.length);
           '
           gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" --input body.json --jq '.id'
