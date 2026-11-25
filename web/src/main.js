@@ -3758,6 +3758,16 @@ function renderNativePanel() {
     if (mem && mem.neededGB) {
       gpuBits.push(mem.summary
         || `本次加载约需 ${mem.neededGB} GB 内存${mem.totalGB ? `，本机总内存 ${mem.totalGB} GB、当前可用 ${mem.freeGB} GB` : ''}`);
+      // “能不能用 C/D 盘的空间”是用户最常问的问题：把页面文件这一唯一可行路径算成
+      // 具体数字摆出来，比含糊地说“内存不够”有用；同时点明它是慢，不是变快。
+      const pf = mem.pagefilePlan;
+      if (pf && !pf.enough) {
+        gpuBits.push(`硬盘兜底：需要页面文件约 ${pf.requiredPagefileGB} GB 才不至于分配失败`
+          + '（Windows：系统属性 → 高级 → 性能设置 → 高级 → 虚拟内存；Linux：调大 swap）。'
+          + '这只能让它不崩，换页会让生成慢到几乎不可用，正解仍是换更小的量化。');
+      } else if (pf && pf.enough && pf.requiredPagefileGB > 0) {
+        gpuBits.push(`硬盘兜底：现有页面文件够用（约需 ${pf.requiredPagefileGB} GB），但换页会明显拖慢生成。`);
+      }
     }
     els.apiNativeHint.textContent = gpuBits.length ? `${base} ${gpuBits.join('；')}。` : base;
   }
