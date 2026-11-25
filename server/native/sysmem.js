@@ -87,22 +87,26 @@ function linuxCommit() {
     const committedBytes = kv('Committed_AS');
     const swapTotalBytes = kv('SwapTotal');
     const swapFreeBytes = kv('SwapFree');
+    // 重要：SwapTotal 是实测值，绝不能拿 CommitLimit − MemTotal 去反推。
+    // overcommit_memory=2 + overcommit_ratio 的内核里 CommitLimit 可以小于物理内存
+    // （GitHub Actions 的 runner 就是这样：有 3 GB swap 但 CommitLimit 仍偏小），
+    // 反推会得到负数的“页面文件”，进而让判定和文案全错。
+    // Linux 的 CommitLimit 已经**包含** swap，不需要再加 SwapTotal。
     if (!commitLimitBytes) {
-      // 没开 overcommit accounting 的内核没有 CommitLimit：退回 swap 视角
-      if (swapTotalBytes === null) return null;
+      // 没开 overcommit accounting 的内核没有 CommitLimit：用物理内存 + swap 兜底
+      if (!swapTotalBytes) return null;
       return {
-        commitLimitBytes: (os.totalmem() || 0) + swapTotalBytes || null,
+        commitLimitBytes: (os.totalmem() || 0) + swapTotalBytes,
         commitFreeBytes: swapFreeBytes === null ? null : (os.freemem() || 0) + swapFreeBytes,
         pagefileBytes: swapTotalBytes,
         source: 'linux-meminfo-swap',
       };
     }
-    const limit = commitLimitBytes + (swapTotalBytes || 0);
     const used = committedBytes || 0;
     return {
-      commitLimitBytes: limit,
-      commitFreeBytes: Math.max(0, limit - used),
-      pagefileBytes: swapTotalBytes ?? Math.max(0, commitLimitBytes - (os.totalmem() || 0)),
+      commitLimitBytes,
+      commitFreeBytes: Math.max(0, commitLimitBytes - used),
+      pagefileBytes: swapTotalBytes || 0,
       source: 'linux-meminfo',
     };
   } catch {
