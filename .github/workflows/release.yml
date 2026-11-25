@@ -94,7 +94,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: node standalone/build-standalone.mjs --with-llama
+      # 必须显式指定 pwsh：默认 cmd shell 下这一步会莫名失败（22s 就退出，
+      # 而同样的命令在 pwsh 下跑 51s 且成功），且失败信息不会进入可读日志。
+      # 构建脚本本身与 shell 无关，这里只是绕开 cmd 的行为差异。
+      - name: Build standalone
+        shell: pwsh
+        run: node standalone/build-standalone.mjs --with-llama
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
