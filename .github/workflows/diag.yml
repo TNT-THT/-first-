@@ -1,0 +1,32 @@
+name: Diag
+on:
+  push:
+    branches: ['arena/**']
+permissions:
+  contents: write
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Reproduce standalone --with-llama
+        run: |
+          set +e
+          node standalone/build-standalone.mjs --skip-web --with-llama > out.log 2>&1
+          echo "exit=$?" >> out.log
+          tail -c 8000 out.log
+          node -e '
+            const fs=require("fs");
+            let t=""; try{t=fs.readFileSync("out.log","utf8")}catch{}
+            fs.writeFileSync("body.json", JSON.stringify({body:"### standalone 复现\n\n```\n"+t.slice(-60000)+"\n```"}));
+          '
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" --input body.json --jq '.id'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
