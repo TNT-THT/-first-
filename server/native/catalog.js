@@ -329,13 +329,15 @@ export function describeQuant(quant) {
  * @param {number} [opts.totalGB]          物理内存（GB），读不到传 0
  * @param {number} [opts.freeGB]           当前可用内存（GB），读不到传 0
  * @param {number} [opts.commitLimitGB]    可提交上限（物理内存+页面文件，GB）
- * @param {number} [opts.pagefileGB]       页面文件/swap 大小（GB），0 表示没配
+ * @param {number|null} [opts.pagefileGB]  页面文件/swap 大小（GB）：
+ *                                          0 = 确认没配，null/undefined = 查不到
+ * @param {number} [opts.commitFreeGB]     当前还能提交多少（GB），0/未知表示不知道
  * @param {number} [opts.contextTokens]    KV 缓存按多少上下文估算
  * @returns {{quant:string|null, fits:'free'|'total'|'spill'|'never'|'unknown',
  *            neededGB:number, candidates:Array, reason:string}}
  */
 export function pickQuantForBudget(grouped, {
-  totalGB = 0, freeGB = 0, commitLimitGB = 0, pagefileGB = 0, contextTokens = 8192,
+  totalGB = 0, freeGB = 0, commitLimitGB = 0, pagefileGB = 0, commitFreeGB = 0, contextTokens = 8192,
 } = {}) {
   const list = (Array.isArray(grouped) ? grouped : [])
     .filter((g) => g && g.quant && Number(g.totalBytes) > 0);
@@ -361,14 +363,26 @@ export function pickQuantForBudget(grouped, {
       const fitsFree = ceilingFree > 0 && neededGB <= ceilingFree;
       const fitsTotal = ceilingTotal > 0 && neededGB <= ceilingTotal;
       // spill：物理内存装不下，但**确实配了页面文件**能兜住 → 能跑，只是慢到不可用。
-      // 没配页面文件时不存在这条退路，不能拿 commitLimit（此时等于物理内存）糊弄成“能跑”。
-      const fitsCommit = pagefileGB > 0 && commitLimitGB > 0 && neededGB <= commitLimitGB;
+      //
+      // 两个坑：
+      //  ① 没配页面文件时不存在这条退路，不能拿 commitLimit（此时等于物理内存）
+      //     糊弄成“能跑”。所以必须有 pagefileGB > 0。
+      //  ② 光看「提交上限」不够，还得看**现在还能提交多少**：页面文件 30 GB、上限
+      //     46 GB，但其它程序已经吃掉 30 GB，模型照样申请不到内存。有实测余量就
+      //     以它为准（留 10% 余量），没有才退回上限。
+      const spillCeiling = commitFreeGB > 0 ? Math.min(commitFreeGB * 0.9, commitLimitGB) : commitLimitGB;
+      const fitsCommit = pagefileGB > 0 && spillCeiling > 0 && neededGB <= spillCeiling;
       const fits = fitsFree ? 'free' : fitsTotal ? 'total' : fitsCommit ? 'spill' : 'never';
       return { quant: g.quant, totalBytes: g.totalBytes, neededGB, fits };
     })
     // 从大到小排：挑选时“在装得下的里面选最大的”，就是质量最高的那一档
     .sort((a, b) => b.totalBytes - a.totalBytes);
 
+  const budgetFacts = {
+    totalGB, freeGB, commitLimitGB, pagefileGB, commitFreeGB,
+    // pagefileKnown：null/undefined 表示探测不到，0 表示确认没配
+    pagefileKnown: pagefileGB !== null && pagefileGB !== undefined,
+  };
   const order = ['free', 'total', 'spill'];
   // 没有内存信息时（容器、受限环境）不能瞎猜“装不下”，退回纯粹的质量偏好
   const hasBudget = totalGB > 0 || freeGB > 0 || commitLimitGB > 0;
@@ -381,25 +395,25 @@ export function pickQuantForBudget(grouped, {
       if (hit) {
         return {
           quant: hit.quant, fits: tier, neededGB: hit.neededGB, candidates,
-          reason: describeFit(tier, hit.quant, hit.neededGB, { totalGB, freeGB, commitLimitGB }),
+          reason: describeFit(tier, hit.quant, hit.neededGB, budgetFacts),
         };
       }
     }
     return {
       quant: pool[0].quant, fits: tier, neededGB: pool[0].neededGB, candidates,
-      reason: describeFit(tier, pool[0].quant, pool[0].neededGB, { totalGB, freeGB, commitLimitGB }),
+      reason: describeFit(tier, pool[0].quant, pool[0].neededGB, budgetFacts),
     };
   }
   // 全都不装下：仍给出最小的一档，但把实话说明白——用户有权自己决定要不要试
   const smallest = candidates[candidates.length - 1];
   return {
     quant: smallest.quant, fits: 'never', neededGB: smallest.neededGB, candidates,
-    reason: describeFit('never', smallest.quant, smallest.neededGB, { totalGB, freeGB, commitLimitGB }),
+    reason: describeFit('never', smallest.quant, smallest.neededGB, budgetFacts),
   };
 }
 
 /** 给用户看的一句话，说明为什么选这一档（以及这台机器的真实处境）。 */
-function describeFit(tier, quant, neededGB, { totalGB, freeGB, commitLimitGB }) {
+function describeFit(tier, quant, neededGB, { totalGB, freeGB, commitLimitGB, pagefileGB = 0, pagefileKnown = true }) {
   const mem = totalGB > 0 ? `本机总内存 ${totalGB} GB、当前可用 ${freeGB} GB` : '本机内存未知';
   if (tier === 'free') return `已选 ${quant}（约需 ${neededGB} GB），当前可用内存装得下，可以正常速度运行。`;
   if (tier === 'total') return `已选 ${quant}（约需 ${neededGB} GB），超过当前可用内存但装得进总内存——${mem}，关掉其它占内存的程序再跑即可。`;
@@ -407,7 +421,14 @@ function describeFit(tier, quant, neededGB, { totalGB, freeGB, commitLimitGB }) 
     return `已选 ${quant}（约需 ${neededGB} GB），物理内存装不下，只能靠页面文件硬顶——${mem}，可提交上限 ${commitLimitGB} GB。`
       + '能跑但会频繁换页到硬盘，速度会慢到几乎不可用；建议选更小的一档。';
   }
-  return `仓库里最小的一档 ${quant} 也需要 ${neededGB} GB，超过这台机器的内存上限（${mem}${commitLimitGB > 0 ? `，可提交上限 ${commitLimitGB} GB` : ''}）。`
+  // 装不下时也要把“为什么”说准：没配页面文件、页面文件查不到、余量被吃光，
+  // 三种情况的解决办法完全不同（配页面文件 / 查权限 / 关程序）。
+  const why = pagefileKnown === false
+    ? '（页面文件大小未能探测，这里只按物理内存判断，可能偏保守）'
+    : pagefileGB > 0
+      ? `（已配 ${pagefileGB} GB 页面文件，但当前可提交余量不足）`
+      : '（未配页面文件，没有硬盘兜底）';
+  return `仓库里最小的一档 ${quant} 也需要 ${neededGB} GB，超过这台机器的内存上限（${mem}${commitLimitGB > 0 ? `，可提交上限 ${commitLimitGB} GB` : ''}）${why}。`
     + '下载下来很可能加载失败或慢到不可用，建议换更小的模型。';
 }
 
