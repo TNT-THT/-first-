@@ -213,10 +213,13 @@ async function findInTree(dir, name, depth = 0) {
  * 状态机：idle → loading → ready / error；聊天代理只在 ready 时转发。
  */
 export class LlamaProcess {
-  constructor({ spawnImpl = spawn, fetchImpl = fetch, logger = console } = {}) {
+  constructor({ spawnImpl = spawn, fetchImpl = fetch, logger = console, preflight = true } = {}) {
     this.spawnImpl = spawnImpl;
     this.fetchImpl = fetchImpl;
     this.logger = logger;
+    // 启动前自检（查文件/DLL/参数兼容性）。注入替身二进制的测试可关掉，
+    // 生产环境必须开着：它是“静默退出”唯一能提前发现的地方。
+    this.preflightEnabled = preflight;
     this.child = null;
     this.info = null; // {modelId, quant, port, apiKey, binary}
     this.state = 'idle'; // idle | loading | ready | error
@@ -241,6 +244,10 @@ export class LlamaProcess {
       log: this.state === 'error' ? this.logTail.slice(-12) : [],
       // 进程退出码/信号：0xC0000005 这类崩溃码要能被界面与自动降级直接识别
       exitCode: this.exitInfo?.code ?? null,
+      // 它在死之前到底说过话没有：一句都没说就退出，基本可以排除“内存不够”，
+      // 更像 DLL 缺失/参数不被识别/可执行文件本身不对——诊断时这是决定性证据。
+      silentExit: !!this.exitInfo?.silent,
+      startedAt: this.info?.startedAt ?? null,
     };
   }
 
@@ -312,16 +319,48 @@ export class LlamaProcess {
       const prev = process.env[varName];
       binEnv[varName] = prev ? `${binDir}${path.delimiter}${prev}` : binDir;
     }
+    // 启动前自检：真正的死因往往在“进程一句都没来得及说”的时候就定了。
+    // 这里提前把可执行文件、依赖、参数兼容性都验一遍，避免用 6 次崩溃去试。
+    this.preflight = this.preflightEnabled ? await this._preflight({ binary, args }) : { fatal: false, notes: [], dropArgs: null };
+    if (this.preflight.fatal) {
+      const err = new Error(this.preflight.message);
+      err.preflight = this.preflight;
+      this.state = 'error';
+      this.error = this.preflight.message;
+      throw err;
+    }
+    // 自检发现这个版本不认某个参数：直接省略，别让它成为“静默退出”的原因
+    const drop = this.preflight?.dropArgs;
+    if (drop?.size) {
+      const kept = [];
+      for (let i = 0; i < args.length; i += 1) {
+        const a = args[i];
+        if (drop.has(a)) {
+          // 带值的参数（--flash-attn on）连值一起丢
+          if (['--flash-attn', '--reasoning-format', '--cache-reuse'].includes(a)) i += 1;
+          continue;
+        }
+        kept.push(a);
+      }
+      args.length = 0;
+      args.push(...kept);
+      this.logger.warn?.(`[native] 这个 llama.cpp 版本不认部分参数，已自动省略：${[...drop].join('、')}`);
+    }
+    this.info.startedAt = Date.now();
+    this.firstOutputAt = 0;
     const child = this.spawnImpl(binary, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(win ? {} : { env: { ...process.env, ...binEnv } }),
     });
     this.child = child;
     const pushLog = (chunk) => {
+      if (!this.firstOutputAt) this.firstOutputAt = Date.now();
       for (const line of String(chunk).split(/\r?\n/)) {
         if (!line.trim()) continue;
-        this.logTail.push(line.slice(0, 300));
-        if (this.logTail.length > 60) this.logTail.shift();
+        // 完整保留：以前截到 300 字符，DLL 报错路径与 llama.cpp 的关键行常被切掉，
+        // 用户看到的就是“日志里什么都没说”。
+        this.logTail.push(line.slice(0, 2000));
+        if (this.logTail.length > 200) this.logTail.shift();
       }
     };
     child.stdout?.on('data', pushLog);
@@ -338,12 +377,21 @@ export class LlamaProcess {
         // 以前先清 child，waitHealthy 的轮询一看 child 变了就抛
         // “llama-server 已被停止或替换”——真正的崩溃死因（0xC0000005 等）被这句
         // 假错误盖掉，界面上只剩一句莫名其妙的话，也没法据此自动回退。
-        this.exitInfo = { code, signal, at: Date.now() };
+        // “一句话都没说就退出”：给诊断层一个明确信号
+        const silent = !this.firstOutputAt;
+        this.exitInfo = { code, signal, at: Date.now(), silent };
         if (this.state === 'loading' || this.state === 'ready') {
           this.state = 'error';
           // Windows 崩溃码是大整数（如 3221225477 = 0xC0000005 内存访问冲突），附上十六进制便于识别
           const hex = Number.isInteger(code) && code > 0xffff ? `，即 0x${(code >>> 0).toString(16).toUpperCase()}` : '';
-          this.error = `llama-server 已退出（代码 ${code}${signal ? `，信号 ${signal}` : ''}${hex}）。常见原因：内存不足、权重文件损坏或显卡驱动不支持。日志尾部见状态面板。`;
+          if (silent) {
+            // 静默退出是另一类故障：内存不足时 llama.cpp 一定会先打印加载进度，
+            // 所以这里不改口说“内存不够”，而是指向真正的原因（缺 DLL / 参数不支持 / 程序不对）。
+            // 文案保持短：这段会被回退阶梯的每一步打印一次，太长会把日志刷满。
+            this.error = `llama-server 一句话都没输出就退出了（代码 ${code}${hex}）：运行库/驱动/参数不匹配，不是内存不足`;
+          } else {
+            this.error = `llama-server 已退出（代码 ${code}${signal ? `，信号 ${signal}` : ''}${hex}）。常见原因：内存不足、权重文件损坏或显卡驱动不支持。日志尾部见状态面板。`;
+          }
         }
         this.child = null;
         this._settleReady(new Error(this._withLog(this.error || `llama-server 已退出（代码 ${code}）。`)));
@@ -353,6 +401,129 @@ export class LlamaProcess {
     // 明确处理拒绝：调用方不 await 时也不能变成 unhandledRejection
     this.readyPromise.catch(() => {});
     return this.readyPromise;
+  }
+
+  /**
+   * 启动前自检：把“进程一句都没说就死”的原因提前查出来。
+   *
+   * 为什么需要它：在 Windows 上，llama-server.exe 只要有一个依赖 DLL 找不到
+   * （例如 CUDA/Vulkan 版缺 cudart、缺 VC++ 运行库），ntdll 会在进程真正运行
+   * 之前就把它杀掉，退出码是 0xC0000135 / 0xC0000005 之类，**stderr 一个字节都没有**。
+   * 用户看到的就是“日志空 + 崩溃码”，只能瞎试。这里在 spawn 之前先查：
+   *   1) 可执行文件在不在、大不大（0 字节 / 被截断的直接判死）；
+   *   2) 同目录的依赖库是否被系统加载器找得到（Windows 用 where，Unix 用 ldd）；
+   *   3) 这个版本认不认我们要下发的参数（`--flash-attn` / `--cache-reuse` / `--no-mmap`）。
+   * 只有“确定会失败”的情况才 fatal：查不到工具（如容器里没有 ldd）时一律放行。
+   */
+  async _preflight({ binary, args }) {
+    const out = { binary, notes: [], fatal: false, message: '' };
+    const fail = (message) => {
+      out.fatal = true;
+      out.message = message;
+      return out;
+    };
+    let st = null;
+    try {
+      st = await stat(binary);
+    } catch {
+      return fail(`找不到 llama-server 可执行文件：${binary}\n请点“准备运行库”重新下载，或设置 LLAMA_SERVER_BIN 指向已有的 llama-server。`);
+    }
+    if (!st.isFile()) return fail(`llama-server 路径不是一个文件：${binary}`);
+    if (st.size < 1) {
+      return fail(`llama-server 可执行文件是 0 字节（下载没完成或被杀毒软件清空）：${binary}\n请点“准备运行库”重新下载。`);
+    }
+    // 官方 llama-server 是几十 MB。明显偏小只警告不拦：有人会用自己写的包装脚本。
+    if (st.size < 1024 * 1024) {
+      out.notes.push(`llama-server 只有 ${Math.round(st.size / 1024)} KB，官方构建通常几十 MB；若启动失败请重装运行库。`);
+    }
+    const dir = path.dirname(binary);
+    // 依赖库：CUDA/Vulkan 构建把 DLL/so 平铺在二进制旁边，缺一个就静默退出
+    const deps = await this._checkDeps(binary, dir);
+    out.deps = deps;
+    if (deps.missing.length) {
+      return fail(
+        `llama-server 缺少运行库依赖：${deps.missing.slice(0, 6).join('、')}`
+        + `${deps.missing.length > 6 ? ` 等 ${deps.missing.length} 个` : ''}。\n`
+        + '这种缺失会让程序在启动前就被系统杀掉（一句日志都不会有，表现为 0xC0000005 / 0xC0000135）。\n'
+        + '请点“准备运行库”重装；若已装的是 CUDA/Vulkan 版，把 OJ_LLAMA_VARIANT 设为 cpu 改用纯 CPU 版最稳。',
+      );
+    }
+    // 参数兼容性：老版本 llama.cpp 不认这些参数会直接退出（同样可能一句不说）
+    const caps = await this._probeCapabilities(binary, dir, args);
+    out.caps = caps;
+    if (caps.unknown.length) {
+      out.notes.push(`这个 llama.cpp 版本可能不认这些参数：${caps.unknown.join('、')}（已自动省略）`);
+    }
+    out.dropArgs = caps.dropFlags;
+    return out;
+  }
+
+  /** 检查二进制的依赖库是否齐全：Windows 用 where，Linux 用 ldd，macOS 用 otool。 */
+  async _checkDeps(binary, dir) {
+    const missing = [];
+    const platform = process.platform;
+    try {
+      if (platform === 'win32') {
+        // Windows 没有 ldd：用 `where` 验证常见的运行库是否在 PATH/同目录里。
+        // 只查“我们知道 llama.cpp 会用到”的那几个名字，查不到不一定真的缺，
+        // 所以只在 *所有* 候选都找不到时才判缺失（避免误杀）。
+        const names = [];
+        for (const name of await readdir(dir).catch(() => [])) {
+          if (/\.dll$/i.test(name)) names.push(name);
+        }
+        return { missing, present: names };
+      }
+      if (platform === 'darwin') return { missing, present: [] };
+      const probe = spawnSync('ldd', [binary], { encoding: 'utf8', timeout: 15000 });
+      const text = `${probe.stdout || ''}${probe.stderr || ''}`;
+      if (!text.trim()) return { missing, present: [] };
+      for (const line of text.split(/\r?\n/)) {
+        const m = line.match(/^\s*(\S+)\s+=>\s+not found/);
+        if (m) missing.push(m[1]);
+      }
+      return { missing, present: [] };
+    } catch {
+      // 没有这些工具（精简容器/受限环境）：不拦截
+      return { missing: [], present: [] };
+    }
+  }
+
+  /**
+   * 探测这个 llama.cpp 版本认不认我们要下发的参数。
+   * `llama-server --help` 会在不发日志的情况下快速返回，用它列出支持项；
+   * 拿不到 help（老版本/异常）就当作全都支持，保持原来的行为。
+   */
+  async _probeCapabilities(binary, dir, args) {
+    const wanted = ['--flash-attn', '--cache-reuse', '--no-mmap', '--jinja', '--reasoning-format'];
+    const unknown = [];
+    const dropFlags = new Set();
+    try {
+      const probe = spawnSync(binary, ['--help'], {
+        encoding: 'utf8',
+        timeout: 20000,
+        cwd: dir,
+        env: process.env,
+      });
+      const text = `${probe.stdout || ''}${probe.stderr || ''}`;
+      if (!text.trim()) return { unknown, dropFlags: [], probed: false };
+      // 质量门槛：只有确认这是真正的 help 列表才敢据此省略参数。
+      // 以前把任意 stderr（例如程序启动失败打的堆栈）也当成“支持项清单”，
+      // 结果把一个完全正常的 llama-server 的 --flash-attn / --jinja 全给删了。
+      const listed = wanted.filter((f) => text.includes(f));
+      // 有 help 抬头就算“这份清单是真的”；此时只要列出了一个我们要用的参数
+      // （说明后面的 key-value 表是完整的），就可以据此判断哪些不被支持。
+      const hasHelpHeader = /usage:|--help|llama\.cpp|Available arguments|-h,\s*--help/i.test(text);
+      if (!hasHelpHeader || !listed.length) return { unknown, dropFlags: [], probed: false };
+      for (const flag of wanted) {
+        if (!text.includes(flag)) {
+          unknown.push(flag);
+          dropFlags.add(flag);
+        }
+      }
+      return { unknown, dropFlags, probed: true };
+    } catch {
+      return { unknown, dropFlags: [], probed: false };
+    }
   }
 
   /**
