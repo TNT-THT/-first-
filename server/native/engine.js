@@ -33,6 +33,7 @@ import { readGgufBlockCount, readGgufMeta } from './gguf.js';
 import { findConverter, prepareConverter, runConvert } from './convert.js';
 import { findPythonRuntime, preparePythonRuntime, PythonProcess } from './python-runner.js';
 import { planPagefile, readMemoryBudget } from './sysmem.js';
+import { CPU_LEVELS, detectCpuLevel, parseCpuFeatures } from './cpu.js';
 
 const QUANT_CACHE_MS = 10 * 60 * 1000;
 
@@ -572,6 +573,8 @@ export class NativeEngine {
       // 运行库健康度：让界面能提前警告“这个 llama.cpp 在本机跑不起来 / 版本太旧”，
       // 而不是等用户点了加载、等半天、再看到一个看不懂的崩溃码。
       binaryHealth: this.binaryHealth || null,
+      // 本机 CPU 指令集（由 llama-server --version 自己报告，不查型号表）
+      cpu: this.cpuInfo || null,
       running: this.llama.status(),
       // GPU 卸载自动回退的说明（请求层数装不下时降到了多少层），界面据此提示用户
       loadNote: this.loadNote || null,
@@ -613,28 +616,48 @@ export class NativeEngine {
     this.binaryJob = { state: 'downloading', error: '', tag: wantTag };
     this.binaryJob.promise = (async () => {
       try {
-        const got = await downloadLlamaBinary({
-          dataDir: this.dataDir,
-          fetchImpl: this.fetchImpl,
-          variant: this.variant,
-          tag: wantTag,
-          onProgress: (p) => { this.binaryJob.progress = p; },
-        });
-        // 装完立刻做一次“能不能跑”的实测：文件存在不代表能启动。
-        // 这样在用户点加载之前就能知道这个构建在本机是否可用。
-        const probe = this.llama._probeRun(got.path, path.dirname(got.path));
+        // 装完必须实测能不能跑。旧版 llama.cpp 按指令集分包（avx512/avx2/avx/noavx），
+        // 挑错档位就是“非法指令”或直接崩；新版是单包（运行时按 CPU 分发 ggml-cpu-*.dll）。
+        // 无论哪种，都让 CPU 自己回答：跑不了就降一档重来，直到能跑或试完。
+        // 这样不需要任何 CPU 型号表 —— 换任何一台机器都适用。
+        const attempts = [];
+        let got = null;
+        let probe = null;
+        const levels = this.variant === 'cpu' && process.platform === 'win32' && process.arch === 'x64'
+          ? CPU_LEVELS
+          : [''];
+        for (const level of levels) {
+          const candidate = await downloadLlamaBinary({
+            dataDir: this.dataDir,
+            fetchImpl: this.fetchImpl,
+            variant: this.variant,
+            tag: wantTag,
+            cpuLevel: level || 'avx2',
+            onProgress: (p) => { this.binaryJob.progress = p; },
+          });
+          got = candidate;
+          probe = this.llama._probeRun(candidate.path, path.dirname(candidate.path));
+          attempts.push({ level: candidate.cpuLevel || level || 'cpu', asset: candidate.asset, ok: probe.ok !== false });
+          if (probe.ok !== false) break;
+          // 单包（新版）没有档位可降，实测失败就直接收手，不要反复下载同一个包
+          if (!candidate.cpuLevel || candidate.cpuLevel === 'cpu') break;
+          this.logger.warn?.(`[native] ${candidate.cpuLevel} 版在本机跑不了，自动降一档重试：${(probe.message || '').split('\n')[0]}`);
+        }
         this.binaryJob = {
           state: 'done',
           error: '',
-          tag: got.version || wantTag,
-          build: buildNumber(got.version || wantTag),
-          runnable: probe.ok !== false,
-          probeMessage: probe.ok === false ? probe.message : '',
+          tag: got?.version || wantTag,
+          build: buildNumber(got?.version || wantTag),
+          runnable: probe?.ok !== false,
+          probeMessage: probe?.ok === false ? probe.message : '',
+          // 实际装上的指令集档位 + 试过哪些：界面据此告诉用户“你的 CPU 用的是 avx2 版”
+          cpuLevel: got?.cpuLevel || '',
+          cpuAttempts: attempts,
         };
-        if (probe.ok === false) {
+        if (probe?.ok === false) {
           this.logger.warn?.(`[native] 新装的 llama.cpp 在本机启动不了：${probe.message.split('\n')[0]}`);
         }
-        return { path: got.path, source: 'downloaded', version: got.version || '' };
+        return { path: got.path, source: 'downloaded', version: got?.version || '', cpuLevel: got?.cpuLevel || '' };
       } catch (err) {
         this.binaryJob = { state: 'error', error: err.message, tag: wantTag };
         throw err;
@@ -681,6 +704,12 @@ export class NativeEngine {
       };
     }
     const probe = this.llama._probeRun(found.path, path.dirname(found.path));
+    // 顺便记下 CPU 指令集：新版的 --version 会打印 "CPU : AVX = 1 | AVX2 = 1 ..."。
+    // 读不到就保持 null（不猜、不编）。
+    if (probe.ok !== false) {
+      const feats = parseCpuFeatures(probe.output || probe.version || '');
+      if (feats) this.cpuInfo = feats;
+    }
     if (probe.ok === false) {
       // 文件在、但真的启动不了：这正是“系统不支持这个 llama 构建”的情形
       return {
@@ -700,6 +729,10 @@ export class NativeEngine {
       ok: !tooOld,
       build: build || null,
       version: probe.version || '',
+      // 这个构建用的是哪一档指令集 / 本机 CPU 支持什么：
+      // 老版按 avx512/avx2/avx/noavx 分包，挑错档位就跑不起来，所以让用户看得见。
+      cpuLevel: this.binaryJob?.cpuLevel || '',
+      cpu: this.cpuInfo || null,
       minBuild: minBuild || null,
       forArch: forArch || '',
       message: tooOld

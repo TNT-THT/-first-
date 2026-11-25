@@ -3726,7 +3726,15 @@ function renderNativePanel() {
       els.apiNativeBinaryStatus.textContent = `⚠ ${health.message} ${health.hint || ''}`.trim();
     } else if (nativeStatus.binaryReady) {
       const build = job?.build ? `，b${job.build}` : '';
-      els.apiNativeBinaryStatus.textContent = `llama.cpp 运行库已就绪（${{ env: '环境变量指定', bundled: '随包附带', path: '系统已安装', downloaded: '已下载到本机' }[nativeStatus.binarySource] || '可用'}${build}）。`;
+      // 老版 llama.cpp 按指令集分包（avx512/avx2/avx/noavx），挑错档位直接跑不起来。
+      // 把实际用的档位和本机 CPU 支持的档位都显示出来，用户才不会觉得“为什么别人能用我不行”。
+      const cpuLevel = nativeStatus.binaryHealth?.cpuLevel || job?.cpuLevel || '';
+      const cpu = nativeStatus.cpu || nativeStatus.binaryHealth?.cpu || null;
+      const cpuText = cpu
+        ? `；CPU 指令集：${[cpu.avx512 ? 'AVX-512' : '', cpu.avx2 ? 'AVX2' : '', cpu.avx ? 'AVX' : ''].filter(Boolean).join('/') || '基础'}` +
+          (cpuLevel && cpuLevel !== 'cpu' ? `，当前用 ${cpuLevel} 版` : '')
+        : (cpuLevel && cpuLevel !== 'cpu' ? `；当前用 ${cpuLevel} 版` : '');
+      els.apiNativeBinaryStatus.textContent = `llama.cpp 运行库已就绪（${{ env: '环境变量指定', bundled: '随包附带', path: '系统已安装', downloaded: '已下载到本机' }[nativeStatus.binarySource] || '可用'}${build}${cpuText}）。`;
     } else {
       els.apiNativeBinaryStatus.textContent = 'llama.cpp 运行库尚未准备：点下方按钮从官方 GitHub 下载（约几十 MB），或自行安装 llama.cpp 后设置环境变量 LLAMA_SERVER_BIN。';
     }

@@ -12,6 +12,7 @@ import { chmod, mkdir, readdir, rename, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { extractTarGz, extractZip } from './archive.js';
+import { CPU_LEVELS } from './cpu.js';
 
 // 单文件打包（SEA/CJS）里没有 import.meta.url，退回 __filename（普通路径不能 fileURLToPath）。
 const SERVER_DIR = import.meta.url && String(import.meta.url).startsWith('file:')
@@ -92,7 +93,7 @@ export function llamaBinaryName(platform = process.platform) {
  * 会先命中靠前的 `cudart-llama-…` 包，解压后当然找不到 llama-server，
  * 用户看到的是“压缩包里没有找到 llama-server”这种莫名其妙的话。
  */
-export function pickReleaseAsset(assets, { platform = process.platform, arch = process.arch, variant = 'cpu' } = {}) {
+export function pickReleaseAsset(assets, { platform = process.platform, arch = process.arch, variant = 'cpu', cpuLevel = '' } = {}) {
   const list = (assets || []).filter((a) => a && typeof a.name === 'string' && /^llama-/.test(a.name));
   const find = (re) => list.find((a) => re.test(a.name)) || null;
   const bits = arch === 'arm64' ? 'arm64' : 'x64';
@@ -103,8 +104,22 @@ export function pickReleaseAsset(assets, { platform = process.platform, arch = p
   if (platform === 'win32') {
     if (variant === 'cuda') hit = find(new RegExp(`bin-win-cuda-[\\d.]+-${archRe}\\.zip$`, 'i'));
     else if (variant === 'vulkan') hit = find(new RegExp(`bin-win-vulkan-${archRe}\\.zip$`, 'i'));
-    hit = hit || find(new RegExp(`bin-win-cpu-${bits}\\.zip$`, 'i'))
-      || find(new RegExp(`bin-win-.*-${bits}\\.zip$`, 'i'));
+    if (!hit) {
+      // 新版（约 b9000 之后）只发一个 bin-win-cpu-x64.zip，运行时再按 CPU 分发
+      hit = find(new RegExp(`bin-win-cpu-${bits}\\.zip$`, 'i'));
+    }
+    if (!hit && bits === 'x64') {
+      // 旧版按指令集分包：avx512 / avx2 / avx / noavx。
+      // 这里**必须**按 CPU 实际支持的档位挑，不能随便抓一个：
+      // avx512 包在老 CPU 上是“非法指令”，cuda 包在没有 N 卡的机器上直接崩。
+      // cpuLevel 由调用方实测得出（见 cpu.js），默认取最保险的 avx2（2013 年后的 x64 CPU 基本都支持）。
+      const want = CPU_LEVELS.includes(cpuLevel) ? cpuLevel : 'avx2';
+      for (const level of CPU_LEVELS.slice(CPU_LEVELS.indexOf(want))) {
+        hit = find(new RegExp(`bin-win-${level}-${bits}\\.zip$`, 'i'));
+        if (hit) break;
+      }
+    }
+    hit = hit || find(new RegExp(`bin-win-.*-${bits}\\.zip$`, 'i'));
   } else if (platform === 'darwin') {
     hit = find(new RegExp(`bin-macos-${bits}\\.tar\\.gz$`, 'i'));
   } else {
@@ -154,7 +169,14 @@ export function findLlamaBinary({ env = process.env, dataDir = '', platform = pr
 }
 
 /** 下载并解压 llama.cpp 官方 Release 到 <dataDir>/bin，返回二进制路径。 */
-export async function downloadLlamaBinary({ dataDir, fetchImpl = fetch, variant = 'cpu', onProgress } = {}) {
+/**
+ * 下载并安装 llama.cpp 运行库。
+ *
+ * 新版是单包（bin-win-cpu-x64），旧版按指令集分包。为了“任何 CPU 都能装上能用的版本”，
+ * 这里支持 cpuLevel 指定档位；装完由调用方实测能否运行，跑不了就降一档重来
+ * （avx512 → avx2 → avx → noavx）。这样不需要任何 CPU 型号表。
+ */
+export async function downloadLlamaBinary({ dataDir, fetchImpl = fetch, variant = 'cpu', tag = '', cpuLevel = '', onProgress } = {}) {
   if (!dataDir) throw new Error('未配置本机数据目录，无法下载 llama.cpp 运行库。');
   const relRes = await fetchImpl(LLAMA_RELEASE_API, {
     headers: { accept: 'application/vnd.github+json', 'user-agent': 'llm-host-skyblue' },
@@ -167,7 +189,7 @@ export async function downloadLlamaBinary({ dataDir, fetchImpl = fetch, variant 
       : '没有找到 llama.cpp 的 b 系列正式发布，请稍后重试或手动安装 llama.cpp。');
   }
   const assets = release.assets || [];
-  const asset = pickReleaseAsset(assets, { variant });
+  const asset = pickReleaseAsset(assets, { variant, cpuLevel: cpuLevel || 'avx2' });
   if (!asset) {
     throw new Error(`llama.cpp 最新版（${release.tag_name || '未知版本'}）没有当前平台（${process.platform}-${process.arch}）的预编译包，请手动安装 llama.cpp 并设置环境变量 LLAMA_SERVER_BIN。`);
   }
@@ -235,7 +257,15 @@ export async function downloadLlamaBinary({ dataDir, fetchImpl = fetch, variant 
     }
     const binary = path.join(binDir, llamaBinaryName());
     if (process.platform !== 'win32') await chmod(binary, 0o755).catch(() => {});
-    return { path: binary, version: release.tag_name || '', asset: asset.name, cudart: cudart?.name || '' };
+    return {
+      path: binary,
+      version: release.tag_name || '',
+      asset: asset.name,
+      cudart: cudart?.name || '',
+      // 从资产名读出实际装的指令集档位（旧版分包时才有），供界面显示
+      cpuLevel: (asset.name.match(/-(avx512|avx2|avx|noavx)-/i) || [])[1]?.toLowerCase()
+        || (asset.name.includes('bin-win-cpu') ? 'cpu' : ''),
+    };
   } finally {
     await rm(staging, { recursive: true, force: true }).catch(() => {});
   }
@@ -570,6 +600,8 @@ export class LlamaProcess {
       code: probe.status,
       silent: !out.trim(),
       version: versionLine.trim().slice(0, 120),
+      // 完整输出留给解析 CPU 特性行（新版会打印 "CPU : AVX = 1 | AVX2 = 1 ..."）
+      output: out.slice(0, 4000),
     };
     if (result.ok) return result;
     // 退出码归一化：Windows 崩溃码在 Node 里可能是负数或大整数
