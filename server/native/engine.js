@@ -2008,7 +2008,7 @@ export class NativeEngine {
     }
     const summary = totalGB > 0 ? parts.join('') : `这份权重约需 ${neededGB} GB 内存（含上下文 ${ctx} 的 KV 缓存）。`;
     // 真的要“拿硬盘顶”时到底该开多大页面文件：给出具体数字，用户才能照着做
-    const pagefilePlan = totalGB > 0 ? planPagefile({ neededGB, totalGB, pagefileGB }) : null;
+    const pagefilePlan = totalGB > 0 ? planPagefile({ neededGB, totalGB, pagefileGB, commitLimitGB }) : null;
     return {
       neededGB,
       weightsGB: round(weightsGB),
