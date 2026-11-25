@@ -3714,15 +3714,31 @@ function renderNativePanel() {
   if (els.apiNativeAdminGate) els.apiNativeAdminGate.hidden = admin;
   const running = nativeStatus.running || {};
   if (els.apiNativeBinaryStatus) {
-    els.apiNativeBinaryStatus.textContent = nativeStatus.binaryReady
-      ? `llama.cpp 运行库已就绪（${{ env: '环境变量指定', bundled: '随包附带', path: '系统已安装', downloaded: '已下载到本机' }[nativeStatus.binarySource] || '可用'}）。`
-      : nativeStatus.binaryJob?.state === 'downloading'
-        ? '正在下载 llama.cpp 运行库…'
-        : 'llama.cpp 运行库尚未准备：点下方按钮从官方 GitHub 下载（约几十 MB），或自行安装 llama.cpp 后设置环境变量 LLAMA_SERVER_BIN。';
+    const health = nativeStatus.binaryHealth;
+    const job = nativeStatus.binaryJob;
+    if (job?.state === 'downloading') {
+      els.apiNativeBinaryStatus.textContent = '正在下载 llama.cpp 运行库…';
+    } else if (health?.state === 'unrunnable') {
+      // 文件在、但本机启动不了（缺运行库 / 构建对系统太新）：必须先说清，
+      // 否则用户点加载只会拿到一个崩溃码。
+      els.apiNativeBinaryStatus.textContent = `⚠ ${health.message}${health.hint ? ` ${health.hint}` : ''}`;
+    } else if (health?.state === 'tooOld') {
+      els.apiNativeBinaryStatus.textContent = `⚠ ${health.message} ${health.hint || ''}`.trim();
+    } else if (nativeStatus.binaryReady) {
+      const build = job?.build ? `，b${job.build}` : '';
+      els.apiNativeBinaryStatus.textContent = `llama.cpp 运行库已就绪（${{ env: '环境变量指定', bundled: '随包附带', path: '系统已安装', downloaded: '已下载到本机' }[nativeStatus.binarySource] || '可用'}${build}）。`;
+    } else {
+      els.apiNativeBinaryStatus.textContent = 'llama.cpp 运行库尚未准备：点下方按钮从官方 GitHub 下载（约几十 MB），或自行安装 llama.cpp 后设置环境变量 LLAMA_SERVER_BIN。';
+    }
   }
   if (els.apiNativeBinaryBtn) {
-    els.apiNativeBinaryBtn.disabled = !admin || nativeStatus.binaryReady;
-    els.apiNativeBinaryBtn.textContent = nativeStatus.binaryReady ? '运行库已就绪' : '准备 llama.cpp 运行库';
+    // 以前“已就绪”就禁用按钮：版本太旧时用户根本点不动，只能干看着。
+    // 现在只要健康度有问题，按钮保持可用，点一下就是“重新下载/更新”。
+    const unhealthy = !!nativeStatus.binaryHealth && nativeStatus.binaryHealth.ok === false;
+    els.apiNativeBinaryBtn.disabled = !admin || (nativeStatus.binaryReady && !unhealthy);
+    els.apiNativeBinaryBtn.textContent = !nativeStatus.binaryReady
+      ? '准备 llama.cpp 运行库'
+      : (unhealthy ? '更新 llama.cpp 运行库' : '运行库已就绪');
   }
   if (els.apiNativeUnloadBtn) {
     els.apiNativeUnloadBtn.disabled = !admin || !running.modelId;
@@ -4774,7 +4790,11 @@ els.localApiCopy?.addEventListener('click', () => copyPlainText(els.localApiEndp
 els.apiKeyAdminLogout.addEventListener('click', lockApiKeyManager);
 els.apiNativeBinaryBtn?.addEventListener('click', () => {
   void nativeAction(async () => {
-    await nativeAdminRequest('/api/native/binary', { token: state.apiKeyAdminToken });
+    // 健康度有问题（版本太旧 / 本机跑不起来）时必须带 force 才会真的重新下载：
+    // 服务端在已有二进制时默认直接返回，"准备运行库"会变成一个看起来毫无反应的按钮。
+    const unhealthy = !!nativeStatus?.binaryHealth && nativeStatus.binaryHealth.ok === false;
+    const body = unhealthy && nativeStatus?.binaryReady ? { force: true } : undefined;
+    await nativeAdminRequest('/api/native/binary', { token: state.apiKeyAdminToken, ...(body ? { body } : {}) });
   });
 });
 els.apiNativeUnloadBtn?.addEventListener('click', () => {

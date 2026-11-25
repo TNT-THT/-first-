@@ -25,7 +25,9 @@ import {
 } from './catalog.js';
 import { detectFormats, detectVariants, hfModelId, optionsForFormats, routeForFormats, safeDirName } from './formats.js';
 import { downloadFile, fetchModelInfo, fetchRepoFiles, freeDiskBytes, resolveFileUrl, searchModels } from './hf.js';
-import { downloadLlamaBinary, findLlamaBinary, LlamaProcess } from './llama.js';
+import {
+  buildNumber, downloadLlamaBinary, findLlamaBinary, LlamaProcess, minBuildForArch, matchUnsupportedArch,
+} from './llama.js';
 import { extractZip } from './archive.js';
 import { readGgufBlockCount, readGgufMeta } from './gguf.js';
 import { findConverter, prepareConverter, runConvert } from './convert.js';
@@ -36,6 +38,10 @@ const QUANT_CACHE_MS = 10 * 60 * 1000;
 
 /** 失败定性的统一文案：内外层共用，避免两处各写一套导致结论互相矛盾。 */
 const DIAG_TITLES = {
+  architecture: {
+    title: '这个 llama.cpp 版本不认识该模型的架构',
+    advice: '模型文件是好的，是 llama-server 太旧。点“准备运行库”更新到更新的版本后重试。',
+  },
   memory: { title: '内存/显存不足', advice: '换更小的量化，或关掉其它占用内存/显存的程序后重试。' },
   runtime: {
     title: '运行库或程序本身有问题',
@@ -553,7 +559,19 @@ export class NativeEngine {
       enabled: true,
       binaryReady: !!binary,
       binarySource: binary?.source || '',
-      binaryJob: this.binaryJob ? { state: this.binaryJob.state, error: this.binaryJob.error || '' } : null,
+      binaryJob: this.binaryJob
+        ? {
+            state: this.binaryJob.state,
+            error: this.binaryJob.error || '',
+            tag: this.binaryJob.tag || '',
+            build: this.binaryJob.build || null,
+            runnable: this.binaryJob.runnable ?? null,
+            probeMessage: this.binaryJob.probeMessage || '',
+          }
+        : null,
+      // 运行库健康度：让界面能提前警告“这个 llama.cpp 在本机跑不起来 / 版本太旧”，
+      // 而不是等用户点了加载、等半天、再看到一个看不懂的崩溃码。
+      binaryHealth: this.binaryHealth || null,
       running: this.llama.status(),
       // GPU 卸载自动回退的说明（请求层数装不下时降到了多少层），界面据此提示用户
       loadNote: this.loadNote || null,
@@ -575,26 +593,120 @@ export class NativeEngine {
   }
 
   /** 管理员：准备 llama.cpp 运行库（已存在则直接返回，否则下载）。 */
-  async ensureBinary() {
-    const found = findLlamaBinary({ env: this.env, dataDir: this.dataDir });
-    if (found) return found;
+  /**
+   * 准备 llama.cpp 运行库。
+   *
+   * @param {object} [opts]
+   * @param {boolean} [opts.force] 强制重新下载。
+   *   以前这里是「找到就返回」，导致“准备运行库”在已有二进制时变成空操作 ——
+   *   用户遇到版本太旧（不认新的模型架构）时，点多少次都还是那个旧版本。
+   * @param {string} [opts.tag] 指定要装的构建号（如 b8421）。用于锁定已知可用的版本；
+   *   新版在老系统上静默崩溃时，这是唯一能让软件跑起来的办法。
+   */
+  async ensureBinary({ force = false, tag = '' } = {}) {
+    const wantTag = String(tag || this.env.OJ_LLAMA_TAG || '').trim();
+    if (!force) {
+      const found = findLlamaBinary({ env: this.env, dataDir: this.dataDir });
+      if (found) return found;
+    }
     if (this.binaryJob?.state === 'downloading') return this.binaryJob.promise;
-    this.binaryJob = { state: 'downloading', error: '' };
+    this.binaryJob = { state: 'downloading', error: '', tag: wantTag };
     this.binaryJob.promise = (async () => {
       try {
         const got = await downloadLlamaBinary({
           dataDir: this.dataDir,
           fetchImpl: this.fetchImpl,
           variant: this.variant,
+          tag: wantTag,
+          onProgress: (p) => { this.binaryJob.progress = p; },
         });
-        this.binaryJob = { state: 'done', error: '' };
-        return { path: got.path, source: 'downloaded' };
+        // 装完立刻做一次“能不能跑”的实测：文件存在不代表能启动。
+        // 这样在用户点加载之前就能知道这个构建在本机是否可用。
+        const probe = this.llama._probeRun(got.path, path.dirname(got.path));
+        this.binaryJob = {
+          state: 'done',
+          error: '',
+          tag: got.version || wantTag,
+          build: buildNumber(got.version || wantTag),
+          runnable: probe.ok !== false,
+          probeMessage: probe.ok === false ? probe.message : '',
+        };
+        if (probe.ok === false) {
+          this.logger.warn?.(`[native] 新装的 llama.cpp 在本机启动不了：${probe.message.split('\n')[0]}`);
+        }
+        return { path: got.path, source: 'downloaded', version: got.version || '' };
       } catch (err) {
-        this.binaryJob = { state: 'error', error: err.message };
+        this.binaryJob = { state: 'error', error: err.message, tag: wantTag };
         throw err;
       }
     })();
     return this.binaryJob.promise;
+  }
+
+  /**
+   * 读出这档量化的模型架构（如 qwen35moe / llama / qwen2）。
+   * 读不到就返回空字符串：架构未知时不能拦加载，只能交给 llama.cpp 自己判断。
+   */
+  async _modelArch(id, quant) {
+    try {
+      const manifest = await this.readManifest(id, quant);
+      const entry = pickEntryFile(manifest.files);
+      if (!entry) return '';
+      const file = path.join(this.modelDir(id, quant), entry.path);
+      if (!existsSync(file)) return '';
+      const meta = await readGgufMeta(file);
+      return String(meta?.architecture || meta?.general?.architecture || '').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 评估当前 llama.cpp 运行库在本机是否可用，并给出可执行的建议。
+   *
+   * 回答两个用户真实问过的问题：
+   *   ①“我的系统支持不了最新的 llama 吗？”—— 实测一次 --version，零输出崩溃就是不支持；
+   *   ②“当前的 llama 是不是太旧？”—— 读它的构建号，与已知需要的最低版本比较。
+   *
+   * @param {object} [opts]
+   * @param {string} [opts.forArch] 目标模型架构（如 qwen35moe），用来判断“够不够新”
+   */
+  async checkBinaryHealth({ forArch = '' } = {}) {
+    const found = findLlamaBinary({ env: this.env, dataDir: this.dataDir });
+    if (!found) {
+      return {
+        state: 'missing',
+        ok: false,
+        message: '还没有安装 llama.cpp 运行库。点“准备运行库”下载（纯 CPU 版约 30–50 MB）。',
+      };
+    }
+    const probe = this.llama._probeRun(found.path, path.dirname(found.path));
+    if (probe.ok === false) {
+      // 文件在、但真的启动不了：这正是“系统不支持这个 llama 构建”的情形
+      return {
+        state: 'unrunnable',
+        ok: false,
+        build: null,
+        message: probe.message,
+        hint: '可以把 OJ_LLAMA_TAG 设成一个较早的构建号（例如 b4000）后点“准备运行库”强制重装；'
+          + '较早的构建对老系统兼容性更好。',
+      };
+    }
+    const build = buildNumber(probe.version);
+    const minBuild = forArch ? minBuildForArch(forArch) : 0;
+    const tooOld = !!(minBuild && build && build < minBuild);
+    return {
+      state: tooOld ? 'tooOld' : 'ok',
+      ok: !tooOld,
+      build: build || null,
+      version: probe.version || '',
+      minBuild: minBuild || null,
+      forArch: forArch || '',
+      message: tooOld
+        ? `当前 llama.cpp 是 b${build}，但 ${forArch} 架构需要 b${minBuild} 或更新，加载这个模型会失败。`
+        : (build ? `llama.cpp 运行库正常（b${build}）。` : 'llama.cpp 运行库可以启动。'),
+      hint: tooOld ? '点“准备运行库”更新 llama.cpp 后重试。' : '',
+    };
   }
 
   /** 给搜索结果粗判定格式（标签/库名/仓库名级别，详情时再按真实文件确认）。 */
@@ -1733,6 +1845,24 @@ export class NativeEngine {
         { status: 503 },
       );
     }
+    // 架构预检：这个权重需要更新的 llama.cpp 时，在启动进程之前就说清楚。
+    // 否则 llama-server 会先跑起来、读完整份元数据、再报 "unknown model architecture"，
+    // 用户等半天只看到一个被包装成“内存不足”的失败。
+    const wantArch = await this._modelArch(id, pick.quant);
+    if (wantArch) {
+      const health = await this.checkBinaryHealth({ forArch: wantArch });
+      this.binaryHealth = health;
+      if (health.state === 'tooOld') {
+        throw Object.assign(new Error(health.message + (health.hint ? `\n${health.hint}` : '')), {
+          status: 409,
+          loadFailed: true,
+          diag: 'architecture',
+          arch: wantArch,
+          minBuild: health.minBuild,
+          currentBuild: health.build,
+        });
+      }
+    }
     const manifest = await this.readManifest(id, pick.quant);
     // 分片模型的入口文件必须是第 1 个分片（`...-00001-of-00005.gguf`）。
     // 以前按字典序取第一个：`-00002-of-` 排在 `1-of-` 前面，或者按量化分子目录
@@ -2118,6 +2248,10 @@ export class NativeEngine {
    * 属于另一类故障（见 _diagnoseFailure）。
    */
   _looksLikeMemoryFailure(err) {
+    // 架构不支持不是内存问题：日志里的 "failed to load model" 会命中下面的内存正则，
+    // 但换层数/上下文/关 mmap 都不可能让不认识的架构变得认识 —— 让它走回退阶梯
+    // 只会让用户多等 7 轮，最后还是那句错的“内存不足”。
+    if (matchUnsupportedArch((this.llama.logTail || []).join('\n'))) return false;
     // 证据只认 llama.cpp 自己的输出（logTail）与未包装的原始错误。
     // 绝不能把我们自己生成的解释文本（例如“这不是内存不足”）也算成证据——
     // 那样会自我命中原生提示里的“内存不足”四个字，把结论判反。
@@ -2144,6 +2278,23 @@ export class NativeEngine {
       return { kind: err.diag, ...DIAG_TITLES[err.diag] };
     }
     const text = `${err?.message || ''}\n${(this.llama.logTail || []).join('\n')}`;
+    // 架构不支持要排在内存之前：日志里那句 "failed to load model" 同时会命中内存正则，
+    // 先判内存就会把“版本太旧”说成“内存不足”，用户于是去换量化/调页面文件，全走错。
+    const arch = matchUnsupportedArch(text);
+    if (arch) {
+      const minBuild = minBuildForArch(arch);
+      const curBuild = buildNumber(this.binaryJob?.tag || '');
+      return {
+        kind: 'architecture',
+        title: `这个 llama.cpp 版本不支持 ${arch} 架构`,
+        advice: `模型文件本身没有问题，是 llama-server 太旧${minBuild ? `（需要 b${minBuild} 或更新）` : ''}`
+          + `${curBuild && minBuild && curBuild < minBuild ? `；当前是 b${curBuild}` : ''}。`
+          + '点“准备运行库”更新 llama.cpp 后重试。',
+        arch,
+        minBuild: minBuild || null,
+        currentBuild: curBuild || null,
+      };
+    }
     const silent = !!this.llama.exitInfo?.silent || /一句话都没输出/.test(err?.message || '');
     const missingDll = /missing|not found|cannot open shared object|找不到|\b0xc0000135\b/i.test(text);
     const badFlag = /invalid argument|unrecognized|unknown argument|invalid option|error: (unrecognized|invalid)/i.test(text);
@@ -2331,6 +2482,8 @@ export class NativeEngine {
         const pf = mem?.pagefilePlan;
         const pfTip = pf && !pf.enough ? `③ 或把页面文件调到约 ${pf.requiredPagefileGB} GB（能用硬盘顶住不崩，但会很慢）。` : '';
         const tips = {
+          architecture: '① 点“准备运行库”把 llama.cpp 更新到更新版本（内置目录里的模型大多早已支持）；'
+            + '② 若已是最新版仍不支持，改用一个架构更成熟的模型（如 Qwen2.5 / Qwen3 系列）。',
           memory: `① 在“本机大模型”里换更小的量化（如 Q4_K_M → Q2_K）；② 关闭其它占用内存的程序后重试。${pfTip}`,
           runtime: '① 点“准备运行库”重装 llama.cpp 运行库；② 若装的是 CUDA/Vulkan 版，把 OJ_LLAMA_VARIANT 设为 cpu；③ 确认已安装 VC++ 运行库。',
           corrupt: '① 删除这一档量化后重新下载（会断点续传）；② 再点加载。',
