@@ -70,6 +70,21 @@ jobs:
           $ok = Test-OjEnvironment
           if ($ok -ne $true) { throw 'Test-OjEnvironment 在不该阻塞的系统上返回了 false' }
           Write-Host 'Test-OjEnvironment 行为正确' -ForegroundColor Green
+      - name: 记录失败原因（调试用）
+        if: failure()
+        shell: powershell
+        run: |
+          $o = @("FAILED STEP FOLLOWS")
+          $o += "NAME=$((Get-OjWindowsInfo).Name)"
+          $o | Out-File -Encoding utf8 r.txt
+      - name: push
+        if: failure()
+        shell: bash
+        run: |
+          git config user.email a@b.c; git config user.name ci
+          git checkout -b "dbg-${{ github.run_id }}" 2>/dev/null || true
+          git add -f r.txt || true; git commit -m r || true
+          git push origin "HEAD:dbg-${{ github.run_id }}" --force || true
       - name: 验证打包白名单真的把 check-env.ps1 装进包里
         shell: bash
         run: |
