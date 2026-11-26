@@ -1,0 +1,42 @@
+name: WC4
+on:
+  push:
+    branches: ['arena/**']
+permissions:
+  contents: write
+jobs:
+  t:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: exact
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = @()
+          try {
+            . .\scripts\launcher\check-env.ps1
+            $log += "STEP1 dot-source ok"
+            $w = Get-OjWindowsInfo
+            $log += "STEP2 name=$($w.Name) rel=[$($w.Release)] b=$($w.Build)"
+            if ($w.Build -lt 10240) { throw "runner 版本异常: $($w.Build)" }
+            if ($w.Name -ne 'Windows 10' -and $w.Name -ne 'Windows 11') { throw "版本识别错误: $($w.Name)" }
+            $log += "STEP3 name check ok"
+            if ($w.Name -eq 'Windows 11' -and $w.Release -ne '') { throw "Win11 release should be empty but is [$($w.Release)]" }
+            $log += "STEP4 release check ok"
+            $ok = Test-OjEnvironment
+            $log += "STEP5 ok=$ok type=$($ok.GetType().Name)"
+            if ($ok -ne $true) { throw "blocked unexpectedly" }
+            $log += "ALL PASS"
+          } catch {
+            $log += "FAILED: $($_.Exception.Message)"
+            $log += "AT LINE: $($_.InvocationInfo.ScriptLineNumber) IN $($_.InvocationInfo.ScriptName)"
+          }
+          $log | Out-File -Encoding utf8 r.txt
+      - if: always()
+        shell: bash
+        run: |
+          git config user.email a@b.c; git config user.name ci
+          git checkout -b "wc4-${{ github.run_id }}" 2>/dev/null || true
+          git add -f r.txt; git commit -m r || true
+          git push origin "HEAD:wc4-${{ github.run_id }}" --force || true
