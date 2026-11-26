@@ -12,23 +12,26 @@ jobs:
       - name: probe
         shell: powershell
         run: |
-          . .\scripts\launcher\check-env.ps1
-          $w = Get-OjWindowsInfo
-          $lines = @()
-          $lines += "OSVERSION=$([System.Environment]::OSVersion.Version)"
-          $lines += "NAME=$($w.Name) RELEASE=$($w.Release) BUILD=$($w.Build)"
-          $r = $null; $err = 'none'
-          try { $r = Test-OjEnvironment } catch { $err = $_.Exception.Message }
-          $lines += "RETURN=$r"
-          $lines += "ERR=$err"
-          $lines | Out-File -Encoding utf8 probe-result.txt
+          $out = @()
+          try {
+            . .\scripts\launcher\check-env.ps1
+            $out += "DOTSOURCE_OK"
+          } catch {
+            $out += "DOTSOURCE_FAIL: $($_.Exception.Message)"
+            $out += "AT: $($_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)"
+          }
+          if (Get-Command Get-OjWindowsInfo -ErrorAction SilentlyContinue) {
+            $out += "FUNC_EXISTS"
+            try { $w = Get-OjWindowsInfo; $out += "INFO=$($w.Name)|$($w.Release)|$($w.Build)" }
+            catch { $out += "INFO_FAIL: $($_.Exception.Message) AT $($_.InvocationInfo.ScriptLineNumber)" }
+          } else { $out += "FUNC_MISSING" }
+          $out | Out-File -Encoding utf8 probe-result.txt
       - name: push result
+        if: always()
         shell: bash
         run: |
-          set -e
-          git config user.email "ci@example.com"
-          git config user.name "ci"
-          git checkout -b ci-probe-${{ github.run_id }} || true
-          git add probe-result.txt
-          git commit -m "win probe result" || echo "no change"
-          git push origin HEAD:ci-probe-${{ github.run_id }} --force
+          git config user.email "ci@example.com"; git config user.name "ci"
+          git checkout -b "ci-probe-${{ github.run_id }}" 2>/dev/null || true
+          git add -f probe-result.txt
+          git commit -m "probe" || echo none
+          git push origin "HEAD:ci-probe-${{ github.run_id }}" --force
