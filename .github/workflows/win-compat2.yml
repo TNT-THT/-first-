@@ -1,0 +1,20 @@
+name: WinCompat2
+on:
+  push:
+    branches: ['arena/**']
+jobs:
+  t:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: dump
+        shell: powershell
+        run: |
+          . .\scripts\launcher\check-env.ps1
+          $w = Get-OjWindowsInfo
+          Write-Output "OSVERSION=$([System.Environment]::OSVersion.Version)"
+          Write-Output "NAME=$($w.Name) RELEASE=$($w.Release) BUILD=$($w.Build)"
+          $r = $null
+          try { $r = Test-OjEnvironment } catch { Write-Output "THROW: $($_.Exception.Message)" }
+          Write-Output "RETURN=$r"
+          Write-Output "PWDIR=$PSScriptRoot"
