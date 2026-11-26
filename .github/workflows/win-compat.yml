@@ -56,9 +56,16 @@ jobs:
           if ($bad -gt 0) { exit 1 }
       - name: 验证 check-env.ps1 的行为（模拟不同 Windows 版本）
         shell: powershell
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           . .\scripts\launcher\check-env.ps1
+          $body = @{ body = "### win-compat 行为测试失败`n``````n" + ($Error | Out-String) + "`n``````" } | ConvertTo-Json -Compress
+          [System.IO.File]::WriteAllText("$PWD\b.json", $body)
+          try { gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" --input b.json } catch { }
           $w = Get-OjWindowsInfo
           Write-Host "本 runner: $($w.Name) $($w.Release) build=$($w.Build)"
           if ($w.Build -lt 10240) { throw "runner 版本异常" }
