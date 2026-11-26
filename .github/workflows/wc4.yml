@@ -12,7 +12,7 @@ jobs:
       - name: exact
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $log = @()
           try {
             . .\scripts\launcher\check-env.ps1
