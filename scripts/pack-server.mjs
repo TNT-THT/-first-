@@ -60,6 +60,8 @@ export async function packServer({ projectRoot = root } = {}) {
     { name: runtime.name, data: runtime.data, mode: runtime.mode },
     { name: 'start-server.bat', data: readFileSync(join(projectRoot, 'scripts', 'launcher-server', 'start-server.bat')) },
     { name: 'serve-server.ps1', data: readFileSync(join(projectRoot, 'scripts', 'launcher-server', 'serve-server.ps1')) },
+    // 环境检查脚本（serve-server.ps1 会 dot-source 它）
+    { name: 'check-env.ps1', data: readFileSync(join(projectRoot, 'scripts', 'launcher', 'check-env.ps1')) },
     { name: '服务器使用说明.txt', data: readFileSync(join(projectRoot, 'scripts', 'launcher-server', '服务器使用说明.txt')) },
     {
       name: 'server.env.example',

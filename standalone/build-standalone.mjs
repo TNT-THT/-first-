@@ -180,7 +180,24 @@ export async function fetchWithRetry(url, {
       await sleep(wait);
     }
     try {
-      const res = await fetchImpl(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+      // AbortSignal.timeout 需要 Node 17.3+。构建机上通常够新，但有人用旧 Node 跑
+      // 打包脚本时它会直接是 undefined → TypeError，报错信息完全对不上真正原因。
+      // 拿不到就退回自己造的 AbortController + 定时器（Node 15+ 都支持）。
+      let signal;
+      let timer;
+      if (typeof AbortSignal?.timeout === 'function') {
+        signal = AbortSignal.timeout(timeoutMs);
+      } else {
+        const ac = new AbortController();
+        signal = ac.signal;
+        timer = setTimeout(() => ac.abort(new Error(`请求超时（${timeoutMs} ms）`)), timeoutMs);
+      }
+      let res;
+      try {
+        res = await fetchImpl(url, { headers, signal });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
       // 5xx / 429 属于“值得再试一次”；4xx 重试也没用，直接抛出
       if (!res.ok && (res.status >= 500 || res.status === 429)) {
         lastErr = new Error(`HTTP ${res.status}`);
