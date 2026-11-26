@@ -2,6 +2,10 @@
 # 只监听 127.0.0.1（仅本机可访问），找到空闲端口后自动打开浏览器。
 # 关闭本窗口即停止服务。
 $ErrorActionPreference = 'Stop'
+# 环境检查：系统版本过低时先说清楚原因，而不是让用户对着白屏猜。
+. (Join-Path $PSScriptRoot 'check-env.ps1')
+if (-not (Test-OjEnvironment)) { exit 1 }
+
 $root = Join-Path $PSScriptRoot 'web\dist'
 $rootFull = [System.IO.Path]::GetFullPath($root)
 

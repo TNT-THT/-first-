@@ -1,0 +1,81 @@
+# Windows 兼容性验证：在真实 Windows 环境里解析启动脚本。
+#
+# 沙箱是 Linux，没有 PowerShell，只能做静态检查（括号配平、BOM、换行符）。
+# 但"语法正确"和"PS 5.1 能解析"是两件事——PS 5.1 不支持 ??、?.、ForEach-Object -Parallel
+# 等新版语法，静态检查看不出来。所以这里用 Windows 自带的 PowerShell 5.1 真正解析一遍。
+name: Windows compat
+
+on:
+  push:
+    branches: ['arena/**', main]
+    paths:
+      - 'scripts/launcher/**'
+      - 'scripts/launcher-server/**'
+      - 'scripts/pack-*.mjs'
+      - 'scripts/site-files.mjs'
+      - 'web/index.html'
+      - 'test/windows-legacy-compat.test.js'
+      - '.github/workflows/win-compat.yml'
+  pull_request:
+    paths:
+      - 'scripts/launcher/**'
+      - 'scripts/launcher-server/**'
+
+jobs:
+  parse:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 用 Windows PowerShell 5.1 解析所有启动脚本
+        shell: powershell   # 明确用 5.1，不是 pwsh 7
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bad = 0
+          $files = @(
+            'scripts\launcher\check-env.ps1',
+            'scripts\launcher\serve-api.ps1',
+            'scripts\launcher\serve-site.ps1',
+            'scripts\launcher-server\serve-server.ps1'
+          )
+          foreach ($f in $files) {
+            $errors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f).Path, [ref]$tokens, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              Write-Host "FAIL $f" -ForegroundColor Red
+              foreach ($e in $errors) { Write-Host ("  line {0}: {1}" -f $e.Extent.StartLineNumber, $e.Message) }
+              $bad++
+            } else {
+              Write-Host "OK   $f" -ForegroundColor Green
+            }
+          }
+          if ($bad -gt 0) { exit 1 }
+      - name: 验证 check-env.ps1 的行为（模拟不同 Windows 版本）
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\scripts\launcher\check-env.ps1
+          $w = Get-OjWindowsInfo
+          Write-Host "本 runner: $($w.Name) $($w.Release) build=$($w.Build)"
+          if ($w.Build -lt 10240) { throw "runner 版本异常" }
+          if ($w.Name -ne 'Windows 10' -and $w.Name -ne 'Windows 11') { throw "版本识别错误: $($w.Name)" }
+          # 真实环境下 Test-OjEnvironment 不应阻塞（runner 是受支持系统）
+          if (-not (Test-OjEnvironment)) { throw 'Test-OjEnvironment 在不该阻塞的系统上返回了 false' }
+          Write-Host 'Test-OjEnvironment 行为正确' -ForegroundColor Green
+      - name: 验证打包白名单真的把 check-env.ps1 装进包里
+        shell: bash
+        run: |
+          node -e "
+          import('./scripts/site-files.mjs').then(m => {
+            const names = m.LAUNCHER_FILES.map(f => f.from);
+            if (!names.includes('check-env.ps1')) {
+              console.error('✗ LAUNCHER_FILES 缺少 check-env.ps1');
+              process.exit(1);
+            }
+            console.log('✓ 白名单包含 check-env.ps1:', names.join(', '));
+          });
+          "

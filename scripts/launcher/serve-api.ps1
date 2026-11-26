@@ -3,6 +3,10 @@
 # 内置运行时缺失时回退到系统安装的 Node.js；都没有时才打开 Node 下载页面。
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
+# 环境检查：系统版本过低/页面文件缺失时先说清楚原因，而不是让程序莫名其妙起不来。
+. (Join-Path $PSScriptRoot 'check-env.ps1')
+if (-not (Test-OjEnvironment -ForBigModel)) { exit 1 }
+
 $env:OJ_LOCAL_PREBUILT = '1'
 
 $bundledNode = Join-Path $PSScriptRoot 'runtime\node-win-x64.exe'

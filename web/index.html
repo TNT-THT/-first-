@@ -568,6 +568,46 @@
         </section>
       </div>
     </dialog>
+    <!--
+      浏览器兼容性兜底提示。
+      前端构建目标是 ES2020（可选链、空值合并），旧版 Windows 10 自带 IE11 /
+      早期 Edge 不支持 <script type="module">，表现是**整页白屏、没有任何报错**——
+      用户完全不知道发生了什么。这里用 nomodule（只有不支持 module 的浏览器才执行）
+      把"为什么打不开"直接写在页面上。
+      注意：这段脚本必须是 ES5 语法，否则旧浏览器解析时就会抛错，提示也显示不出来。
+    -->
+    <div id="ojOldBrowser" style="display:none;padding:24px;font-family:system-ui,'Microsoft YaHei',sans-serif;line-height:1.8;max-width:720px;margin:0 auto;">
+      <h2 style="margin:0 0 12px;">需要更新浏览器</h2>
+      <p style="margin:0 0 12px;">这个网页用到了新版浏览器才支持的功能，当前浏览器打不开。软件本身没问题，换成新版浏览器即可。</p>
+      <p style="margin:0 0 8px;"><strong>请安装下面任意一个（都免费）：</strong></p>
+      <ul style="margin:0 0 12px;padding-left:22px;">
+        <li>Google Chrome — <a href="https://www.google.cn/chrome/">下载</a></li>
+        <li>Microsoft Edge（新版）— <a href="https://www.microsoft.com/edge">下载</a></li>
+        <li>Mozilla Firefox — <a href="https://www.mozilla.org/zh-CN/firefox/">下载</a></li>
+      </ul>
+      <p style="margin:0 0 8px;" id="ojOldBrowserVer"></p>
+      <p style="margin:0;color:#666;font-size:14px;">提示：如果这是 Windows 10 早期版本（1507~1809），自带的 IE11 长期未更新，建议同时把系统更新到较新版本。</p>
+    </div>
+    <script nomodule>
+      (function () {
+        var el = document.getElementById('ojOldBrowser');
+        if (!el) return;
+        el.style.display = 'block';
+        // 尽量把用户的浏览器/系统版本写出来，方便反馈问题时说明情况
+        try {
+          var ua = navigator.userAgent || '';
+          var m = /MSIE (\d+)|\(Windows[^;)]*/.exec(ua);
+          var ver = /Trident\/(\d+)/.test(ua) ? 'IE ' + (/MSIE (\d+)/.exec(ua) || [])[1]
+            : (/Edge\/(\d+)/.test(ua) ? 'Edge ' + (/Edge\/(\d+)/.exec(ua) || [])[1] : '');
+          var win = /Windows NT ([\d.]+)/.exec(ua);
+          var parts = [];
+          if (ver) parts.push('当前浏览器：' + ver);
+          if (win) parts.push('系统内核：Windows NT ' + win[1]);
+          if (parts.length) document.getElementById('ojOldBrowserVer').innerHTML =
+            '<strong>' + parts.join('　') + '</strong>';
+        } catch (e) { /* 老浏览器上取不到就算了，不能因为这个把整段挂掉 */ }
+      })();
+    </script>
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

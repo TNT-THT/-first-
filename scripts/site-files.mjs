@@ -41,6 +41,9 @@ export const LAUNCHER_FILES = [
   { from: 'serve-api.ps1', to: 'serve-api.ps1', mode: 0o644 },
   { from: 'start-windows-static.bat', to: 'start-windows-static.bat', mode: 0o644 },
   { from: 'serve-site.ps1', to: 'serve-site.ps1', mode: 0o644 },
+  // 环境检查脚本：serve-api.ps1 / serve-site.ps1 会 dot-source 它。
+  // 漏了它启动脚本会直接报"找不到 check-env.ps1"——白名单式打包必须显式列出。
+  { from: 'check-env.ps1', to: 'check-env.ps1', mode: 0o644 },
   { from: 'start-mac.command', to: 'start-mac.command', mode: 0o755 },
   { from: 'start-linux.sh', to: 'start-linux.sh', mode: 0o755 },
   { from: 'serve-site.py', to: 'serve-site.py', mode: 0o755 },
