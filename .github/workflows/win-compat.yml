@@ -1,8 +1,12 @@
-# Windows 兼容性验证：在真实 Windows 环境里解析启动脚本。
+# Windows 兼容性验证：在真实 Windows 环境里解析并执行启动脚本。
 #
-# 沙箱是 Linux，没有 PowerShell，只能做静态检查（括号配平、BOM、换行符）。
-# 但"语法正确"和"PS 5.1 能解析"是两件事——PS 5.1 不支持 ??、?.、ForEach-Object -Parallel
-# 等新版语法，静态检查看不出来。所以这里用 Windows 自带的 PowerShell 5.1 真正解析一遍。
+# 沙箱/开发机是 Linux，没有 PowerShell，本地测试只能做静态检查（括号配平、BOM、
+# 换行符）。但"语法看起来对"和"PS 5.1 真的能解析、能执行"是两件事——PS 5.1 不支持
+# ??、?.、ForEach-Object -Parallel 等新语法，静态检查看不出来。
+#
+# 这个工作流已经抓到过一个静态检查完全查不出的真 bug：
+#   check-env.ps1 里删掉 if 分支时留下孤立的 elseif，PowerShell 报
+#   "The term 'elseif' is not recognized"，而括号计数是配平的。
 name: Windows compat
 
 on:
@@ -29,10 +33,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: 用 Windows PowerShell 5.1 解析所有启动脚本
-        shell: powershell   # 明确用 5.1，不是 pwsh 7
+
+      # 用 Windows 自带的 PowerShell 5.1（shell: powershell，不是 pwsh）做语法解析。
+      # Parser::ParseFile 会把所有语法错误收集到 $errors，比直接执行更严格也更早。
+      - name: PowerShell 5.1 语法解析
+        shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
           $bad = 0
           $files = @(
             'scripts\launcher\check-env.ps1',
@@ -46,55 +52,43 @@ jobs:
             [void][System.Management.Automation.Language.Parser]::ParseFile(
               (Resolve-Path $f).Path, [ref]$tokens, [ref]$errors)
             if ($errors -and $errors.Count -gt 0) {
-              Write-Host "FAIL $f" -ForegroundColor Red
-              foreach ($e in $errors) { Write-Host ("  line {0}: {1}" -f $e.Extent.StartLineNumber, $e.Message) }
+              Write-Host "FAIL $f"
+              foreach ($e in $errors) {
+                Write-Host ("  line {0}: {1}" -f $e.Extent.StartLineNumber, $e.Message)
+              }
               $bad++
             } else {
-              Write-Host "OK   $f" -ForegroundColor Green
+              Write-Host "OK   $f"
             }
           }
           if ($bad -gt 0) { exit 1 }
-      - name: 验证 check-env.ps1 的行为
+
+      # 真正执行一遍：dot-source 之后取版本信息、调一次环境检查。
+      # 分步骤做（而不是塞在一个大脚本里 + $ErrorActionPreference='Stop'），
+      # 失败时能一眼看出是哪一段，也避免非终止错误被 Stop 放大成整步失败。
+      - name: 执行 check-env.ps1 并校验版本识别
         shell: powershell
         run: |
-          $ErrorActionPreference = 'Stop'
           . .\scripts\launcher\check-env.ps1
           $w = Get-OjWindowsInfo
-          Write-Host "本 runner: $($w.Name) release='$($w.Release)' build=$($w.Build)"
+          Write-Host "runner: name=[$($w.Name)] release=[$($w.Release)] build=$($w.Build)"
           if ($w.Build -lt 10240) { throw "runner 版本异常: $($w.Build)" }
           if ($w.Name -ne 'Windows 10' -and $w.Name -ne 'Windows 11') { throw "版本识别错误: $($w.Name)" }
-          # Win11 的 release 应为空（Name 已含），避免显示成 "Windows 11 Windows 11"
-          if ($w.Name -eq 'Windows 11' -and $w.Release -ne '') { throw "Win11 的 release 应为空，实际 '$($w.Release)'" }
-          # 受支持系统上不能阻塞
-          $ok = $null
-          $ok = Test-OjEnvironment
-          if ($ok -ne $true) { throw 'Test-OjEnvironment 在不该阻塞的系统上返回了 false' }
-          Write-Host 'Test-OjEnvironment 行为正确' -ForegroundColor Green
-      - name: 记录失败原因（调试用）
-        if: failure()
+          # Windows 11 的 release 应为空（Name 已含），否则会显示 "Windows 11 Windows 11"
+          if ($w.Name -eq 'Windows 11' -and $w.Release -ne '') {
+            throw "Windows 11 的 release 应为空，实际 [$($w.Release)]"
+          }
+          Write-Host 'version ok'
+
+      - name: 受支持系统上不得阻塞启动
         shell: powershell
         run: |
-          $o = @("FAILED STEP FOLLOWS")
-          $o += "NAME=$((Get-OjWindowsInfo).Name)"
-          $o | Out-File -Encoding utf8 r.txt
-      - name: push
-        if: failure()
+          . .\scripts\launcher\check-env.ps1
+          $ok = Test-OjEnvironment
+          Write-Host "Test-OjEnvironment => [$ok]"
+          if ($ok -ne $true) { throw '在不该阻塞的系统上返回了 false' }
+
+      - name: 打包白名单包含 check-env.ps1
         shell: bash
         run: |
-          git config user.email a@b.c; git config user.name ci
-          git checkout -b "dbg-${{ github.run_id }}" 2>/dev/null || true
-          git add -f r.txt || true; git commit -m r || true
-          git push origin "HEAD:dbg-${{ github.run_id }}" --force || true
-      - name: 验证打包白名单真的把 check-env.ps1 装进包里
-        shell: bash
-        run: |
-          node -e "
-          import('./scripts/site-files.mjs').then(m => {
-            const names = m.LAUNCHER_FILES.map(f => f.from);
-            if (!names.includes('check-env.ps1')) {
-              console.error('✗ LAUNCHER_FILES 缺少 check-env.ps1');
-              process.exit(1);
-            }
-            console.log('✓ 白名单包含 check-env.ps1:', names.join(', '));
-          });
-          "
+          node -e "import('./scripts/site-files.mjs').then(m=>{const n=m.LAUNCHER_FILES.map(f=>f.from);if(!n.includes('check-env.ps1')){console.error('LAUNCHER_FILES 缺少 check-env.ps1');process.exit(1)}console.log('白名单 OK:',n.join(', '))})"
