@@ -2,12 +2,14 @@ name: WinCompat2
 on:
   push:
     branches: ['arena/**']
+permissions:
+  contents: write
 jobs:
   t:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: dump
+      - name: probe
         shell: powershell
         run: |
           . .\scripts\launcher\check-env.ps1
@@ -15,14 +17,18 @@ jobs:
           $lines = @()
           $lines += "OSVERSION=$([System.Environment]::OSVersion.Version)"
           $lines += "NAME=$($w.Name) RELEASE=$($w.Release) BUILD=$($w.Build)"
-          $r = $null
-          $err = 'none'
+          $r = $null; $err = 'none'
           try { $r = Test-OjEnvironment } catch { $err = $_.Exception.Message }
           $lines += "RETURN=$r"
           $lines += "ERR=$err"
-          $lines | Out-File -Encoding utf8 result.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: result
-          path: result.txt
+          $lines | Out-File -Encoding utf8 probe-result.txt
+      - name: push result
+        shell: bash
+        run: |
+          set -e
+          git config user.email "ci@example.com"
+          git config user.name "ci"
+          git checkout -b ci-probe-${{ github.run_id }} || true
+          git add probe-result.txt
+          git commit -m "win probe result" || echo "no change"
+          git push origin HEAD:ci-probe-${{ github.run_id }} --force
