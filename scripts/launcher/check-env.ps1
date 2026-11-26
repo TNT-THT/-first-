@@ -40,7 +40,10 @@ function Get-OjWindowsInfo {
   elseif ($build -ge 7600) { $name = 'Windows 7' }
   # 具体版本号（人话），方便用户对照“设置 → 系统 → 关于”
   $release = ''
-  # Windows 11 的 Name 已经是 'Windows 11'，release 留空避免显示成“Windows 11 Windows 11”
+  # Windows 11 的 Name 已经是 'Windows 11'，release 留空避免显示成“Windows 11 Windows 11”。
+  # 注意：这里的 if 必须有实体分支，不能只留一行注释就直接 elseif——
+  # PowerShell 会报 "The term 'elseif' is not recognized"（这是真实发生过的错误）。
+  if ($build -ge 22000) { }
   elseif ($build -ge 19045) { $release = '22H2' }
   elseif ($build -ge 19044) { $release = '21H2' }
   elseif ($build -ge 19043) { $release = '21H1' }
