@@ -1,0 +1,27 @@
+name: WC5
+on:
+  push:
+    branches: ['arena/**']
+jobs:
+  t:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: dotonly
+        shell: powershell
+        run: |
+          . .\scripts\launcher\check-env.ps1
+          Write-Host "DOT OK"
+      - name: getinfo
+        shell: powershell
+        run: |
+          . .\scripts\launcher\check-env.ps1
+          $w = Get-OjWindowsInfo
+          Write-Host "INFO $($w.Name) [$($w.Release)] $($w.Build)"
+      - name: testenv
+        shell: powershell
+        run: |
+          . .\scripts\launcher\check-env.ps1
+          $r = Test-OjEnvironment
+          Write-Host "RET=$r"
+          if ($r -ne $true) { exit 1 }
