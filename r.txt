@@ -1,0 +1,2 @@
+﻿NAME=Windows 11 REL= B=26100
+RET=True TYPE=Boolean
