@@ -66,19 +66,23 @@ jobs:
       # 真正执行一遍：dot-source 之后取版本信息、调一次环境检查。
       # 分步骤做（而不是塞在一个大脚本里 + $ErrorActionPreference='Stop'），
       # 失败时能一眼看出是哪一段，也避免非终止错误被 Stop 放大成整步失败。
+      # 注意：这一步的 Write-Host/throw 文案**必须用英文**。
+      # Windows PowerShell 5.1 在 GitHub Actions 的控制台下输出中文会直接失败
+      # （代码页不匹配，报 WriteError），与本项目脚本无关——已实测确认：
+      # 同样的脚本，输出英文成功、输出中文失败。脚本自身面向用户的中文保持不变。
       - name: 执行 check-env.ps1 并校验版本识别
         shell: powershell
         run: |
           . .\scripts\launcher\check-env.ps1
           $w = Get-OjWindowsInfo
           Write-Host "runner: name=[$($w.Name)] release=[$($w.Release)] build=$($w.Build)"
-          if ($w.Build -lt 10240) { throw "runner 版本异常: $($w.Build)" }
-          if ($w.Name -ne 'Windows 10' -and $w.Name -ne 'Windows 11') { throw "版本识别错误: $($w.Name)" }
+          if ($w.Build -lt 10240) { throw "unexpected runner build: $($w.Build)" }
+          if ($w.Name -ne 'Windows 10' -and $w.Name -ne 'Windows 11') { throw "version detect failed: $($w.Name)" }
           # Windows 11 的 release 应为空（Name 已含），否则会显示 "Windows 11 Windows 11"
           if ($w.Name -eq 'Windows 11' -and $w.Release -ne '') {
-            throw "Windows 11 的 release 应为空，实际 [$($w.Release)]"
+            throw "Win11 release should be empty, got [$($w.Release)]"
           }
-          Write-Host 'version ok'
+          Write-Host 'version detection ok'
 
       - name: 受支持系统上不得阻塞启动
         shell: powershell
@@ -86,7 +90,7 @@ jobs:
           . .\scripts\launcher\check-env.ps1
           $ok = Test-OjEnvironment
           Write-Host "Test-OjEnvironment => [$ok]"
-          if ($ok -ne $true) { throw '在不该阻塞的系统上返回了 false' }
+          if ($ok -ne $true) { throw 'Test-OjEnvironment returned false on a supported system' }
 
       - name: 打包白名单包含 check-env.ps1
         shell: bash
