@@ -7,21 +7,30 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: dotonly
-        shell: powershell
-        run: |
-          . .\scripts\launcher\check-env.ps1
-          Write-Host "DOT OK"
-      - name: getinfo
+      - name: assert-version
         shell: powershell
         run: |
           . .\scripts\launcher\check-env.ps1
           $w = Get-OjWindowsInfo
-          Write-Host "INFO $($w.Name) [$($w.Release)] $($w.Build)"
-      - name: testenv
+          Write-Host "name=[$($w.Name)] release=[$($w.Release)] build=$($w.Build)"
+          if ($w.Name -eq 'Windows 11' -and $w.Release -ne '') { Write-Host "FAIL rel not empty"; exit 1 }
+          Write-Host "version asserts ok"
+      - name: assert-env
         shell: powershell
         run: |
           . .\scripts\launcher\check-env.ps1
-          $r = Test-OjEnvironment
-          Write-Host "RET=$r"
-          if ($r -ne $true) { exit 1 }
+          $ok = Test-OjEnvironment
+          Write-Host "ok=[$ok] type=$($ok.GetType().FullName)"
+          if ($ok -ne $true) { Write-Host "FAIL not true"; exit 1 }
+          Write-Host "env assert ok"
+      - name: assert-env-with-stop
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . .\scripts\launcher\check-env.ps1
+          $ok = Test-OjEnvironment
+          Write-Host "ok2=[$ok]"
+      - name: assert-list
+        shell: bash
+        run: |
+          node -e "import('./scripts/site-files.mjs').then(m=>{const n=m.LAUNCHER_FILES.map(f=>f.from); if(!n.includes('check-env.ps1')){console.error('missing');process.exit(1)} console.log('whitelist ok:',n.join(','))})"
