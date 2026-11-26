@@ -12,9 +12,17 @@ jobs:
         run: |
           . .\scripts\launcher\check-env.ps1
           $w = Get-OjWindowsInfo
-          Write-Output "OSVERSION=$([System.Environment]::OSVersion.Version)"
-          Write-Output "NAME=$($w.Name) RELEASE=$($w.Release) BUILD=$($w.Build)"
+          $lines = @()
+          $lines += "OSVERSION=$([System.Environment]::OSVersion.Version)"
+          $lines += "NAME=$($w.Name) RELEASE=$($w.Release) BUILD=$($w.Build)"
           $r = $null
-          try { $r = Test-OjEnvironment } catch { Write-Output "THROW: $($_.Exception.Message)" }
-          Write-Output "RETURN=$r"
-          Write-Output "PWDIR=$PSScriptRoot"
+          $err = 'none'
+          try { $r = Test-OjEnvironment } catch { $err = $_.Exception.Message }
+          $lines += "RETURN=$r"
+          $lines += "ERR=$err"
+          $lines | Out-File -Encoding utf8 result.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: result
+          path: result.txt
